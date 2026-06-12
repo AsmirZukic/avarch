@@ -1,0 +1,49 @@
+[project]
+name = "avarch"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.18.4",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "rich>=15.0.0",
+    "sqlmodel>=0.0.38",
+    "structlog>=26.1.0",
+    "textual>=8.2.7",
+    "typer>=0.26.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+avarch = "avarch.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "ruff",
+  "pyright",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "SIM",
+]
