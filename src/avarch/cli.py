@@ -23,6 +23,14 @@ from avarch.db import create_db_engine
 from avarch.db_migrations import get_current_revision, upgrade_database
 from avarch.logging import configure_logging
 from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.models.plan import TranscodePlan
+from avarch.planner import (
+    PlanArtifactConflictError,
+    PlanningError,
+    build_plan,
+    load_planning_context,
+    write_plan_artifacts,
+)
 from avarch.probe import (
     ProbeError,
     format_probe_summary,
@@ -375,6 +383,40 @@ def inspect_file(
     typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
 
 
+@app.command("plan")
+def plan_file(
+    file: Annotated[Path, typer.Argument(help="Tracked media file to plan.")],
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+    data_dir = resolve_data_dir(app_config, config)
+
+    file_path = _resolve_media_path(file)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session:
+            context = load_planning_context(
+                session,
+                input_path=file_path,
+                profile_name=profile,
+                config=app_config,
+            )
+            plan = build_plan(context, data_dir=data_dir)
+        write_plan_artifacts(plan)
+    except PlanArtifactConflictError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except PlanningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    _echo_plan_summary(plan)
+
+
 @app.command()
 def tui(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
@@ -445,6 +487,34 @@ def _echo_untracked_file() -> None:
     typer.echo("Run avarch scan for the containing root first.")
 
 
+def _echo_plan_summary(plan: TranscodePlan) -> None:
+    typed_plan = plan
+    subtitle_indexes = [
+        str(stream.source_stream_index) for stream in typed_plan.subtitles.streams
+    ]
+    subtitles = ", ".join(subtitle_indexes) if subtitle_indexes else "none"
+
+    typer.echo(f"Plan hash: {typed_plan.plan_hash}")
+    typer.echo(f"Profile: {typed_plan.profile_name}")
+    typer.echo(f"Input: {typed_plan.input_path}")
+    typer.echo(f"Output: {typed_plan.output_path}")
+    typer.echo(f"Artifact dir: {typed_plan.artifacts.artifact_dir}")
+    typer.echo(
+        "Video: "
+        f"[{typed_plan.video.source_stream_index}] {typed_plan.video.source_codec} "
+        f"{typed_plan.video.source_width}x{typed_plan.video.source_height}"
+    )
+    typer.echo(
+        "Audio: "
+        f"[{typed_plan.audio.source_stream_index}] "
+        f"{_display_optional(typed_plan.audio.source_codec)} "
+        f"{_display_optional(typed_plan.audio.source_language)} -> "
+        f"{typed_plan.audio.target_codec} {typed_plan.audio.target_bitrate} "
+        f"{typed_plan.audio.target_channels}ch"
+    )
+    typer.echo(f"Subtitles: {subtitles}")
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -477,6 +547,10 @@ def _format_size(size_bytes: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size_bytes} B"
+
+
+def _display_optional(value: str | None) -> str:
+    return value if value is not None else "unknown"
 
 
 def _status_value(status: MediaFileStatus | str) -> str:
