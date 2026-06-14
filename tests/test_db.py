@@ -36,7 +36,7 @@ def test_insert_media_file(tmp_path: Path) -> None:
             mtime_ns=456,
             device_id=1,
             inode=2,
-            content_key="key",
+            fs_fingerprint="key",
             last_seen_at=datetime.now(UTC),
             status=MediaFileStatus.ADDED,
         )
@@ -62,7 +62,7 @@ def test_insert_complete_media_file(tmp_path: Path) -> None:
                 mtime_ns=456,
                 device_id=789,
                 inode=101112,
-                content_key="abc123",
+                fs_fingerprint="abc123",
                 discovered_at=now,
                 last_seen_at=now,
                 status=MediaFileStatus.PRESENT,
@@ -72,7 +72,7 @@ def test_insert_complete_media_file(tmp_path: Path) -> None:
 
         stored = session.exec(select(MediaFile)).one()
 
-    assert stored.content_key == "abc123"
+    assert stored.fs_fingerprint == "abc123"
     assert stored.status == MediaFileStatus.PRESENT
 
 
@@ -83,7 +83,7 @@ def test_media_file_path_is_unique(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session:
-        for content_key in ("one", "two"):
+        for fs_fingerprint in ("one", "two"):
             session.add(
                 MediaFile(
                     path="/media/duplicate.mkv",
@@ -91,7 +91,7 @@ def test_media_file_path_is_unique(tmp_path: Path) -> None:
                     mtime_ns=456,
                     device_id=789,
                     inode=101112,
-                    content_key=content_key,
+                    fs_fingerprint=fs_fingerprint,
                     discovered_at=now,
                     last_seen_at=now,
                     status=MediaFileStatus.ADDED,
@@ -116,7 +116,7 @@ def test_media_file_status_round_trips(tmp_path: Path) -> None:
                 mtime_ns=456,
                 device_id=789,
                 inode=101112,
-                content_key="status-key",
+                fs_fingerprint="status-key",
                 discovered_at=now,
                 last_seen_at=now,
                 status=MediaFileStatus.CHANGED,
@@ -214,7 +214,7 @@ def _media_file(path: str, now: datetime) -> MediaFile:
         mtime_ns=456,
         device_id=789,
         inode=101112,
-        content_key=f"key:{path}",
+        fs_fingerprint=f"key:{path}",
         discovered_at=now,
         last_seen_at=now,
         status=MediaFileStatus.PRESENT,

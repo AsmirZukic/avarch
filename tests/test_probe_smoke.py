@@ -69,7 +69,7 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     after = _media_file(config_path, media_file)
     assert after.status == before.status
-    assert after.content_key == before.content_key
+    assert after.fs_fingerprint == before.fs_fingerprint
     assert after.last_seen_at == before.last_seen_at
 
     inspect_result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])

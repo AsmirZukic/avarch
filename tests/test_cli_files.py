@@ -114,7 +114,7 @@ def _insert_media_file(config_path: Path, path: str, status: MediaFileStatus) ->
                 mtime_ns=123,
                 device_id=456,
                 inode=789,
-                content_key=f"key:{path}",
+                fs_fingerprint=f"key:{path}",
                 discovered_at=now,
                 last_seen_at=now,
                 status=status,

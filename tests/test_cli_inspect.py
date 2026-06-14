@@ -29,21 +29,22 @@ def test_inspect_command_prints_latest_probe(tmp_path: Path) -> None:
     assert "Container: matroska,webm" in result.output
 
 
-def test_inspect_uses_newest_probe_result(tmp_path: Path) -> None:
+def test_inspect_uses_latest_probe_pointer(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _insert_media_file(config_path, tmp_path / "movie.mkv")
-    _insert_probe(config_path, media_file, NormalizedProbe(duration_seconds=1.0))
+    first_probe_id = _insert_probe(config_path, media_file, NormalizedProbe(duration_seconds=1.0))
     _insert_probe(
         config_path,
         media_file,
         NormalizedProbe(duration_seconds=2.0),
         created_at=datetime(2026, 6, 14, tzinfo=UTC) + timedelta(seconds=1),
     )
+    _set_latest_probe_id(config_path, media_file, first_probe_id)
 
     result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert "Duration: 2 s" in result.output
+    assert "Duration: 1 s" in result.output
 
 
 def test_inspect_does_not_execute_ffprobe(
@@ -127,7 +128,7 @@ def _insert_media_file(
                 mtime_ns=stat_result.st_mtime_ns,
                 device_id=stat_result.st_dev,
                 inode=stat_result.st_ino,
-                content_key="key",
+                fs_fingerprint="key",
                 discovered_at=now,
                 last_seen_at=now,
                 status=status,
@@ -143,19 +144,32 @@ def _insert_probe(
     normalized_probe: NormalizedProbe,
     *,
     created_at: datetime = datetime(2026, 6, 14, tzinfo=UTC),
-) -> None:
+) -> int:
     engine = _engine(config_path)
     with Session(engine) as session:
         stored_media_file = session.exec(
             select(MediaFile).where(MediaFile.path == str(media_file.resolve()))
         ).one()
-        store_probe_result(
+        probe_result = store_probe_result(
             session,
             media_file=stored_media_file,
             raw_probe={"format": {}},
             normalized_probe=normalized_probe,
             created_at=created_at,
         )
+        session.commit()
+        session.refresh(probe_result)
+        return probe_result.id or 0
+
+
+def _set_latest_probe_id(config_path: Path, media_file: Path, probe_result_id: int) -> None:
+    engine = _engine(config_path)
+    with Session(engine) as session:
+        stored_media_file = session.exec(
+            select(MediaFile).where(MediaFile.path == str(media_file.resolve()))
+        ).one()
+        stored_media_file.latest_probe_id = probe_result_id
+        session.add(stored_media_file)
         session.commit()
 
 

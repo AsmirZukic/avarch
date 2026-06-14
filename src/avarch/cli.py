@@ -26,7 +26,7 @@ from avarch.models.db import MediaFile, MediaFileStatus
 from avarch.probe import (
     ProbeError,
     format_probe_summary,
-    get_latest_probe_result,
+    get_canonical_probe_result,
     normalize_probe,
     parse_normalized_probe_json,
     run_ffprobe,
@@ -361,7 +361,7 @@ def inspect_file(
             typer.echo("File is not present in the media inventory.")
             raise typer.Exit(1)
 
-        probe_result = get_latest_probe_result(session, media_file_id=media_file.id)
+        probe_result = get_canonical_probe_result(session, media_file)
         if probe_result is None:
             typer.echo("No stored probe result exists for this file.")
             raise typer.Exit(1)

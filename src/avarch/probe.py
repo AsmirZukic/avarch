@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import structlog
 from pydantic import ValidationError
-from sqlmodel import Session, desc, select
+from sqlmodel import Session
 
 from avarch.models.db import MediaFile, ProbeResult
 from avarch.models.probe import (
@@ -214,24 +214,36 @@ def store_probe_result(
         ffprobe_json=canonical_json(raw_probe),
         normalized_json=canonical_json(normalized_probe),
         probe_hash=build_probe_hash(normalized_probe),
+        source_fs_fingerprint=media_file.fs_fingerprint,
         created_at=created_at,
     )
     session.add(probe_result)
+    session.flush()
+    if probe_result.id is None:
+        raise RuntimeError("probe result id was not assigned after flush")
+
+    media_file.latest_probe_id = probe_result.id
+    session.add(media_file)
     return probe_result
 
 
-def get_latest_probe_result(
+def get_canonical_probe_result(
     session: Session,
-    *,
-    media_file_id: int,
+    media_file: MediaFile,
 ) -> ProbeResult | None:
-    statement = (
-        select(ProbeResult)
-        .where(ProbeResult.media_file_id == media_file_id)
-        .order_by(desc(ProbeResult.created_at), desc(ProbeResult.id))
-        .limit(1)
-    )
-    return session.exec(statement).first()
+    if media_file.id is None or media_file.latest_probe_id is None:
+        return None
+
+    probe_result = session.get(ProbeResult, media_file.latest_probe_id)
+    if probe_result is None:
+        return None
+    if probe_result.media_file_id != media_file.id:
+        return None
+    if probe_result.source_fs_fingerprint is None:
+        return None
+    if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
+        return None
+    return probe_result
 
 
 def format_probe_summary(path: Path, normalized: NormalizedProbe, probe_hash: str) -> str:

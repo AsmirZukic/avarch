@@ -26,10 +26,15 @@ class MediaFile(SQLModel, table=True):
     mtime_ns: int
     device_id: int
     inode: int
-    content_key: str = Field(index=True)
+    fs_fingerprint: str = Field(index=True)
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: MediaFileStatus = Field(sa_column=Column(String(), nullable=False))
+    latest_probe_id: int | None = Field(
+        default=None,
+        foreign_key="proberesult.id",
+        index=True,
+    )
 
 
 class ProbeResult(SQLModel, table=True):
@@ -38,4 +43,5 @@ class ProbeResult(SQLModel, table=True):
     ffprobe_json: str
     normalized_json: str
     probe_hash: str = Field(index=True)
+    source_fs_fingerprint: str | None = Field(default=None)
     created_at: datetime

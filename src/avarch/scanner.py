@@ -23,7 +23,7 @@ class FileSnapshot:
     mtime_ns: int
     device_id: int
     inode: int
-    content_key: str
+    fs_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ class ScanResult:
     unchanged: int
 
 
-def build_content_key(
+def build_fs_fingerprint(
     path: Path,
     *,
     size_bytes: int,
@@ -43,9 +43,14 @@ def build_content_key(
     device_id: int,
     inode: int,
 ) -> str:
+    """Cheap filesystem fingerprint derived from path and stat metadata.
+
+    This is used for change detection and probe freshness. It is not a hash
+    of the file contents and must not be treated as a content-integrity proof.
+    """
     payload = "\n".join(
         (
-            "v1",
+            "fs-v1",
             str(path.resolve()),
             str(size_bytes),
             str(mtime_ns),
@@ -65,7 +70,7 @@ def create_file_snapshot(path: Path) -> FileSnapshot:
         mtime_ns=stat_result.st_mtime_ns,
         device_id=stat_result.st_dev,
         inode=stat_result.st_ino,
-        content_key=build_content_key(
+        fs_fingerprint=build_fs_fingerprint(
             absolute_path,
             size_bytes=stat_result.st_size,
             mtime_ns=stat_result.st_mtime_ns,
@@ -140,7 +145,7 @@ def update_inventory(
                     mtime_ns=snapshot.mtime_ns,
                     device_id=snapshot.device_id,
                     inode=snapshot.inode,
-                    content_key=snapshot.content_key,
+                    fs_fingerprint=snapshot.fs_fingerprint,
                     discovered_at=scanned_at,
                     last_seen_at=scanned_at,
                     status=MediaFileStatus.ADDED,
@@ -158,7 +163,7 @@ def update_inventory(
             media_file.mtime_ns = snapshot.mtime_ns
             media_file.device_id = snapshot.device_id
             media_file.inode = snapshot.inode
-            media_file.content_key = snapshot.content_key
+            media_file.fs_fingerprint = snapshot.fs_fingerprint
             media_file.last_seen_at = scanned_at
             media_file.status = MediaFileStatus.CHANGED
             changed += 1
@@ -187,7 +192,7 @@ def _metadata_matches(media_file: MediaFile, snapshot: FileSnapshot) -> bool:
         and media_file.mtime_ns == snapshot.mtime_ns
         and media_file.device_id == snapshot.device_id
         and media_file.inode == snapshot.inode
-        and media_file.content_key == snapshot.content_key
+        and media_file.fs_fingerprint == snapshot.fs_fingerprint
     )
 
 

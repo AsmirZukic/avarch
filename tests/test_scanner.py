@@ -3,22 +3,22 @@ from pathlib import Path
 
 import pytest
 
-from avarch.scanner import ScanError, build_content_key, create_file_snapshot, scan_root
+from avarch.scanner import ScanError, build_fs_fingerprint, create_file_snapshot, scan_root
 
 
-def test_content_key_is_deterministic(tmp_path: Path) -> None:
+def test_fs_fingerprint_is_deterministic(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"abc")
     snapshot = create_file_snapshot(path)
 
-    first = build_content_key(
+    first = build_fs_fingerprint(
         path,
         size_bytes=snapshot.size_bytes,
         mtime_ns=snapshot.mtime_ns,
         device_id=snapshot.device_id,
         inode=snapshot.inode,
     )
-    second = build_content_key(
+    second = build_fs_fingerprint(
         path,
         size_bytes=snapshot.size_bytes,
         mtime_ns=snapshot.mtime_ns,
@@ -29,12 +29,12 @@ def test_content_key_is_deterministic(tmp_path: Path) -> None:
     assert first == second
 
 
-def test_content_key_changes_when_size_changes(tmp_path: Path) -> None:
+def test_fs_fingerprint_changes_when_size_changes(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"abc")
     snapshot = create_file_snapshot(path)
 
-    changed = build_content_key(
+    changed = build_fs_fingerprint(
         path,
         size_bytes=snapshot.size_bytes + 1,
         mtime_ns=snapshot.mtime_ns,
@@ -42,15 +42,15 @@ def test_content_key_changes_when_size_changes(tmp_path: Path) -> None:
         inode=snapshot.inode,
     )
 
-    assert changed != snapshot.content_key
+    assert changed != snapshot.fs_fingerprint
 
 
-def test_content_key_changes_when_mtime_changes(tmp_path: Path) -> None:
+def test_fs_fingerprint_changes_when_mtime_changes(tmp_path: Path) -> None:
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"abc")
     snapshot = create_file_snapshot(path)
 
-    changed = build_content_key(
+    changed = build_fs_fingerprint(
         path,
         size_bytes=snapshot.size_bytes,
         mtime_ns=snapshot.mtime_ns + 1,
@@ -58,7 +58,7 @@ def test_content_key_changes_when_mtime_changes(tmp_path: Path) -> None:
         inode=snapshot.inode,
     )
 
-    assert changed != snapshot.content_key
+    assert changed != snapshot.fs_fingerprint
 
 
 def test_file_snapshot_contains_stat_metadata(tmp_path: Path) -> None:
