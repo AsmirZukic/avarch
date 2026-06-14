@@ -140,7 +140,7 @@ def test_migration_preserves_existing_fingerprint_values(tmp_path: Path) -> None
     db_path = tmp_path / "avarch.db"
     database_url = f"sqlite:///{db_path}"
     config = _alembic_config(database_url)
-    command.upgrade(config, "b3f6c2a51e8d")
+    command.upgrade(config, "41f0d8b4b5e1")
 
     engine = create_db_engine(database_url)
     with engine.begin() as connection:
@@ -154,7 +154,7 @@ def test_migration_preserves_existing_fingerprint_values(tmp_path: Path) -> None
                     discovered_at,
                     device_id,
                     inode,
-                    fs_fingerprint,
+                    content_key,
                     last_seen_at,
                     status
                 )
@@ -165,7 +165,7 @@ def test_migration_preserves_existing_fingerprint_values(tmp_path: Path) -> None
                     :discovered_at,
                     :device_id,
                     :inode,
-                    :fs_fingerprint,
+                    :content_key,
                     :last_seen_at,
                     :status
                 )
@@ -178,7 +178,7 @@ def test_migration_preserves_existing_fingerprint_values(tmp_path: Path) -> None
                 "discovered_at": "2026-06-14 00:00:00",
                 "device_id": 1,
                 "inode": 2,
-                "fs_fingerprint": "key",
+                "content_key": "key",
                 "last_seen_at": "2026-06-14 00:00:00",
                 "status": "present",
             },
@@ -231,7 +231,7 @@ def test_legacy_probe_rows_have_no_source_fingerprint(tmp_path: Path) -> None:
                     discovered_at,
                     device_id,
                     inode,
-                    fs_fingerprint,
+                    content_key,
                     last_seen_at,
                     status
                 )
@@ -242,7 +242,7 @@ def test_legacy_probe_rows_have_no_source_fingerprint(tmp_path: Path) -> None:
                     :discovered_at,
                     :device_id,
                     :inode,
-                    :fs_fingerprint,
+                    :content_key,
                     :last_seen_at,
                     :status
                 )
@@ -255,7 +255,7 @@ def test_legacy_probe_rows_have_no_source_fingerprint(tmp_path: Path) -> None:
                 "discovered_at": "2026-06-14 00:00:00",
                 "device_id": 1,
                 "inode": 2,
-                "fs_fingerprint": "key",
+                "content_key": "key",
                 "last_seen_at": "2026-06-14 00:00:00",
                 "status": "present",
             },
@@ -288,6 +288,58 @@ def test_legacy_probe_rows_have_no_source_fingerprint(tmp_path: Path) -> None:
 
     assert probe_result["source_fs_fingerprint"] is None
     assert media_file["latest_probe_id"] is None
+
+
+def test_migration_upgrades_legacy_content_key_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+    config = _alembic_config(database_url)
+    command.upgrade(config, "41f0d8b4b5e1")
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    inspector = inspect(engine)
+    media_columns = {column["name"] for column in inspector.get_columns("mediafile")}
+    probe_columns = {column["name"] for column in inspector.get_columns("proberesult")}
+    indexes = {index["name"] for index in inspector.get_indexes("mediafile")}
+
+    assert "content_key" not in media_columns
+    assert "fs_fingerprint" in media_columns
+    assert "latest_probe_id" in media_columns
+    assert "source_fs_fingerprint" in probe_columns
+    assert "ix_mediafile_fs_fingerprint" in indexes
+    assert "ix_mediafile_latest_probe_id" in indexes
+
+
+def test_migration_recovers_after_partial_source_fingerprint_add(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+    config = _alembic_config(database_url)
+    command.upgrade(config, "41f0d8b4b5e1")
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text("ALTER TABLE proberesult ADD COLUMN source_fs_fingerprint VARCHAR")
+        )
+
+    upgrade_database(database_url)
+
+    inspector = inspect(engine)
+    media_columns = {column["name"] for column in inspector.get_columns("mediafile")}
+    probe_columns = [
+        column["name"] for column in inspector.get_columns("proberesult")
+    ]
+    with engine.connect() as connection:
+        revision = connection.execute(
+            sa.text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+
+    assert "content_key" not in media_columns
+    assert "fs_fingerprint" in media_columns
+    assert "latest_probe_id" in media_columns
+    assert probe_columns.count("source_fs_fingerprint") == 1
+    assert revision == "7d56d2f55f31"
 
 
 def _alembic_config(database_url: str) -> Config:
