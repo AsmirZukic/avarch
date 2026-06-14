@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import AppMeta, MediaFile, MediaFileStatus
+from avarch.models.db import AppMeta, MediaFile, MediaFileStatus, ProbeResult
 
 
 def test_create_db_schema(tmp_path: Path) -> None:
@@ -127,3 +127,95 @@ def test_media_file_status_round_trips(tmp_path: Path) -> None:
         stored = session.exec(select(MediaFile)).one()
 
     assert stored.status == MediaFileStatus.CHANGED
+
+
+def test_insert_probe_result_for_media_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        media_file = _media_file("/media/probed.mkv", now)
+        session.add(media_file)
+        session.commit()
+        session.refresh(media_file)
+        media_file_id = media_file.id or 0
+
+        session.add(
+            ProbeResult(
+                media_file_id=media_file_id,
+                ffprobe_json="{}",
+                normalized_json="{}",
+                probe_hash="hash",
+                created_at=now,
+            )
+        )
+        session.commit()
+
+        stored = session.exec(select(ProbeResult)).one()
+
+    assert stored.media_file_id == media_file_id
+
+
+def test_probe_result_requires_existing_media_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    create_db_schema(engine)
+
+    with Session(engine) as session:
+        session.add(
+            ProbeResult(
+                media_file_id=999,
+                ffprobe_json="{}",
+                normalized_json="{}",
+                probe_hash="hash",
+                created_at=datetime.now(UTC),
+            )
+        )
+
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_multiple_probe_results_can_exist_for_one_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        media_file = _media_file("/media/multiple.mkv", now)
+        session.add(media_file)
+        session.commit()
+        session.refresh(media_file)
+
+        for probe_hash in ("one", "two"):
+            session.add(
+                ProbeResult(
+                    media_file_id=media_file.id or 0,
+                    ffprobe_json="{}",
+                    normalized_json="{}",
+                    probe_hash=probe_hash,
+                    created_at=now,
+                )
+            )
+        session.commit()
+
+        rows = session.exec(select(ProbeResult)).all()
+
+    assert len(rows) == 2
+
+
+def _media_file(path: str, now: datetime) -> MediaFile:
+    return MediaFile(
+        path=path,
+        size_bytes=123,
+        mtime_ns=456,
+        device_id=789,
+        inode=101112,
+        content_key=f"key:{path}",
+        discovered_at=now,
+        last_seen_at=now,
+        status=MediaFileStatus.PRESENT,
+    )

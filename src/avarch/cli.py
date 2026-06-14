@@ -23,6 +23,15 @@ from avarch.db import create_db_engine
 from avarch.db_migrations import get_current_revision, upgrade_database
 from avarch.logging import configure_logging
 from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.probe import (
+    ProbeError,
+    format_probe_summary,
+    get_latest_probe_result,
+    normalize_probe,
+    parse_normalized_probe_json,
+    run_ffprobe,
+    store_probe_result,
+)
 from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.tui.app import AvarchTuiApp
 
@@ -276,6 +285,96 @@ def files(
         )
 
 
+@app.command("probe")
+def probe_file(
+    file: Annotated[Path, typer.Argument(help="Tracked media file to probe.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    file_path = _resolve_media_path(file)
+    if not file_path.exists():
+        typer.echo(f"File does not exist: {file_path}")
+        raise typer.Exit(1)
+    if not file_path.is_file():
+        typer.echo(f"Path is not a regular file: {file_path}")
+        raise typer.Exit(1)
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        media_file = _get_media_file(session, file_path)
+        if media_file is None:
+            _echo_untracked_file()
+            raise typer.Exit(1)
+        if _status_value(media_file.status) == MediaFileStatus.MISSING.value:
+            typer.echo("File is marked missing in the media inventory.")
+            typer.echo("Run avarch scan for the containing root first.")
+            raise typer.Exit(1)
+
+        try:
+            raw_probe = run_ffprobe(file_path)
+            normalized_probe = normalize_probe(raw_probe)
+            probe_result = store_probe_result(
+                session,
+                media_file=media_file,
+                raw_probe=raw_probe,
+                normalized_probe=normalized_probe,
+                created_at=_utc_now(),
+            )
+            session.commit()
+            session.refresh(probe_result)
+        except ProbeError as exc:
+            session.rollback()
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+
+    typer.echo(
+        format_probe_summary(
+            file_path,
+            normalized_probe,
+            probe_result.probe_hash,
+        )
+    )
+
+
+@app.command("inspect")
+def inspect_file(
+    file: Annotated[Path, typer.Argument(help="Tracked media file to inspect.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    file_path = _resolve_media_path(file)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        media_file = _get_media_file(session, file_path)
+        if media_file is None:
+            _echo_untracked_file()
+            raise typer.Exit(1)
+        if media_file.id is None:
+            typer.echo("File is not present in the media inventory.")
+            raise typer.Exit(1)
+
+        probe_result = get_latest_probe_result(session, media_file_id=media_file.id)
+        if probe_result is None:
+            typer.echo("No stored probe result exists for this file.")
+            raise typer.Exit(1)
+
+        try:
+            normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
+        except ProbeError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+
+    typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
+
+
 @app.command()
 def tui(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
@@ -330,6 +429,20 @@ def _resolve_cli_path(path: Path) -> Path:
         return Path(original_pwd) / path
 
     return path
+
+
+def _resolve_media_path(path: Path) -> Path:
+    return _resolve_cli_path(path).resolve()
+
+
+def _get_media_file(session: Session, path: Path) -> MediaFile | None:
+    statement = select(MediaFile).where(MediaFile.path == str(path))
+    return session.exec(statement).first()
+
+
+def _echo_untracked_file() -> None:
+    typer.echo("File is not present in the media inventory.")
+    typer.echo("Run avarch scan for the containing root first.")
 
 
 def _utc_now() -> datetime:

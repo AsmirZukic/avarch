@@ -30,3 +30,12 @@ class MediaFile(SQLModel, table=True):
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: MediaFileStatus = Field(sa_column=Column(String(), nullable=False))
+
+
+class ProbeResult(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    media_file_id: int = Field(foreign_key="mediafile.id", index=True)
+    ffprobe_json: str
+    normalized_json: str
+    probe_hash: str = Field(index=True)
+    created_at: datetime
