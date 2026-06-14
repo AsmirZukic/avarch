@@ -27,6 +27,12 @@ class PlanningContext:
     profile: EncodingProfile
 
 
+@dataclass(frozen=True, slots=True)
+class ProfileMatchResult:
+    matched: bool
+    reasons: tuple[str, ...]
+
+
 def parse_encoder_args(value: str) -> list[str]:
     return shlex.split(value)
 
@@ -90,3 +96,22 @@ def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
     return status
+
+
+def match_profile(
+    profile: EncodingProfile,
+    probe: NormalizedProbe,
+) -> ProfileMatchResult:
+    if not probe.video_streams:
+        return ProfileMatchResult(False, ("no video stream",))
+
+    primary_video = min(probe.video_streams, key=lambda stream: stream.index)
+    if primary_video.codec is None:
+        return ProfileMatchResult(False, ("primary video codec is missing",))
+
+    source_codec = primary_video.codec.strip().lower()
+    blocked_codecs = {codec.strip().lower() for codec in profile.match.video_codec_not}
+    if source_codec in blocked_codecs:
+        return ProfileMatchResult(False, (f"video codec is excluded: {source_codec}",))
+
+    return ProfileMatchResult(True, ())

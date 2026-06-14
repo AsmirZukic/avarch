@@ -6,11 +6,11 @@ import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.config import AppConfig
+from avarch.config import AppConfig, EncodingProfile
 from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.models.probe import NormalizedProbe, VideoStream
-from avarch.planner import PlanningError, load_planning_context
+from avarch.planner import PlanningError, load_planning_context, match_profile
 from avarch.probe import build_probe_hash, store_probe_result
 from avarch.serialization import canonical_json
 
@@ -186,6 +186,43 @@ def test_context_does_not_fallback_to_other_probe_rows(tmp_path: Path) -> None:
         )
 
 
+def test_profile_accepts_h264() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec("h264"))
+
+    assert result.matched is True
+
+
+def test_profile_accepts_hevc() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec("hevc"))
+
+    assert result.matched is True
+
+
+def test_profile_rejects_av1() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec("av1"))
+
+    assert result.matched is False
+
+
+def test_matching_is_case_insensitive() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec("AV1"))
+
+    assert result.matched is False
+
+
+def test_matching_rejects_missing_codec() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec(None))
+
+    assert result.matched is False
+    assert result.reasons
+
+
+def test_rejection_contains_reason() -> None:
+    result = match_profile(_profile(), _probe_with_video_codec("av1"))
+
+    assert result.reasons == ("video codec is excluded: av1",)
+
+
 def _engine(tmp_path: Path) -> Engine:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
@@ -316,6 +353,14 @@ def _config() -> AppConfig:
             }
         }
     )
+
+
+def _profile() -> EncodingProfile:
+    return _config().profiles["av1_1080p_sdr"]
+
+
+def _probe_with_video_codec(codec: str | None) -> NormalizedProbe:
+    return NormalizedProbe(video_streams=[VideoStream(index=0, codec=codec)])
 
 
 def _now() -> datetime:
