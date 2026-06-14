@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 import structlog
 import typer
 from sqlalchemy import inspect
+from sqlmodel import Session, select
 
 from avarch import __version__
 from avarch.config import (
@@ -20,6 +22,8 @@ from avarch.config import (
 from avarch.db import create_db_engine
 from avarch.db_migrations import get_current_revision, upgrade_database
 from avarch.logging import configure_logging
+from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.tui.app import AvarchTuiApp
 
 log = structlog.get_logger(__name__)
@@ -53,6 +57,10 @@ LogFormatOption = Annotated[
     Literal["console", "json"] | None,
     typer.Option("--log-format", help="Override configured log format."),
 ]
+RootsArgument = Annotated[
+    list[Path] | None,
+    typer.Argument(help="Media roots to scan."),
+]
 
 
 @app.callback()
@@ -67,8 +75,7 @@ def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False)
         typer.echo(f"Config already exists: {config}")
         raise typer.Exit(1)
 
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+    _write_default_config(config)
 
     app_config = load_config(config)
     configure_logging(app_config.logging.level, app_config.logging.format)
@@ -179,6 +186,97 @@ def doctor(
 
 
 @app.command()
+def scan(
+    roots: RootsArgument = None,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    roots_to_scan = list(roots or app_config.scanner.roots)
+    if not roots_to_scan:
+        typer.echo("No scan roots provided or configured.")
+        raise typer.Exit(1)
+
+    engine = create_db_engine(database_url)
+    results: list[ScanResult] = []
+    for root in roots_to_scan:
+        root = _resolve_cli_path(root)
+        log.info("scan_started", root=str(root))
+        try:
+            snapshots = scan_root(
+                root,
+                extensions=app_config.scanner.extensions,
+                exclude_directories=app_config.scanner.exclude_directories,
+            )
+            with Session(engine) as session, session.begin():
+                result = update_inventory(
+                    session,
+                    root=root,
+                    snapshots=snapshots,
+                    scanned_at=_utc_now(),
+                )
+            results.append(result)
+        except ScanError as exc:
+            log.error("scan_failed", root=str(root), reason=str(exc))
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        log.info("scan_completed", root=str(root))
+        _echo_scan_result(result)
+
+    if len(results) > 1:
+        typer.echo("Total")
+        _echo_scan_counts(
+            added=sum(result.added for result in results),
+            changed=sum(result.changed for result in results),
+            missing=sum(result.missing for result in results),
+            unchanged=sum(result.unchanged for result in results),
+        )
+
+    typer.echo("Scan complete.")
+
+
+@app.command()
+def files(
+    changed: Annotated[
+        bool,
+        typer.Option("--changed", help="Show added, changed, and missing files only."),
+    ] = False,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        statement = select(MediaFile).order_by(MediaFile.path)
+        media_files = list(session.exec(statement).all())
+
+    if changed:
+        media_files = [
+            media_file
+            for media_file in media_files
+            if _status_value(media_file.status)
+            in {
+                MediaFileStatus.ADDED.value,
+                MediaFileStatus.CHANGED.value,
+                MediaFileStatus.MISSING.value,
+            }
+        ]
+
+    typer.echo("STATUS   SIZE        PATH")
+    for media_file in media_files:
+        typer.echo(
+            f"{_status_value(media_file.status):<8} {_format_size(media_file.size_bytes):>10}  "
+            f"{media_file.path}"
+        )
+
+
+@app.command()
 def tui(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
@@ -201,10 +299,26 @@ def _doctor_fail(check: str, reason: str) -> None:
 
 
 def _load_and_configure(config: Path) -> AppConfig:
+    config_created = False
+    if not config.exists():
+        _write_default_config(config)
+        config_created = True
+
     app_config = load_config(config)
     configure_logging(app_config.logging.level, app_config.logging.format)
+    if config_created:
+        log.info("config_created", path=str(config))
     log.info("config_loaded", path=str(config))
+
+    data_dir = resolve_data_dir(app_config, config)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
     return app_config
+
+
+def _write_default_config(config: Path) -> None:
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
 
 
 def _resolve_cli_path(path: Path) -> Path:
@@ -216,6 +330,46 @@ def _resolve_cli_path(path: Path) -> Path:
         return Path(original_pwd) / path
 
     return path
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _echo_scan_result(result: ScanResult) -> None:
+    typer.echo(f"Scanning {result.root}")
+    _echo_scan_counts(
+        added=result.added,
+        changed=result.changed,
+        missing=result.missing,
+        unchanged=result.unchanged,
+    )
+    typer.echo("")
+
+
+def _echo_scan_counts(*, added: int, changed: int, missing: int, unchanged: int) -> None:
+    typer.echo(f"Added:     {added}")
+    typer.echo(f"Changed:   {changed}")
+    typer.echo(f"Missing:   {missing}")
+    typer.echo(f"Unchanged: {unchanged}")
+
+
+def _format_size(size_bytes: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    size = float(size_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size_bytes} B"
+
+
+def _status_value(status: MediaFileStatus | str) -> str:
+    if isinstance(status, MediaFileStatus):
+        return status.value
+    return status
 
 
 app.add_typer(db_app, name="db")
