@@ -22,6 +22,7 @@ from avarch.models.probe import (
     SubtitleStream,
     VideoStream,
 )
+from avarch.serialization import canonical_json
 
 log = structlog.get_logger(__name__)
 
@@ -184,12 +185,6 @@ def normalize_probe(raw: Mapping[str, Any]) -> NormalizedProbe:
         )
     except ValidationError as exc:
         raise ProbeNormalizationError("Unable to normalize ffprobe metadata") from exc
-
-
-def canonical_json(value: Any) -> str:
-    if isinstance(value, NormalizedProbe):
-        value = value.model_dump(mode="json")
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def build_probe_hash(normalized: NormalizedProbe) -> str:

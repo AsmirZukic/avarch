@@ -1,9 +1,5 @@
 from avarch.models.probe import NormalizedProbe, VideoStream
-from avarch.probe import build_probe_hash, canonical_json
-
-
-def test_canonical_json_sorts_object_keys() -> None:
-    assert canonical_json({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+from avarch.probe import build_probe_hash
 
 
 def test_probe_hash_is_deterministic() -> None:
@@ -30,3 +26,15 @@ def test_probe_hash_does_not_depend_on_file_path() -> None:
     probe = NormalizedProbe(container="matroska,webm")
 
     assert build_probe_hash(probe) == build_probe_hash(probe)
+
+
+def test_probe_hash_is_unchanged_after_serialization_refactor() -> None:
+    probe = NormalizedProbe(
+        container="matroska,webm",
+        duration_seconds=1.0,
+        video_streams=[VideoStream(index=0, codec="hevc")],
+    )
+
+    assert build_probe_hash(probe) == (
+        "c6010b96740ba579b88bffeb3fc4a61576819c65a2000073aef57e814eb62efb"
+    )
