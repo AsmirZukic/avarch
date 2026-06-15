@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
 from avarch.config import AppConfig, EncodingProfile
+from avarch.contracts import QUEUE_CONTRACT, TRANSCODE_PLAN_SCHEMA_VERSION
 from avarch.db import create_db_engine
 from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.models.db import (
@@ -64,7 +65,6 @@ from avarch.vapoursynth import (
     validate_script_syntax,
 )
 
-QUEUE_CONTRACT_VERSION = 1
 SCHEDULER_LEASE_SECONDS = 30.0
 SCHEDULER_HEARTBEAT_SECONDS = 5.0
 SCHEDULER_POLL_SECONDS = 1.0
@@ -151,7 +151,6 @@ def build_queue_key(
     probe_hash: str | None,
     vapoursynth_identity_hash: str,
     execution_identity_hash: str,
-    plan_schema_version: int,
 ) -> str:
     payload_json = canonical_json(
         {
@@ -162,11 +161,11 @@ def build_queue_key(
             "probe_hash": probe_hash,
             "vapoursynth_identity_hash": vapoursynth_identity_hash,
             "execution_identity_hash": execution_identity_hash,
-            "plan_schema_version": plan_schema_version,
-            "queue_contract_version": QUEUE_CONTRACT_VERSION,
+            "plan_schema_version": TRANSCODE_PLAN_SCHEMA_VERSION,
+            "queue_contract": QUEUE_CONTRACT,
         }
     )
-    payload = b"queue-job-v1\0" + payload_json.encode("utf-8")
+    payload = f"{QUEUE_CONTRACT}\0".encode() + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -209,7 +208,6 @@ def enqueue_inventory(
             probe_hash=probe_hash,
             vapoursynth_identity_hash=identity.vapoursynth_identity_hash,
             execution_identity_hash=identity.execution_identity_hash,
-            plan_schema_version=TranscodePlan.model_fields["schema_version"].default,
         )
         if find_existing_queue_job(session, queue_key=queue_key) is not None:
             existing += 1
@@ -967,7 +965,6 @@ def _attach_probe_and_advance(
         probe_hash=probe_result.probe_hash,
         vapoursynth_identity_hash=identity.vapoursynth_identity_hash,
         execution_identity_hash=identity.execution_identity_hash,
-        plan_schema_version=TranscodePlan.model_fields["schema_version"].default,
     )
     duplicate = session.exec(
         select(Job).where(Job.queue_key == queue_key, Job.id != job.id)

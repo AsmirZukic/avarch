@@ -12,6 +12,13 @@ from typing import Any
 from sqlmodel import Session, select
 
 from avarch.config import AppConfig, EncodingProfile
+from avarch.contracts import (
+    EXECUTION_IDENTITY_HASH_CONTRACT,
+    PLAN_HASH_CONTRACT,
+    PROFILE_HASH_CONTRACT,
+    VALIDATION_POLICY_HASH_CONTRACT,
+    WORK_KEY_CONTRACT,
+)
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.models.plan import (
     AV1AN_COMMAND_CONTRACT_VERSION,
@@ -97,7 +104,9 @@ def build_profile_hash(
         exclude={"vapoursynth_template"},
     )
     profile_payload["vapoursynth_template_hash"] = template_hash
-    payload = b"profile-v3\0" + canonical_json(profile_payload).encode("utf-8")
+    payload = f"{PROFILE_HASH_CONTRACT}\0".encode() + canonical_json(profile_payload).encode(
+        "utf-8"
+    )
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -120,7 +129,7 @@ def build_work_key(
             "execution_identity_hash": execution_identity_hash,
         }
     )
-    payload = b"work-v4\0" + payload_json.encode("utf-8")
+    payload = f"{WORK_KEY_CONTRACT}\0".encode() + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=20).hexdigest()
 
 
@@ -155,7 +164,9 @@ def build_execution_identity_hash(identity: ExecutionIdentity) -> str:
             "atomic_final_placement": True,
         },
     }
-    data = b"execution-identity-v1\0" + canonical_json(payload).encode("utf-8")
+    data = f"{EXECUTION_IDENTITY_HASH_CONTRACT}\0".encode() + canonical_json(payload).encode(
+        "utf-8"
+    )
     return hashlib.blake2b(data, digest_size=32).hexdigest()
 
 
@@ -166,7 +177,9 @@ def build_plan_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
 
 
 def build_plan_hash(plan: TranscodePlan) -> str:
-    payload = b"plan-v2\0" + canonical_json(build_plan_hash_payload(plan)).encode("utf-8")
+    payload = f"{PLAN_HASH_CONTRACT}\0".encode() + canonical_json(
+        build_plan_hash_payload(plan)
+    ).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -177,7 +190,9 @@ def finalize_plan_hash(plan: TranscodePlan) -> TranscodePlan:
 def build_validation_policy_hash(policy: ValidationPolicy) -> str:
     payload_data = policy.model_dump(mode="json")
     payload_data.pop("policy_hash", None)
-    payload = b"validation-policy-v2\0" + canonical_json(payload_data).encode("utf-8")
+    payload = f"{VALIDATION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(
+        payload_data
+    ).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -211,8 +226,6 @@ def load_planning_context(
         raise PlanningError("The canonical probe result no longer exists.")
     if probe_result.media_file_id != media_file.id:
         raise PlanningError("The canonical probe belongs to another media file.")
-    if probe_result.source_fs_fingerprint is None:
-        raise PlanningError("The canonical probe has no source filesystem fingerprint.")
     if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
         raise PlanningError(
             "The canonical probe does not match the current filesystem fingerprint.\n"
@@ -544,9 +557,7 @@ def build_plan(
             source_input_path=input_path,
             output_path=paths.output_path,
             audio_stream_index=audio.source_stream_index,
-            subtitle_stream_indexes=[
-                stream.source_stream_index for stream in subtitles.streams
-            ],
+            subtitle_stream_indexes=[stream.source_stream_index for stream in subtitles.streams],
             audio_codec=audio.target_codec,
             audio_bitrate=audio.target_bitrate,
             audio_channels=audio.target_channels,

@@ -1,407 +1,260 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 
+from avarch.contracts import ALEMBIC_BASELINE_REVISION
 from avarch.db import create_db_engine
 from avarch.db_migrations import upgrade_database
 
 
-def test_alembic_upgrade_creates_tables(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
+def test_repository_contains_one_migration_revision() -> None:
+    revisions = sorted(Path("migrations/versions").glob("*.py"))
+
+    assert [revision.name for revision in revisions] == ["0001_initial_schema.py"]
+
+
+def test_initial_revision_has_no_parent() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_BASELINE_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision is None
+
+
+def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
 
     upgrade_database(database_url)
 
-    engine = create_db_engine(database_url)
-    inspector = inspect(engine)
-
-    assert "appmeta" in inspector.get_table_names()
-    assert "mediafile" in inspector.get_table_names()
-
-
-def test_fresh_database_upgrades_to_inventory_schema(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    inspector = inspect(engine)
-    columns = {column["name"] for column in inspector.get_columns("mediafile")}
-    indexes = {index["name"] for index in inspector.get_indexes("mediafile")}
+    tables = set(inspect(create_db_engine(database_url)).get_table_names())
 
     assert {
-        "device_id",
-        "inode",
-        "fs_fingerprint",
-        "last_seen_at",
-        "status",
-        "latest_probe_id",
-    } <= columns
-    assert "ix_mediafile_fs_fingerprint" in indexes
-    assert "ix_mediafile_latest_probe_id" in indexes
+        "alembic_version",
+        "appmeta",
+        "mediafile",
+        "proberesult",
+        "job",
+        "jobattempt",
+        "schedulerstate",
+        "validationresult",
+    } <= tables
 
 
-def test_upgrade_creates_probe_result_table(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    inspector = inspect(engine)
-    columns = {column["name"] for column in inspector.get_columns("proberesult")}
-    indexes = {index["name"] for index in inspector.get_indexes("proberesult")}
-
-    assert {
-        "id",
-        "media_file_id",
-        "ffprobe_json",
-        "normalized_json",
-        "probe_hash",
-        "source_fs_fingerprint",
-        "created_at",
-    } <= columns
-    assert "ix_proberesult_media_file_id" in indexes
-    assert "ix_proberesult_probe_hash" in indexes
-
-
-def test_probe_result_foreign_key_targets_media_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
+def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
 
     upgrade_database(database_url)
 
-    engine = create_db_engine(database_url)
-    foreign_keys = inspect(engine).get_foreign_keys("proberesult")
+    inspector = inspect(create_db_engine(database_url))
+    media_indexes = {index["name"] for index in inspector.get_indexes("mediafile")}
+    probe_indexes = {index["name"] for index in inspector.get_indexes("proberesult")}
+    job_indexes = {index["name"] for index in inspector.get_indexes("job")}
+    validation_indexes = {index["name"] for index in inspector.get_indexes("validationresult")}
 
-    assert foreign_keys[0]["referred_table"] == "mediafile"
-    assert foreign_keys[0]["referred_columns"] == ["id"]
-
-
-def test_latest_probe_foreign_key_targets_probe_result(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    foreign_keys = inspect(engine).get_foreign_keys("mediafile")
-
-    assert any(
-        foreign_key["referred_table"] == "proberesult"
-        and foreign_key["constrained_columns"] == ["latest_probe_id"]
-        and foreign_key["referred_columns"] == ["id"]
-        for foreign_key in foreign_keys
-    )
-
-
-def test_milestone_one_database_upgrades_without_losing_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-    config = _alembic_config(database_url)
-    command.upgrade(config, "9aaf75d07ce6")
-
-    engine = create_db_engine(database_url)
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text(
-                """
-                INSERT INTO mediafile (path, size_bytes, mtime_ns, discovered_at)
-                VALUES (:path, :size_bytes, :mtime_ns, :discovered_at)
-                """
-            ),
-            {
-                "path": "/media/legacy.mkv",
-                "size_bytes": 123,
-                "mtime_ns": 456,
-                "discovered_at": "2026-06-14 00:00:00",
-            },
-        )
-
-    command.upgrade(config, "head")
-
-    with engine.connect() as connection:
-        row = connection.execute(sa.text("SELECT * FROM mediafile")).mappings().one()
-
-    assert row["path"] == "/media/legacy.mkv"
-    assert row["device_id"] == 0
-    assert row["inode"] == 0
-    assert row["fs_fingerprint"].startswith("legacy:")
-    assert row["last_seen_at"] is not None
-    assert row["status"] == "present"
-    assert row["latest_probe_id"] is None
-
-
-def test_migration_preserves_existing_fingerprint_values(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-    config = _alembic_config(database_url)
-    command.upgrade(config, "41f0d8b4b5e1")
-
-    engine = create_db_engine(database_url)
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text(
-                """
-                INSERT INTO mediafile (
-                    path,
-                    size_bytes,
-                    mtime_ns,
-                    discovered_at,
-                    device_id,
-                    inode,
-                    content_key,
-                    last_seen_at,
-                    status
-                )
-                VALUES (
-                    :path,
-                    :size_bytes,
-                    :mtime_ns,
-                    :discovered_at,
-                    :device_id,
-                    :inode,
-                    :content_key,
-                    :last_seen_at,
-                    :status
-                )
-                """
-            ),
-            {
-                "path": "/media/movie.mkv",
-                "size_bytes": 123,
-                "mtime_ns": 456,
-                "discovered_at": "2026-06-14 00:00:00",
-                "device_id": 1,
-                "inode": 2,
-                "content_key": "key",
-                "last_seen_at": "2026-06-14 00:00:00",
-                "status": "present",
-            },
-        )
-
-    command.upgrade(config, "head")
-
-    with engine.begin() as connection:
-        media_file = connection.execute(sa.text("SELECT * FROM mediafile")).mappings().one()
-        connection.execute(
-            sa.text(
-                """
-                INSERT INTO proberesult (
-                    media_file_id,
-                    ffprobe_json,
-                    normalized_json,
-                    probe_hash,
-                    created_at
-                )
-                VALUES (:media_file_id, '{}', '{}', 'hash', :created_at)
-                """
-            ),
-            {
-                "media_file_id": media_file["id"],
-                "created_at": "2026-06-14 00:00:00",
-            },
-        )
-        probe_count = connection.execute(sa.text("SELECT count(*) FROM proberesult")).scalar_one()
-
-    assert media_file["path"] == "/media/movie.mkv"
-    assert media_file["fs_fingerprint"] == "key"
-    assert probe_count == 1
-
-
-def test_legacy_probe_rows_have_no_source_fingerprint(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-    config = _alembic_config(database_url)
-    command.upgrade(config, "41f0d8b4b5e1")
-
-    engine = create_db_engine(database_url)
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text(
-                """
-                INSERT INTO mediafile (
-                    path,
-                    size_bytes,
-                    mtime_ns,
-                    discovered_at,
-                    device_id,
-                    inode,
-                    content_key,
-                    last_seen_at,
-                    status
-                )
-                VALUES (
-                    :path,
-                    :size_bytes,
-                    :mtime_ns,
-                    :discovered_at,
-                    :device_id,
-                    :inode,
-                    :content_key,
-                    :last_seen_at,
-                    :status
-                )
-                """
-            ),
-            {
-                "path": "/media/movie.mkv",
-                "size_bytes": 123,
-                "mtime_ns": 456,
-                "discovered_at": "2026-06-14 00:00:00",
-                "device_id": 1,
-                "inode": 2,
-                "content_key": "key",
-                "last_seen_at": "2026-06-14 00:00:00",
-                "status": "present",
-            },
-        )
-        media_file = connection.execute(sa.text("SELECT * FROM mediafile")).mappings().one()
-        connection.execute(
-            sa.text(
-                """
-                INSERT INTO proberesult (
-                    media_file_id,
-                    ffprobe_json,
-                    normalized_json,
-                    probe_hash,
-                    created_at
-                )
-                VALUES (:media_file_id, '{}', '{}', 'hash', :created_at)
-                """
-            ),
-            {
-                "media_file_id": media_file["id"],
-                "created_at": "2026-06-14 00:00:00",
-            },
-        )
-
-    command.upgrade(config, "head")
-
-    with engine.connect() as connection:
-        probe_result = connection.execute(sa.text("SELECT * FROM proberesult")).mappings().one()
-        media_file = connection.execute(sa.text("SELECT * FROM mediafile")).mappings().one()
-
-    assert probe_result["source_fs_fingerprint"] is None
-    assert media_file["latest_probe_id"] is None
-
-
-def test_migration_upgrades_legacy_content_key_schema(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-    config = _alembic_config(database_url)
-    command.upgrade(config, "41f0d8b4b5e1")
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    inspector = inspect(engine)
-    media_columns = {column["name"] for column in inspector.get_columns("mediafile")}
-    probe_columns = {column["name"] for column in inspector.get_columns("proberesult")}
-    indexes = {index["name"] for index in inspector.get_indexes("mediafile")}
-
-    assert "content_key" not in media_columns
-    assert "fs_fingerprint" in media_columns
-    assert "latest_probe_id" in media_columns
-    assert "source_fs_fingerprint" in probe_columns
-    assert "ix_mediafile_fs_fingerprint" in indexes
-    assert "ix_mediafile_latest_probe_id" in indexes
-
-
-def test_migration_recovers_after_partial_source_fingerprint_add(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-    config = _alembic_config(database_url)
-    command.upgrade(config, "41f0d8b4b5e1")
-    engine = create_db_engine(database_url)
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text("ALTER TABLE proberesult ADD COLUMN source_fs_fingerprint VARCHAR")
-        )
-
-    upgrade_database(database_url)
-
-    inspector = inspect(engine)
-    media_columns = {column["name"] for column in inspector.get_columns("mediafile")}
-    probe_columns = [
-        column["name"] for column in inspector.get_columns("proberesult")
-    ]
-    with engine.connect() as connection:
-        revision = connection.execute(
-            sa.text("SELECT version_num FROM alembic_version")
-        ).scalar_one()
-
-    assert "content_key" not in media_columns
-    assert "fs_fingerprint" in media_columns
-    assert "latest_probe_id" in media_columns
-    assert probe_columns.count("source_fs_fingerprint") == 1
-    assert revision == "1d4f0a7c9b2e"
-
-
-def test_fresh_upgrade_creates_queue_tables(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    tables = set(inspect(engine).get_table_names())
-
-    assert {"job", "jobattempt", "schedulerstate"} <= tables
-
-
-def test_upgrade_seeds_scheduler_state(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    with engine.connect() as connection:
-        row = connection.execute(sa.text("SELECT * FROM schedulerstate")).mappings().one()
-
-    assert row["id"] == 1
-    assert row["paused"] == 0
-
-
-def test_job_foreign_keys_are_present(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    foreign_keys = inspect(engine).get_foreign_keys("job")
-
-    assert any(
-        foreign_key["referred_table"] == "mediafile"
-        and foreign_key["constrained_columns"] == ["media_file_id"]
-        for foreign_key in foreign_keys
-    )
-    assert any(
-        foreign_key["referred_table"] == "proberesult"
-        and foreign_key["constrained_columns"] == ["probe_result_id"]
-        for foreign_key in foreign_keys
-    )
-
-
-def test_job_indexes_are_present(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
-    database_url = f"sqlite:///{db_path}"
-
-    upgrade_database(database_url)
-
-    engine = create_db_engine(database_url)
-    job_indexes = {index["name"] for index in inspect(engine).get_indexes("job")}
-    attempt_indexes = {index["name"] for index in inspect(engine).get_indexes("jobattempt")}
-
+    assert "ix_mediafile_fs_fingerprint" in media_indexes
+    assert "ix_mediafile_latest_probe_id" in media_indexes
+    assert "ix_proberesult_media_file_id" in probe_indexes
+    assert "ix_proberesult_probe_hash" in probe_indexes
     assert "ix_job_queue_key" in job_indexes
     assert "ix_job_plan_hash" in job_indexes
-    assert "ix_jobattempt_job_id" in attempt_indexes
+    assert "ix_validationresult_attempt_id" in validation_indexes
+
+
+def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+
+    assert _has_foreign_key(
+        inspector,
+        table="mediafile",
+        columns=["latest_probe_id"],
+        referred_table="proberesult",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="proberesult",
+        columns=["media_file_id"],
+        referred_table="mediafile",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="job",
+        columns=["latest_validation_id"],
+        referred_table="validationresult",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="validationresult",
+        columns=["job_id"],
+        referred_table="job",
+    )
+
+
+def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(create_db_engine(database_url)).get_columns("proberesult")
+    }
+
+    assert columns["source_fs_fingerprint"]["nullable"] is False
+
+
+def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    now = datetime(2026, 6, 15, tzinfo=UTC)
+    with engine.begin() as connection:
+        media_id = _insert(connection, "mediafile", _media_values(now))
+        probe_id = _insert(connection, "proberesult", _probe_values(media_id, now))
+        connection.execute(
+            sa.text("UPDATE mediafile SET latest_probe_id = :probe_id WHERE id = :media_id"),
+            {"probe_id": probe_id, "media_id": media_id},
+        )
+        job_id = _insert(connection, "job", _job_values(media_id, probe_id, now))
+        attempt_id = _insert(connection, "jobattempt", _attempt_values(job_id, now))
+        validation_id = _insert(
+            connection,
+            "validationresult",
+            _validation_values(job_id, attempt_id, now),
+        )
+        connection.execute(
+            sa.text("UPDATE job SET latest_validation_id = :validation_id WHERE id = :job_id"),
+            {"validation_id": validation_id, "job_id": job_id},
+        )
+
+        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+
+    assert violations == []
+
+
+def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    config = _alembic_config(database_url)
+
+    command.upgrade(config, "head")
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
+
+    tables = set(inspect(create_db_engine(database_url)).get_table_names())
+    assert "mediafile" in tables
+
+
+def test_alembic_has_one_head() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+
+    assert script.get_heads() == [ALEMBIC_BASELINE_REVISION]
+
+
+def _has_foreign_key(
+    inspector: sa.Inspector,
+    *,
+    table: str,
+    columns: list[str],
+    referred_table: str,
+) -> bool:
+    return any(
+        foreign_key["constrained_columns"] == columns
+        and foreign_key["referred_table"] == referred_table
+        for foreign_key in inspector.get_foreign_keys(table)
+    )
+
+
+def _insert(
+    connection: sa.Connection,
+    table: str,
+    values: dict[str, object],
+) -> int:
+    columns = ", ".join(values)
+    placeholders = ", ".join(f":{key}" for key in values)
+    result = connection.execute(
+        sa.text(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"),
+        values,
+    )
+    return int(result.lastrowid)
+
+
+def _media_values(now: datetime) -> dict[str, object]:
+    return {
+        "path": "/media/movie.mkv",
+        "size_bytes": 1,
+        "mtime_ns": 2,
+        "device_id": 3,
+        "inode": 4,
+        "fs_fingerprint": "source-fs",
+        "discovered_at": now,
+        "last_seen_at": now,
+        "status": "present",
+    }
+
+
+def _probe_values(media_id: int, now: datetime) -> dict[str, object]:
+    return {
+        "media_file_id": media_id,
+        "ffprobe_json": "{}",
+        "normalized_json": "{}",
+        "probe_hash": "probe-hash",
+        "source_fs_fingerprint": "source-fs",
+        "created_at": now,
+    }
+
+
+def _job_values(media_id: int, probe_id: int, now: datetime) -> dict[str, object]:
+    return {
+        "media_file_id": media_id,
+        "profile_name": "av1_1080p_sdr",
+        "profile_hash": "profile-hash",
+        "source_fs_fingerprint": "source-fs",
+        "queue_key": "queue-key",
+        "probe_result_id": probe_id,
+        "probe_hash": "probe-hash",
+        "status": "pending",
+        "stage": "encode",
+        "priority": 0,
+        "attempts": 0,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _attempt_values(job_id: int, now: datetime) -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "attempt_number": 1,
+        "stage": "encode",
+        "resource_class": "cheap",
+        "status": "completed",
+        "runner_id": "runner",
+        "started_at": now,
+        "finished_at": now,
+    }
+
+
+def _validation_values(job_id: int, attempt_id: int, now: datetime) -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "plan_hash": "plan-hash",
+        "policy_hash": "policy-hash",
+        "output_path": "/output/movie.mkv",
+        "passed": True,
+        "details_json": "{}",
+        "created_at": now,
+    }
 
 
 def _alembic_config(database_url: str) -> Config:

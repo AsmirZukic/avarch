@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from avarch.contracts import NORMALIZED_PROBE_SCHEMA_VERSION
 
 
 def _video_streams() -> list[VideoStream]:
@@ -72,7 +76,7 @@ class Chapter(BaseModel):
 
 
 class NormalizedProbe(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = NORMALIZED_PROBE_SCHEMA_VERSION
     container: str | None = None
     duration_seconds: float | None = None
     bitrate_bps: int | None = None

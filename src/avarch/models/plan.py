@@ -6,6 +6,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from avarch.contracts import (
+    AV1AN_COMMAND_SCHEMA_VERSION,
+    AV1AN_STAGE_MARKER_SCHEMA_VERSION,
+    ENCODE_RESULT_RECEIPT_SCHEMA_VERSION,
+    EXECUTION_IDENTITY_SCHEMA_VERSION,
+    FFMPEG_MUX_SCHEMA_VERSION,
+    TRANSCODE_PLAN_SCHEMA_VERSION,
+    VAPOURSYNTH_PLAN_SCHEMA_VERSION,
+)
 from avarch.models.validation import ValidationPolicy
 
 AV1AN_COMMAND_CONTRACT_VERSION = 2
@@ -16,13 +25,9 @@ type VapourSynthMode = Literal[
     "custom_template",
 ]
 
-type VapourSynthOutputFormat = Literal[
-    "YUV420P10",
-]
+type VapourSynthOutputFormat = Literal["YUV420P10",]
 
-type VapourSynthResizeFilter = Literal[
-    "spline36",
-]
+type VapourSynthResizeFilter = Literal["spline36",]
 
 type Av1anResumePolicy = Literal[
     "auto",
@@ -91,7 +96,7 @@ class SubtitlePlan(BaseModel):
 
 
 class ExecutionIdentity(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = EXECUTION_IDENTITY_SCHEMA_VERSION
 
     av1an_contract_version: int
     ffmpeg_mux_contract_version: int
@@ -105,7 +110,7 @@ class ExecutionIdentity(BaseModel):
 
 
 class Av1anCommandSpec(BaseModel):
-    schema_version: int = 2
+    schema_version: Literal[2] = AV1AN_COMMAND_SCHEMA_VERSION
     command_contract_version: int = AV1AN_COMMAND_CONTRACT_VERSION
 
     executable: str = "av1an"
@@ -133,7 +138,7 @@ class Av1anCommandSpec(BaseModel):
 
 
 class FfmpegMuxSpec(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = FFMPEG_MUX_SCHEMA_VERSION
     command_contract_version: int = FFMPEG_MUX_CONTRACT_VERSION
 
     executable: str = "ffmpeg"
@@ -175,7 +180,7 @@ class ExecutionRuntimePaths(BaseModel):
 
 
 class Av1anStageMarker(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = AV1AN_STAGE_MARKER_SCHEMA_VERSION
 
     plan_hash: str
     av1an_spec_hash: str
@@ -187,7 +192,7 @@ class Av1anStageMarker(BaseModel):
 
 
 class EncodeResultReceipt(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = ENCODE_RESULT_RECEIPT_SCHEMA_VERSION
 
     plan_hash: str
     av1an_spec_hash: str
@@ -203,7 +208,7 @@ class EncodeResultReceipt(BaseModel):
 
 
 class VapourSynthPlan(BaseModel):
-    schema_version: int = 1
+    schema_version: Literal[1] = VAPOURSYNTH_PLAN_SCHEMA_VERSION
     generator_version: int = 1
 
     mode: VapourSynthMode
@@ -239,7 +244,7 @@ class PromotionPolicy(BaseModel):
 
 
 class TranscodePlan(BaseModel):
-    schema_version: Literal[4] = 4
+    schema_version: Literal[4] = TRANSCODE_PLAN_SCHEMA_VERSION
     plan_hash: str
 
     input_path: Path

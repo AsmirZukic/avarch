@@ -51,7 +51,7 @@ class ProbeResult(SQLModel, table=True):
     ffprobe_json: str
     normalized_json: str
     probe_hash: str = Field(index=True)
-    source_fs_fingerprint: str | None = Field(default=None)
+    source_fs_fingerprint: str
     created_at: datetime
 
 

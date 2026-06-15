@@ -91,6 +91,21 @@ def test_resource_config_rejects_unknown_fields() -> None:
         AppConfig.model_validate({"resources": {"surprise": 1}})
 
 
+def test_unknown_top_level_configuration_field_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"old_profiles": {}})
+
+
+def test_unknown_app_configuration_field_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"app": {"work_dir": ".avarch-work"}})
+
+
+def test_unknown_scanner_configuration_field_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"scanner": {"directory_excludes": []}})
+
+
 def test_default_scanner_config_has_no_roots() -> None:
     config = AppConfig()
 
@@ -117,9 +132,7 @@ exclude_directories = [".avarch-work", "tmp"]
 
 
 def test_scanner_extensions_are_normalized() -> None:
-    config = AppConfig.model_validate(
-        {"scanner": {"extensions": ["MKV", ".Mp4", ".mp4"]}}
-    )
+    config = AppConfig.model_validate({"scanner": {"extensions": ["MKV", ".Mp4", ".mp4"]}})
 
     assert config.scanner.extensions == {".mkv", ".mp4"}
 
@@ -224,30 +237,22 @@ def test_profile_preserves_language_priority() -> None:
 
 def test_profile_rejects_nonpositive_workers() -> None:
     with pytest.raises(ValidationError):
-        AppConfig.model_validate(
-            {"profiles": {"test": _profile_data(av1an={"workers": 0})}}
-        )
+        AppConfig.model_validate({"profiles": {"test": _profile_data(av1an={"workers": 0})}})
 
 
 def test_profile_rejects_nonpositive_max_width() -> None:
     with pytest.raises(ValidationError):
-        AppConfig.model_validate(
-            {"profiles": {"test": _profile_data(video={"max_width": 0})}}
-        )
+        AppConfig.model_validate({"profiles": {"test": _profile_data(video={"max_width": 0})}})
 
 
 def test_profile_requires_even_max_width() -> None:
     with pytest.raises(ValidationError):
-        AppConfig.model_validate(
-            {"profiles": {"test": _profile_data(video={"max_width": 1919})}}
-        )
+        AppConfig.model_validate({"profiles": {"test": _profile_data(video={"max_width": 1919})}})
 
 
 def test_profile_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        AppConfig.model_validate(
-            {"profiles": {"test": _profile_data(video={"surprise": True})}}
-        )
+        AppConfig.model_validate({"profiles": {"test": _profile_data(video={"surprise": True})}})
 
 
 def _profile_config_text() -> str:

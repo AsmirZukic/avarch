@@ -234,8 +234,6 @@ def get_canonical_probe_result(
         return None
     if probe_result.media_file_id != media_file.id:
         return None
-    if probe_result.source_fs_fingerprint is None:
-        return None
     if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
         return None
     return probe_result
@@ -286,8 +284,7 @@ def format_probe_summary(path: Path, normalized: NormalizedProbe, probe_hash: st
     for stream in sorted(normalized.subtitle_streams, key=lambda item: item.index):
         flags = _stream_flags(default=stream.default, forced=stream.forced)
         lines.append(
-            "  "
-            f"[{stream.index}] {_display(stream.codec)} {_display(stream.language)}{flags}"
+            f"  [{stream.index}] {_display(stream.codec)} {_display(stream.language)}{flags}"
         )
 
     lines.extend(

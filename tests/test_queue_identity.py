@@ -50,13 +50,6 @@ def test_queue_key_changes_with_execution_identity(tmp_path: Path) -> None:
     )
 
 
-def test_queue_key_changes_with_plan_schema(tmp_path: Path) -> None:
-    assert _queue_key(tmp_path, plan_schema_version=3) != _queue_key(
-        tmp_path,
-        plan_schema_version=4,
-    )
-
-
 def test_null_probe_hash_is_distinct_from_real_probe_hash(tmp_path: Path) -> None:
     assert _queue_key(tmp_path, probe_hash=None) != _queue_key(tmp_path, probe_hash="")
 
@@ -112,7 +105,6 @@ def _queue_key(
     probe_hash: str | None = "probe-hash",
     vapoursynth_identity_hash: str = "vapoursynth-hash",
     execution_identity_hash: str = "execution-hash",
-    plan_schema_version: int = 3,
 ) -> str:
     return build_queue_key(
         media_path=tmp_path / "movie.mkv",
@@ -122,5 +114,4 @@ def _queue_key(
         probe_hash=probe_hash,
         vapoursynth_identity_hash=vapoursynth_identity_hash,
         execution_identity_hash=execution_identity_hash,
-        plan_schema_version=plan_schema_version,
     )

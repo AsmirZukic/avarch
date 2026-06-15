@@ -5,14 +5,29 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
+from alembic.util.exc import CommandError
 from sqlalchemy.engine import make_url
 
-from avarch.db import create_db_engine
+from avarch.db import (
+    RESET_DATABASE_MESSAGE,
+    UnsupportedDatabaseSchemaError,
+    create_db_engine,
+    verify_database_revision,
+)
 
 
 def upgrade_database(database_url: str) -> None:
     _ensure_sqlite_parent(database_url)
-    command.upgrade(_alembic_config(database_url), "head")
+    engine = create_db_engine(database_url)
+    verify_database_revision(engine)
+    try:
+        command.upgrade(_alembic_config(database_url), "head")
+    except CommandError as exc:
+        raise UnsupportedDatabaseSchemaError(
+            "Unsupported development database schema.\n"
+            "Delete .avarch and initialize a fresh database.\n\n"
+            f"{RESET_DATABASE_MESSAGE}"
+        ) from exc
 
 
 def get_current_revision(database_url: str) -> str | None:

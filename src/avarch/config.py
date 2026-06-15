@@ -13,14 +13,20 @@ LogFormat = Literal["console", "json"]
 
 
 class AppSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     data_dir: Path = Path(".avarch")
 
 
 class DatabaseSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     url: str = "sqlite:///.avarch/avarch.db"
 
 
 class LoggingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     level: LogLevel = "INFO"
     format: LogFormat = "console"
 
@@ -152,6 +158,8 @@ def _default_exclude_directories() -> set[str]:
 
 
 class ScannerSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     roots: list[Path] = Field(default_factory=_default_roots)
     extensions: set[str] = Field(default_factory=_default_extensions)
     exclude_directories: set[str] = Field(default_factory=_default_exclude_directories)
@@ -201,6 +209,8 @@ def _dedupe_preserving_order(values: Iterable[str]) -> list[str]:
 
 
 class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
@@ -299,9 +309,7 @@ def _resolve_profile_template_paths(config: AppConfig, config_dir: Path) -> AppC
     for name, profile in config.profiles.items():
         template = profile.vapoursynth_template
         if template is not None and not template.is_absolute():
-            profile = profile.model_copy(
-                update={"vapoursynth_template": config_dir / template}
-            )
+            profile = profile.model_copy(update={"vapoursynth_template": config_dir / template})
         profiles[name] = profile
 
     return config.model_copy(update={"profiles": profiles})

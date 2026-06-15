@@ -14,6 +14,7 @@ from typing import BinaryIO
 
 from pydantic import BaseModel, ValidationError
 
+from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
 from avarch.models.execution import (
     Av1anStageError,
     ExecutionInterruptedError,
@@ -161,12 +162,12 @@ def create_mux_temporary_path(final_output: Path) -> Path:
 
 
 def build_av1an_spec_hash(spec: Av1anCommandSpec) -> str:
-    payload = b"av1an-spec-v1\0" + canonical_json(spec).encode("utf-8")
+    payload = f"{AV1AN_SPEC_HASH_CONTRACT}\0".encode() + canonical_json(spec).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
 def build_mux_spec_hash(spec: FfmpegMuxSpec) -> str:
-    payload = b"ffmpeg-mux-spec-v1\0" + canonical_json(spec).encode("utf-8")
+    payload = f"{FFMPEG_MUX_SPEC_HASH_CONTRACT}\0".encode() + canonical_json(spec).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 

@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from avarch.config import EncodingProfile
+from avarch.contracts import (
+    VAPOURSYNTH_IDENTITY_HASH_CONTRACT,
+    VAPOURSYNTH_TEMPLATE_HASH_CONTRACT,
+)
 from avarch.models.plan import (
     TranscodePlan,
     VapourSynthMode,
@@ -87,7 +91,7 @@ def normalize_template_text(text: str) -> str:
 
 def build_template_hash(text: str) -> str:
     normalized = normalize_template_text(text)
-    payload = b"vpy-template-v1\0" + normalized.encode("utf-8")
+    payload = f"{VAPOURSYNTH_TEMPLATE_HASH_CONTRACT}\0".encode() + normalized.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -97,9 +101,7 @@ def resolve_vapoursynth_template(
     if profile.vapoursynth_template is None:
         return None
 
-    text = normalize_template_text(
-        profile.vapoursynth_template.read_bytes().decode("utf-8")
-    )
+    text = normalize_template_text(profile.vapoursynth_template.read_bytes().decode("utf-8"))
     return ResolvedVapourSynthTemplate(
         path=profile.vapoursynth_template,
         text=text,
@@ -129,7 +131,7 @@ def build_vapoursynth_identity_hash(
             "template_hash": template_hash,
         }
     )
-    payload = b"vpy-identity-v1\0" + payload_json.encode("utf-8")
+    payload = f"{VAPOURSYNTH_IDENTITY_HASH_CONTRACT}\0".encode() + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -348,9 +350,7 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
     if plan.vapoursynth.template_hash is not None or plan.vapoursynth.template_path is not None:
         raise VapourSynthGenerationError("generated mode must not include template data")
     if plan.video.source_codec.strip().lower() not in _SUPPORTED_SOURCE_CODECS:
-        raise UnsupportedSourceFormatError(
-            f"unsupported source codec: {plan.video.source_codec}"
-        )
+        raise UnsupportedSourceFormatError(f"unsupported source codec: {plan.video.source_codec}")
     if plan.vapoursynth.source_pix_fmt is None:
         raise UnsupportedSourceFormatError("source pixel format is missing")
     if plan.vapoursynth.source_pix_fmt not in _SUPPORTED_PIXEL_FORMATS:
@@ -362,16 +362,13 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
         source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
     ):
         raise HdrProcessingNotImplementedError(
-            "built-in VapourSynth generation does not support HDR input; "
-            "use a custom template"
+            "built-in VapourSynth generation does not support HDR input; use a custom template"
         )
 
 
 def _validate_common_plan(plan: TranscodePlan) -> None:
     if plan.schema_version != 4:
-        raise VapourSynthGenerationError(
-            f"unsupported plan schema version: {plan.schema_version}"
-        )
+        raise VapourSynthGenerationError(f"unsupported plan schema version: {plan.schema_version}")
     if plan.vapoursynth.schema_version != 1:
         raise VapourSynthGenerationError(
             f"unsupported VapourSynth schema version: {plan.vapoursynth.schema_version}"

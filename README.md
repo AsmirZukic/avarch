@@ -14,7 +14,7 @@ That one command:
 
 - syncs the Python environment from `uv.lock`
 - creates `avarch.toml` if it is missing
-- creates or migrates the local SQLite database in `.avarch/`
+- creates the local SQLite database in `.avarch/`
 - runs `avarch doctor`
 - reports whether the external media tools are available on `PATH`
 - exposes the `uv`-managed VapourSynth tools, including `vspipe`
@@ -27,6 +27,22 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 Open a new shell after installing `uv`, then rerun `./scripts/bootstrap`.
+
+## Development Schema Reset
+
+avarch is pre-release and currently provides no development-schema upgrade
+compatibility.
+
+After schema-reset changes, remove the existing `.avarch` directory and rebuild
+local state. The source media library is not modified by this reset.
+
+```sh
+rm -rf .avarch
+
+uv run avarch init --config ./avarch.toml
+uv run avarch db upgrade --config ./avarch.toml
+uv run avarch scan --config ./avarch.toml
+```
 
 ## Day-to-Day Commands
 

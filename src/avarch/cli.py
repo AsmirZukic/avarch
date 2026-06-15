@@ -22,7 +22,11 @@ from avarch.config import (
     resolve_data_dir,
     resolve_database_url,
 )
-from avarch.db import create_db_engine
+from avarch.db import (
+    UnsupportedDatabaseSchemaError,
+    create_db_engine,
+    verify_database_revision,
+)
 from avarch.db_migrations import get_current_revision, upgrade_database
 from avarch.execution import (
     build_av1an_command,
@@ -133,7 +137,7 @@ def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     log.info("database_upgraded", database_url=database_url)
 
     typer.echo(f"Config: {config}")
@@ -145,7 +149,7 @@ def db_upgrade(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     log.info("database_upgraded", database_url=database_url)
     typer.echo("Database upgraded")
 
@@ -155,6 +159,12 @@ def db_current(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
+    try:
+        engine = create_db_engine(database_url)
+        verify_database_revision(engine)
+    except UnsupportedDatabaseSchemaError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
     revision = get_current_revision(database_url)
     typer.echo(revision or "unknown")
 
@@ -241,7 +251,7 @@ def scan(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     roots_to_scan = list(roots or app_config.scanner.roots)
     if not roots_to_scan:
@@ -297,7 +307,7 @@ def files(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     engine = create_db_engine(database_url)
     with Session(engine) as session:
@@ -333,7 +343,7 @@ def enqueue(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     runtime_config = _runtime_config(app_config, config)
     engine = create_db_engine(database_url)
@@ -364,7 +374,7 @@ def run_queue(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     runtime_config = _runtime_config(app_config, config)
 
     typer.echo("Scheduler started")
@@ -403,7 +413,7 @@ def retry(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     runtime_config = _runtime_config(app_config, config)
 
     engine = create_db_engine(database_url)
@@ -425,7 +435,7 @@ def pause(config: ConfigOption = Path("avarch.toml")) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
@@ -442,7 +452,7 @@ def jobs(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     status_filter: JobStatus | None = None
     if status is not None:
@@ -494,7 +504,7 @@ def probe_file(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     file_path = _resolve_media_path(file)
     if not file_path.exists():
@@ -549,7 +559,7 @@ def inspect_file(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
 
     file_path = _resolve_media_path(file)
     engine = create_db_engine(database_url)
@@ -585,7 +595,7 @@ def validate_file(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     runtime_config = _runtime_config(app_config, config)
 
     output_path = _resolve_media_path(output)
@@ -631,9 +641,8 @@ def validate_file(
             report_path = _report_path_for_job(engine, job_id)
             typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
             return
-        eligible = (
-            (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE)
-            or (job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE)
+        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
+            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
         )
         was_failed = job.status == JobStatus.FAILED
         if not eligible:
@@ -692,7 +701,7 @@ def plan_file(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     data_dir = resolve_data_dir(app_config, config)
 
     file_path = _resolve_media_path(file)
@@ -762,6 +771,15 @@ def _doctor_fail(check: str, reason: str) -> None:
     log.error("doctor_check_failed", check=check, reason=reason)
 
 
+def _upgrade_database_or_exit(database_url: str) -> None:
+    try:
+        upgrade_database(database_url)
+    except UnsupportedDatabaseSchemaError as exc:
+        log.debug("database_schema_unsupported", exc_info=exc)
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+
 def _load_and_configure(config: Path) -> AppConfig:
     config_created = False
     if not config.exists():
@@ -828,9 +846,7 @@ def _echo_plan_summary(
     check_requested: bool = False,
 ) -> None:
     typed_plan = plan
-    subtitle_indexes = [
-        str(stream.source_stream_index) for stream in typed_plan.subtitles.streams
-    ]
+    subtitle_indexes = [str(stream.source_stream_index) for stream in typed_plan.subtitles.streams]
     subtitles = ", ".join(subtitle_indexes) if subtitle_indexes else "none"
 
     typer.echo("Plan created")
@@ -842,9 +858,7 @@ def _echo_plan_summary(
     typer.echo(f"Artifact dir: {typed_plan.artifacts.artifact_dir}")
     typer.echo("")
     typer.echo("Video:")
-    typer.echo(
-        f"  stream:     {typed_plan.video.source_stream_index}"
-    )
+    typer.echo(f"  stream:     {typed_plan.video.source_stream_index}")
     typer.echo(
         "  source:     "
         f"{typed_plan.video.source_codec} "
@@ -901,7 +915,7 @@ def encode_file(
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
-    upgrade_database(database_url)
+    _upgrade_database_or_exit(database_url)
     data_dir = resolve_data_dir(app_config, config)
 
     file_path = _resolve_media_path(file)

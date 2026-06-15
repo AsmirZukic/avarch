@@ -126,24 +126,6 @@ def test_context_rejects_probe_owned_by_another_file(tmp_path: Path) -> None:
         )
 
 
-def test_context_rejects_legacy_probe_without_fingerprint(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    media_file = _insert_media_file(engine, tmp_path / "movie.mkv")
-    probe_result = _insert_probe_result(engine, media_file, source_fs_fingerprint=None)
-    _set_latest_probe_id(engine, media_file.id or 0, probe_result.id or 0)
-
-    with (
-        Session(engine) as session,
-        pytest.raises(PlanningError, match="no source filesystem fingerprint"),
-    ):
-        load_planning_context(
-            session,
-            input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
-        )
-
-
 def test_context_rejects_stale_probe(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     media_file = _insert_media_file(engine, tmp_path / "movie.mkv")
@@ -274,7 +256,7 @@ def _insert_probe_result(
     engine: Engine,
     media_file: MediaFile,
     *,
-    source_fs_fingerprint: str | None,
+    source_fs_fingerprint: str,
 ) -> ProbeResult:
     normalized_probe = _normalized_probe()
     probe_result = ProbeResult(

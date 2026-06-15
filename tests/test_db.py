@@ -2,10 +2,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
+from avarch.contracts import ALEMBIC_BASELINE_REVISION
+from avarch.db import (
+    UnsupportedDatabaseSchemaError,
+    create_db_engine,
+    create_db_schema,
+    verify_database_revision,
+)
 from avarch.models.db import AppMeta, MediaFile, MediaFileStatus, ProbeResult
 
 
@@ -80,6 +87,78 @@ def test_engine_allows_worker_thread_connections(tmp_path: Path) -> None:
     thread.join()
 
     assert errors == []
+
+
+def test_current_revision_is_accepted(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
+        connection.execute(
+            sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": ALEMBIC_BASELINE_REVISION},
+        )
+
+    verify_database_revision(engine)
+
+
+def test_missing_database_revision_is_allowed_for_upgrade(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    verify_database_revision(engine)
+
+
+def test_tables_without_revision_are_rejected(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    create_db_schema(engine)
+
+    with pytest.raises(UnsupportedDatabaseSchemaError, match="unsupported development schema"):
+        verify_database_revision(engine)
+
+
+def test_deleted_old_revision_is_rejected(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
+        connection.execute(
+            sa.text("INSERT INTO alembic_version (version_num) VALUES ('9aaf75d07ce6')")
+        )
+
+    with pytest.raises(UnsupportedDatabaseSchemaError, match="rm -rf .avarch"):
+        verify_database_revision(engine)
+
+
+def test_multiple_revision_rows_are_rejected(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
+        connection.execute(
+            sa.text("INSERT INTO alembic_version (version_num) VALUES ('0001_initial')")
+        )
+        connection.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('other')"))
+
+    with pytest.raises(UnsupportedDatabaseSchemaError):
+        verify_database_revision(engine)
+
+
+def test_database_is_not_modified_when_revision_is_rejected(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
+        connection.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('old')"))
+
+    with pytest.raises(UnsupportedDatabaseSchemaError):
+        verify_database_revision(engine)
+
+    with engine.connect() as connection:
+        revision = connection.execute(
+            sa.text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+
+    assert revision == "old"
 
 
 def test_insert_media_file(tmp_path: Path) -> None:
@@ -206,6 +285,7 @@ def test_insert_probe_result_for_media_file(tmp_path: Path) -> None:
                 ffprobe_json="{}",
                 normalized_json="{}",
                 probe_hash="hash",
+                source_fs_fingerprint=media_file.fs_fingerprint,
                 created_at=now,
             )
         )
@@ -228,6 +308,7 @@ def test_probe_result_requires_existing_media_file(tmp_path: Path) -> None:
                 ffprobe_json="{}",
                 normalized_json="{}",
                 probe_hash="hash",
+                source_fs_fingerprint="fingerprint",
                 created_at=datetime.now(UTC),
             )
         )
@@ -255,6 +336,7 @@ def test_multiple_probe_results_can_exist_for_one_file(tmp_path: Path) -> None:
                     ffprobe_json="{}",
                     normalized_json="{}",
                     probe_hash=probe_hash,
+                    source_fs_fingerprint=media_file.fs_fingerprint,
                     created_at=now,
                 )
             )
@@ -263,6 +345,71 @@ def test_multiple_probe_results_can_exist_for_one_file(tmp_path: Path) -> None:
         rows = session.exec(select(ProbeResult)).all()
 
     assert len(rows) == 2
+
+
+def test_probe_result_requires_source_fingerprint(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+
+    with engine.begin() as connection:
+        result = connection.execute(
+            sa.text(
+                """
+                INSERT INTO mediafile (
+                    path,
+                    size_bytes,
+                    mtime_ns,
+                    device_id,
+                    inode,
+                    fs_fingerprint,
+                    discovered_at,
+                    last_seen_at,
+                    status
+                )
+                VALUES (
+                    '/media/requires-fingerprint.mkv',
+                    123,
+                    456,
+                    789,
+                    101112,
+                    'fingerprint',
+                    :now,
+                    :now,
+                    'present'
+                )
+                """
+            ),
+            {"now": now},
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                sa.text(
+                    """
+                    INSERT INTO proberesult (
+                        media_file_id,
+                        ffprobe_json,
+                        normalized_json,
+                        probe_hash,
+                        source_fs_fingerprint,
+                        created_at
+                    )
+                    VALUES (
+                        :media_file_id,
+                        '{}',
+                        '{}',
+                        'hash',
+                        NULL,
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    "media_file_id": result.lastrowid,
+                    "created_at": now,
+                },
+            )
 
 
 def _media_file(path: str, now: datetime) -> MediaFile:

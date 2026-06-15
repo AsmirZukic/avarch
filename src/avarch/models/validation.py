@@ -7,6 +7,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from avarch.contracts import (
+    VALIDATION_POLICY_SCHEMA_VERSION,
+    VALIDATION_REPORT_SCHEMA_VERSION,
+)
 from avarch.models.probe import AudioStream, SubtitleStream, VideoStream
 
 JsonValue = Any
@@ -33,7 +37,7 @@ class DecodeSamplePolicy(BaseModel):
 class ValidationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[2] = VALIDATION_POLICY_SCHEMA_VERSION
     policy_hash: str
 
     accepted_container_names: list[str]
@@ -100,7 +104,7 @@ class ObservedValidationMedia(BaseModel):
 class ValidationReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1] = VALIDATION_REPORT_SCHEMA_VERSION
 
     plan_hash: str
     policy_hash: str
@@ -126,8 +130,4 @@ class ValidationReport(BaseModel):
 
 
 def checks_pass(checks: list[ValidationCheck]) -> bool:
-    return all(
-        check.status == ValidationCheckStatus.PASS
-        for check in checks
-        if check.required
-    )
+    return all(check.status == ValidationCheckStatus.PASS for check in checks if check.required)
