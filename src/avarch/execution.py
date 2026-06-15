@@ -348,7 +348,7 @@ def _validate_mux_temporary_path(plan: TranscodePlan, temporary_output: Path) ->
         raise InvalidExecutionPlanError(
             "Mux temporary output must differ from source and video input."
         )
-    if temporary_output.parent != plan.output_path.parent:
+    if _resolved(temporary_output.parent) != _resolved(plan.output_path.parent):
         raise InvalidExecutionPlanError("Mux temporary output must be beside the final output.")
     if not _is_relative_to(temporary_output, plan.temp_dir):
         raise InvalidExecutionPlanError("Mux temporary output must be under the work directory.")

@@ -9,10 +9,12 @@ import pytest
 from avarch.execution import (
     build_av1an_command,
     build_ffmpeg_mux_command,
+    create_mux_temporary_path,
     execute_plan,
     preflight_execution,
     serialize_encoder_arguments,
     should_resume_av1an,
+    _validate_mux_temporary_path,
 )
 from avarch.models.execution import ToolUnavailableError, WorkDirectoryConflictError
 from avarch.models.plan import (
@@ -187,6 +189,23 @@ def test_build_ffmpeg_mux_command_maps_global_source_indexes(tmp_path: Path) -> 
         "copy",
         str(temporary_output),
     ]
+
+
+def test_mux_temporary_path_accepts_relative_plan_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = _sample_plan(tmp_path).model_copy(
+        update={
+            "temp_dir": Path("work"),
+            "output_path": Path("work/movie.av1.mkv"),
+        }
+    )
+
+    temporary_output = create_mux_temporary_path(plan.output_path)
+
+    _validate_mux_temporary_path(plan, temporary_output)
 
 
 def test_execute_plan_writes_markers_and_reuses_receipt(
