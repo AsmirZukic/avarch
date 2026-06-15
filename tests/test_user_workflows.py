@@ -109,7 +109,7 @@ def test_plan_workflow_materializes_bundle_for_manual_av1an_review(
     assert plan_result.exit_code == 0
     assert command["input_path"] == str(script_path)
     assert plan["vapoursynth"]["script_path"] == str(script_path)
-    assert not Path(command["output_path"]).exists()
+    assert not Path(command["video_output_path"]).exists()
     assert "Dry run only. No encoding was started." in plan_result.output
 
 

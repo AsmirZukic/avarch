@@ -14,8 +14,13 @@ from sqlmodel import Session, select
 from avarch.config import AppConfig, EncodingProfile
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.models.plan import (
+    AV1AN_COMMAND_CONTRACT_VERSION,
+    FFMPEG_MUX_CONTRACT_VERSION,
     AudioPlan,
     Av1anCommandSpec,
+    ExecutionIdentity,
+    ExecutionRuntimePaths,
+    FfmpegMuxSpec,
     PlanArtifactPaths,
     SubtitlePlan,
     SubtitleStreamPlan,
@@ -65,6 +70,9 @@ class TargetDimensions:
     resize_required: bool
 
 
+SUPPORTED_AV1AN_VERSION_FAMILY = "0.5.x"
+
+
 def parse_encoder_args(value: str) -> list[str]:
     return shlex.split(value)
 
@@ -90,6 +98,7 @@ def build_work_key(
     probe_hash: str,
     profile_hash: str,
     vapoursynth_identity_hash: str,
+    execution_identity_hash: str,
 ) -> str:
     payload_json = canonical_json(
         {
@@ -98,10 +107,46 @@ def build_work_key(
             "probe_hash": probe_hash,
             "profile_hash": profile_hash,
             "vapoursynth_identity_hash": vapoursynth_identity_hash,
+            "execution_identity_hash": execution_identity_hash,
         }
     )
-    payload = b"work-v2\0" + payload_json.encode("utf-8")
+    payload = b"work-v3\0" + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=20).hexdigest()
+
+
+def build_execution_identity() -> ExecutionIdentity:
+    identity = ExecutionIdentity(
+        av1an_contract_version=AV1AN_COMMAND_CONTRACT_VERSION,
+        ffmpeg_mux_contract_version=FFMPEG_MUX_CONTRACT_VERSION,
+        av1an_version_family=SUPPORTED_AV1AN_VERSION_FAMILY,
+        video_container="mkv",
+        final_container="mkv",
+        identity_hash="",
+    )
+    return identity.model_copy(update={"identity_hash": build_execution_identity_hash(identity)})
+
+
+def build_execution_identity_hash(identity: ExecutionIdentity) -> str:
+    payload = identity.model_dump(mode="json")
+    payload.pop("identity_hash", None)
+    payload["command_policy"] = {
+        "av1an_no_defaults": True,
+        "av1an_concat_method": "ffmpeg",
+        "av1an_pixel_format": "yuv420p10le",
+        "av1an_cache_mode": "temp",
+        "av1an_overwrite_policy": "never-overwrite",
+        "av1an_temporary_state_retention": "keep",
+        "ffmpeg_mux_policy": {
+            "copy_video": True,
+            "copy_selected_subtitles": True,
+            "copy_chapters": True,
+            "copy_global_metadata": True,
+            "overwrite_policy": "never",
+            "atomic_final_placement": True,
+        },
+    }
+    data = b"execution-identity-v1\0" + canonical_json(payload).encode("utf-8")
+    return hashlib.blake2b(data, digest_size=32).hexdigest()
 
 
 def build_plan_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
@@ -360,6 +405,7 @@ def build_plan(
         template_hash=template_hash,
     )
     profile_hash = build_profile_hash(context.profile, template_hash=template_hash)
+    execution_identity = build_execution_identity()
     input_path = Path(context.media_file.path).resolve()
     source_fs_fingerprint = context.media_file.fs_fingerprint
     work_key = build_work_key(
@@ -368,6 +414,7 @@ def build_plan(
         probe_hash=context.probe_result.probe_hash,
         profile_hash=profile_hash,
         vapoursynth_identity_hash=vapoursynth_identity_hash,
+        execution_identity_hash=execution_identity.identity_hash,
     )
     paths = build_plan_paths(data_dir=data_dir, work_key=work_key, input_path=input_path)
     video = select_video(context.normalized_probe, context.profile)
@@ -378,7 +425,7 @@ def build_plan(
         plan_hash="",
         input_path=input_path,
         output_path=paths.output_path,
-        temp_dir=paths.temp_dir,
+        temp_dir=paths.work_dir,
         media_file_id=context.media_file.id,
         source_fs_fingerprint=source_fs_fingerprint,
         profile_name=context.profile_name,
@@ -387,6 +434,7 @@ def build_plan(
         video=video,
         audio=audio,
         subtitles=subtitles,
+        execution_identity=execution_identity,
         vapoursynth=VapourSynthPlan(
             generator_version=generator_version,
             mode=mode,
@@ -410,11 +458,33 @@ def build_plan(
         ),
         av1an=Av1anCommandSpec(
             input_path=paths.artifacts.vapoursynth_script,
-            output_path=paths.output_path,
-            temp_dir=paths.temp_dir,
+            video_output_path=paths.video_output_path,
+            temp_dir=paths.av1an_temp_dir,
+            working_directory=paths.work_dir,
             encoder=context.profile.av1an.encoder,
             encoder_args=parse_encoder_args(context.profile.av1an.video_args),
             workers=context.profile.av1an.workers,
+        ),
+        mux=FfmpegMuxSpec(
+            video_input_path=paths.video_output_path,
+            source_input_path=input_path,
+            output_path=paths.output_path,
+            audio_stream_index=audio.source_stream_index,
+            subtitle_stream_indexes=[
+                stream.source_stream_index for stream in subtitles.streams
+            ],
+            audio_codec=audio.target_codec,
+            audio_bitrate=audio.target_bitrate,
+            audio_channels=audio.target_channels,
+        ),
+        runtime=ExecutionRuntimePaths(
+            runtime_dir=paths.runtime_dir,
+            av1an_stdout_log=paths.runtime_dir / "av1an.stdout.log",
+            av1an_stderr_log=paths.runtime_dir / "av1an.stderr.log",
+            mux_stdout_log=paths.runtime_dir / "mux.stdout.log",
+            mux_stderr_log=paths.runtime_dir / "mux.stderr.log",
+            av1an_stage_marker=paths.runtime_dir / "av1an-stage.json",
+            encode_result=paths.runtime_dir / "encode-result.json",
         ),
         validation=ValidationPolicy(
             expected_container=context.profile.container,
@@ -434,8 +504,11 @@ def build_plan(
 @dataclass(frozen=True, slots=True)
 class DerivedPlanPaths:
     artifacts: PlanArtifactPaths
+    work_dir: Path
     output_path: Path
-    temp_dir: Path
+    video_output_path: Path
+    av1an_temp_dir: Path
+    runtime_dir: Path
     index_cache_dir: Path
 
 
@@ -449,7 +522,9 @@ def build_plan_paths(
     work_dir = data_dir / "work" / work_key
     stem = input_path.stem
     output_path = work_dir / f"{stem}.av1.mkv"
-    temp_dir = work_dir / "av1an"
+    video_output_path = work_dir / "video-only.mkv"
+    av1an_temp_dir = work_dir / "av1an"
+    runtime_dir = work_dir / "runtime"
     if output_path.resolve() == input_path.resolve():
         raise PlanningError("Planned output path would overwrite the input path.")
 
@@ -461,8 +536,11 @@ def build_plan_paths(
             av1an_command_json=artifact_dir / "av1an.command.json",
             validation_policy_json=artifact_dir / "validation-policy.json",
         ),
+        work_dir=work_dir,
         output_path=output_path,
-        temp_dir=temp_dir,
+        video_output_path=video_output_path,
+        av1an_temp_dir=av1an_temp_dir,
+        runtime_dir=runtime_dir,
         index_cache_dir=work_dir / "bestsource",
     )
 

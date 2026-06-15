@@ -21,8 +21,15 @@ from avarch.config import (
 )
 from avarch.db import create_db_engine
 from avarch.db_migrations import get_current_revision, upgrade_database
+from avarch.execution import (
+    build_av1an_command,
+    build_ffmpeg_mux_command,
+    create_mux_temporary_path,
+    execute_plan,
+)
 from avarch.logging import configure_logging
 from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
 from avarch.planner import (
     PlanArtifactConflictError,
@@ -585,6 +592,81 @@ def _echo_plan_summary(
     typer.echo("Dry run only. No encoding was started.")
 
 
+@app.command("encode")
+def encode_file(
+    file: Annotated[Path, typer.Argument(help="Tracked media file to encode.")],
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Create artifacts and print commands without encoding."),
+    ] = False,
+    check_vpy: Annotated[
+        bool,
+        typer.Option(
+            "--check-vpy/--no-check-vpy",
+            help="Run vspipe --info after writing the generated script.",
+        ),
+    ] = False,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+    data_dir = resolve_data_dir(app_config, config)
+
+    file_path = _resolve_media_path(file)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session:
+            context = load_planning_context(
+                session,
+                input_path=file_path,
+                profile_name=profile,
+                config=app_config,
+            )
+            resolved_template = resolve_vapoursynth_template(context.profile)
+            plan = build_plan(
+                context,
+                data_dir=data_dir,
+                resolved_template=resolved_template,
+            )
+        vapoursynth_script = generate_vapoursynth_script(
+            plan,
+            template=resolved_template,
+        )
+        validate_script_syntax(vapoursynth_script)
+        write_plan_artifacts(plan=plan, vapoursynth_script=vapoursynth_script)
+        if check_vpy:
+            check_vapoursynth_script(plan.vapoursynth.script_path)
+    except PlanArtifactConflictError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except PlanningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except VapourSynthGenerationError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except VspipeError as exc:
+        typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    if dry_run:
+        _echo_encode_dry_run(plan)
+        return
+
+    try:
+        status = execute_plan(plan)
+    except ExecutionError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Encode {status.replace('_', ' ')}")
+    typer.echo(f"Output: {plan.output_path}")
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -621,6 +703,32 @@ def _format_size(size_bytes: int) -> str:
 
 def _display_optional(value: str | None) -> str:
     return value if value is not None else "unknown"
+
+
+def _echo_encode_dry_run(plan: TranscodePlan) -> None:
+    mux_temporary_path = create_mux_temporary_path(plan.output_path)
+    try:
+        av1an_command = build_av1an_command(plan.av1an)
+        mux_command = build_ffmpeg_mux_command(plan.mux, mux_temporary_path)
+    finally:
+        mux_temporary_path.unlink(missing_ok=True)
+
+    typer.echo("Encode dry run")
+    typer.echo("")
+    typer.echo(f"Plan hash:    {plan.plan_hash}")
+    typer.echo(f"Output:       {plan.output_path}")
+    typer.echo(f"Artifact dir: {plan.artifacts.artifact_dir}")
+    typer.echo(f"Runtime dir:  {plan.runtime.runtime_dir}")
+    typer.echo("")
+    typer.echo("Av1an argv:")
+    for argument in av1an_command:
+        typer.echo(f"  {argument}")
+    typer.echo("")
+    typer.echo("FFmpeg mux argv:")
+    for argument in mux_command:
+        typer.echo(f"  {argument}")
+    typer.echo("")
+    typer.echo("No encoding was started.")
 
 
 def _status_value(status: MediaFileStatus | str) -> str:

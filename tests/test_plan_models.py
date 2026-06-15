@@ -6,6 +6,9 @@ from pydantic import ValidationError
 from avarch.models.plan import (
     AudioPlan,
     Av1anCommandSpec,
+    ExecutionIdentity,
+    ExecutionRuntimePaths,
+    FfmpegMuxSpec,
     PlanArtifactPaths,
     SubtitlePlan,
     SubtitleStreamPlan,
@@ -42,8 +45,8 @@ def test_plan_defaults_to_manual_review() -> None:
     assert plan.promotion.mode == "manual_review"
 
 
-def test_transcode_plan_schema_version_is_two() -> None:
-    assert sample_plan().schema_version == 2
+def test_transcode_plan_schema_version_is_three() -> None:
+    assert sample_plan().schema_version == 3
 
 
 def test_transcode_plan_contains_vapoursynth_spec() -> None:
@@ -71,17 +74,18 @@ def test_video_plan_contains_source_pixel_and_color_metadata() -> None:
     assert plan.video.source_color_space == "bt709"
 
 
-def test_av1an_spec_defaults_to_resume() -> None:
+def test_av1an_spec_defaults_to_auto_resume_policy() -> None:
     spec = Av1anCommandSpec(
         input_path=Path("/media/movie.mkv"),
-        output_path=Path("/output/movie.mkv"),
+        video_output_path=Path("/output/video-only.mkv"),
         temp_dir=Path("/work/temp"),
+        working_directory=Path("/work"),
         encoder="svt-av1",
         encoder_args=["--crf", "28"],
         workers=6,
     )
 
-    assert spec.resume is True
+    assert spec.resume_policy == "auto"
 
 
 def test_plan_requires_valid_stream_indexes() -> None:
@@ -109,13 +113,16 @@ def test_plan_requires_valid_stream_indexes() -> None:
 def sample_plan() -> TranscodePlan:
     input_path = Path("/media/movie.mkv")
     output_path = Path("/output/movie.mkv")
-    temp_dir = Path("/work/temp")
+    work_dir = Path("/work")
+    video_output_path = work_dir / "video-only.mkv"
+    av1an_temp_dir = work_dir / "av1an"
+    runtime_dir = work_dir / "runtime"
     script_path = Path("/work/movie.vpy")
     return TranscodePlan(
         plan_hash="plan-hash",
         input_path=input_path,
         output_path=output_path,
-        temp_dir=temp_dir,
+        temp_dir=work_dir,
         media_file_id=1,
         source_fs_fingerprint="fs-v1",
         profile_name="av1_1080p_sdr",
@@ -161,6 +168,14 @@ def sample_plan() -> TranscodePlan:
                 )
             ]
         ),
+        execution_identity=ExecutionIdentity(
+            av1an_contract_version=2,
+            ffmpeg_mux_contract_version=1,
+            av1an_version_family="0.5.x",
+            video_container="mkv",
+            final_container="mkv",
+            identity_hash="identity-hash",
+        ),
         vapoursynth=VapourSynthPlan(
             mode="generated",
             script_path=script_path,
@@ -179,11 +194,31 @@ def sample_plan() -> TranscodePlan:
         ),
         av1an=Av1anCommandSpec(
             input_path=script_path,
-            output_path=output_path,
-            temp_dir=temp_dir,
+            video_output_path=video_output_path,
+            temp_dir=av1an_temp_dir,
+            working_directory=work_dir,
             encoder="svt-av1",
             encoder_args=["--preset", "6", "--crf", "28"],
             workers=6,
+        ),
+        mux=FfmpegMuxSpec(
+            video_input_path=video_output_path,
+            source_input_path=input_path,
+            output_path=output_path,
+            audio_stream_index=1,
+            subtitle_stream_indexes=[2],
+            audio_codec="libopus",
+            audio_bitrate="128k",
+            audio_channels=2,
+        ),
+        runtime=ExecutionRuntimePaths(
+            runtime_dir=runtime_dir,
+            av1an_stdout_log=runtime_dir / "av1an.stdout.log",
+            av1an_stderr_log=runtime_dir / "av1an.stderr.log",
+            mux_stdout_log=runtime_dir / "mux.stdout.log",
+            mux_stderr_log=runtime_dir / "mux.stderr.log",
+            av1an_stage_marker=runtime_dir / "av1an-stage.json",
+            encode_result=runtime_dir / "encode-result.json",
         ),
         validation=ValidationPolicy(
             expected_container="mkv",

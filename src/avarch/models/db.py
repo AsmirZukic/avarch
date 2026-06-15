@@ -26,7 +26,13 @@ class MediaFile(SQLModel, table=True):
     mtime_ns: int
     device_id: int
     inode: int
-    fs_fingerprint: str = Field(index=True)
+    fs_fingerprint: str = Field(
+        index=True,
+        description=(
+            "Cheap freshness fingerprint derived from path, size, mtime_ns, device, "
+            "and inode. It is not a content hash."
+        ),
+    )
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: MediaFileStatus = Field(sa_column=Column(String(), nullable=False))

@@ -54,7 +54,7 @@ class ProfileVideoSettings(BaseModel):
 class ProfileAv1anSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    encoder: str
+    encoder: Literal["svt-av1"]
     workers: int = Field(gt=0)
     video_args: str
 
