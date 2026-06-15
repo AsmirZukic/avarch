@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
+
+from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 
 
 class AppMeta(SQLModel, table=True):
@@ -51,3 +53,120 @@ class ProbeResult(SQLModel, table=True):
     probe_hash: str = Field(index=True)
     source_fs_fingerprint: str | None = Field(default=None)
     created_at: datetime
+
+
+class Job(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+    media_file_id: int = Field(foreign_key="mediafile.id", index=True)
+
+    profile_name: str = Field(index=True)
+    profile_hash: str
+
+    source_fs_fingerprint: str
+
+    queue_key: str = Field(unique=True, index=True)
+
+    probe_result_id: int | None = Field(
+        default=None,
+        foreign_key="proberesult.id",
+        index=True,
+    )
+    probe_hash: str | None = None
+
+    plan_hash: str | None = Field(default=None, unique=True, index=True)
+    plan_path: str | None = None
+    output_path: str | None = None
+    latest_validation_id: int | None = Field(
+        default=None,
+        foreign_key="validationresult.id",
+        index=True,
+    )
+
+    status: JobStatus = Field(sa_column=Column(String(), nullable=False, index=True))
+    stage: JobStage = Field(sa_column=Column(String(), nullable=False, index=True))
+
+    priority: int = Field(default=0, index=True)
+    attempts: int = 0
+
+    claimed_by: str | None = Field(default=None, index=True)
+
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+    skip_reason: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class JobAttempt(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("job_id", "attempt_number"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    job_id: int = Field(foreign_key="job.id", index=True)
+    attempt_number: int
+
+    stage: JobStage = Field(sa_column=Column(String(), nullable=False, index=True))
+    resource_class: ResourceClass = Field(sa_column=Column(String(), nullable=False, index=True))
+    status: AttemptStatus = Field(sa_column=Column(String(), nullable=False, index=True))
+
+    runner_id: str
+
+    command_json: str | None = None
+    details_json: str | None = None
+
+    stdout_log: str | None = None
+    stderr_log: str | None = None
+
+    temp_dir: str | None = None
+    output_path: str | None = None
+
+    exit_code: int | None = None
+
+    error_type: str | None = None
+    error_message: str | None = None
+
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class ValidationResult(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+    job_id: int = Field(foreign_key="job.id", index=True)
+
+    attempt_id: int = Field(
+        foreign_key="jobattempt.id",
+        unique=True,
+        index=True,
+    )
+
+    plan_hash: str = Field(index=True)
+    policy_hash: str = Field(index=True)
+
+    output_path: str
+
+    output_fs_fingerprint: str | None = Field(default=None, index=True)
+
+    passed: bool = Field(index=True)
+
+    details_json: str
+
+    created_at: datetime
+
+
+class SchedulerState(SQLModel, table=True):
+    id: int = Field(default=1, primary_key=True)
+
+    paused: bool = False
+
+    runner_id: str | None = Field(default=None, index=True)
+
+    heartbeat_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+
+    updated_at: datetime

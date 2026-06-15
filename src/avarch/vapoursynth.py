@@ -368,7 +368,7 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
 
 
 def _validate_common_plan(plan: TranscodePlan) -> None:
-    if plan.schema_version != 3:
+    if plan.schema_version != 4:
         raise VapourSynthGenerationError(
             f"unsupported plan schema version: {plan.schema_version}"
         )

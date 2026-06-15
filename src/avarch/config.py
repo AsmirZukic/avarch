@@ -25,6 +25,14 @@ class LoggingSettings(BaseModel):
     format: LogFormat = "console"
 
 
+class ResourceSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cheap_workers: int = Field(default=4, ge=1)
+    av1an_jobs: int = Field(default=1, ge=1)
+    file_ops: int = Field(default=1, ge=1)
+
+
 class ProfileMatchSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,6 +98,20 @@ class ProfileSubtitleSettings(BaseModel):
         return _dedupe_preserving_order(_normalized_text_list(value))
 
 
+class ProfileValidationSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    duration_tolerance_seconds: float = Field(default=2.0, ge=0)
+
+    minimum_output_bytes: int = Field(default=1024, ge=1)
+    minimum_output_source_ratio: float = Field(default=0.01, ge=0, le=1)
+
+    decode_sample: bool = False
+    decode_sample_seconds: float = Field(default=5.0, gt=0)
+
+    minimum_size_reduction_percent: float | None = Field(default=None, ge=0, lt=100)
+
+
 class EncodingProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -101,6 +123,7 @@ class EncodingProfile(BaseModel):
     av1an: ProfileAv1anSettings
     audio: ProfileAudioSettings
     subtitles: ProfileSubtitleSettings
+    validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
 
 
 def _default_roots() -> list[Path]:
@@ -181,6 +204,7 @@ class AppConfig(BaseModel):
     app: AppSettings = AppSettings()
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
+    resources: ResourceSettings = ResourceSettings()
     scanner: ScannerSettings = ScannerSettings()
     profiles: dict[str, EncodingProfile] = Field(default_factory=dict)
 
@@ -194,6 +218,11 @@ url = "sqlite:///.avarch/avarch.db"
 [logging]
 level = "INFO"
 format = "console"
+
+[resources]
+cheap_workers = 4
+av1an_jobs = 1
+file_ops = 1
 
 [scanner]
 roots = []
@@ -214,8 +243,8 @@ source = "vapoursynth"
 
 [profiles.av1_1080p_sdr.av1an]
 encoder = "svt-av1"
-workers = 6
-video_args = "--preset 6 --crf 28 --keyint 240"
+workers = 2
+video_args = "--preset 6 --crf 28 --keyint 240 --lp 2"
 
 [profiles.av1_1080p_sdr.audio]
 codec = "libopus"
@@ -226,6 +255,13 @@ languages = ["eng"]
 [profiles.av1_1080p_sdr.subtitles]
 languages = ["eng"]
 keep_forced = true
+
+[profiles.av1_1080p_sdr.validation]
+duration_tolerance_seconds = 2.0
+minimum_output_bytes = 1024
+minimum_output_source_ratio = 0.01
+decode_sample = false
+decode_sample_seconds = 5.0
 """
 
 

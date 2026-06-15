@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -147,7 +148,7 @@ def test_changed_mtime_marks_file_changed(tmp_path: Path) -> None:
     media = tmp_path / "movie.mkv"
     media.write_bytes(b"abc")
     _scan(engine, tmp_path, [media], _now())
-    media.touch()
+    os.utime(media, ns=(1_900_000_000_000_000_000, 1_900_000_000_000_000_000))
 
     _scan(engine, tmp_path, [media], _now() + timedelta(seconds=1))
 
@@ -215,6 +216,7 @@ def test_reappearing_file_is_marked_changed(tmp_path: Path) -> None:
     media.unlink()
     _scan(engine, tmp_path, [], _now() + timedelta(seconds=1))
     media.write_bytes(b"abc")
+    os.utime(media, ns=(1_900_000_000_000_000_000, 1_900_000_000_000_000_000))
 
     _scan(engine, tmp_path, [media], _now() + timedelta(seconds=2))
 

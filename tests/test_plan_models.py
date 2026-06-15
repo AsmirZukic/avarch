@@ -17,6 +17,7 @@ from avarch.models.plan import (
     VapourSynthPlan,
     VideoPlan,
 )
+from avarch.models.validation import DecodeSamplePolicy, ExpectedSubtitlePolicy
 
 
 def test_plan_serializes_paths_as_strings() -> None:
@@ -45,8 +46,8 @@ def test_plan_defaults_to_manual_review() -> None:
     assert plan.promotion.mode == "manual_review"
 
 
-def test_transcode_plan_schema_version_is_three() -> None:
-    assert sample_plan().schema_version == 3
+def test_transcode_plan_schema_version_is_four() -> None:
+    assert sample_plan().schema_version == 4
 
 
 def test_transcode_plan_contains_vapoursynth_spec() -> None:
@@ -219,14 +220,34 @@ def sample_plan() -> TranscodePlan:
             mux_stderr_log=runtime_dir / "mux.stderr.log",
             av1an_stage_marker=runtime_dir / "av1an-stage.json",
             encode_result=runtime_dir / "encode-result.json",
+            validation_report=runtime_dir / "validation-report.json",
+            validation_decode_stdout_log=runtime_dir / "validation.decode.stdout.log",
+            validation_decode_stderr_log=runtime_dir / "validation.decode.stderr.log",
         ),
         validation=ValidationPolicy(
-            expected_container="mkv",
-            maximum_width=1920,
-            expected_audio_codec="libopus",
-            expected_audio_channels=2,
-            expected_subtitle_streams=[2],
+            policy_hash="policy-hash",
+            accepted_container_names=["matroska,webm"],
             source_duration_seconds=600.0,
+            source_size_bytes=1024,
+            duration_tolerance_seconds=2.0,
+            expected_width=1920,
+            expected_height=1080,
+            expected_audio_codec="opus",
+            expected_audio_channels=2,
+            expected_audio_language="eng",
+            expected_subtitles=[
+                ExpectedSubtitlePolicy(
+                    output_order=0,
+                    source_stream_index=2,
+                    codec="subrip",
+                    language="eng",
+                    forced=False,
+                )
+            ],
+            minimum_output_bytes=1024,
+            minimum_output_source_ratio=0.01,
+            minimum_size_reduction_percent=None,
+            decode_sample=DecodeSamplePolicy(enabled=False, duration_seconds=5.0),
         ),
         artifacts=PlanArtifactPaths(
             artifact_dir=Path("/work"),

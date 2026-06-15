@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from datetime import UTC, datetime
@@ -8,8 +9,10 @@ from typing import Annotated, Literal
 
 import structlog
 import typer
+from pydantic import ValidationError
 from sqlalchemy import inspect
-from sqlmodel import Session, select
+from sqlalchemy.engine import Engine
+from sqlmodel import Session, col, select
 
 from avarch import __version__
 from avarch.config import (
@@ -28,9 +31,11 @@ from avarch.execution import (
     execute_plan,
 )
 from avarch.logging import configure_logging
-from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.models.db import Job, MediaFile, MediaFileStatus, ValidationResult
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
+from avarch.models.scheduler import JobStage, JobStatus
+from avarch.models.validation import ValidationReport
 from avarch.planner import (
     PlanArtifactConflictError,
     PlanningError,
@@ -48,7 +53,18 @@ from avarch.probe import (
     store_probe_result,
 )
 from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
+from avarch.scheduler import (
+    JobPreparationError,
+    SchedulerAlreadyRunningError,
+    enqueue_inventory,
+    execute_validation_job,
+    new_runner_id,
+    pause_scheduler,
+    retry_failed_jobs,
+    run_scheduler,
+)
 from avarch.tui.app import AvarchTuiApp
+from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
     VspipeError,
@@ -308,6 +324,168 @@ def files(
         )
 
 
+@app.command()
+def enqueue(
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    runtime_config = _runtime_config(app_config, config)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            summary = enqueue_inventory(
+                session,
+                config=runtime_config,
+                profile_name=profile,
+                priority=priority,
+                now=_utc_now(),
+            )
+    except JobPreparationError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo("Queue update")
+    typer.echo("")
+    typer.echo(f"Profile:         {profile}")
+    typer.echo(f"Inventory files: {summary.selected}")
+    typer.echo(f"Created jobs:    {summary.created}")
+    typer.echo(f"Already queued:  {summary.existing}")
+    typer.echo(f"Missing skipped: {summary.missing_skipped}")
+
+
+@app.command("run")
+def run_queue(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+    runtime_config = _runtime_config(app_config, config)
+
+    typer.echo("Scheduler started")
+    typer.echo("")
+    typer.echo("Resources:")
+    typer.echo(f"  cheap workers: {runtime_config.resources.cheap_workers}")
+    typer.echo(f"  Av1an jobs:    {runtime_config.resources.av1an_jobs}")
+    typer.echo(f"  file ops:      {runtime_config.resources.file_ops}")
+    typer.echo("")
+    _echo_queue_counts(database_url)
+
+    try:
+        summary = asyncio.run(run_scheduler(config=runtime_config, runner_id=new_runner_id()))
+    except SchedulerAlreadyRunningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except KeyboardInterrupt as exc:
+        raise typer.Exit(130) from exc
+
+    typer.echo("")
+    typer.echo(
+        "Scheduler stopped "
+        f"(completed={summary.completed}, failed={summary.failed}, skipped={summary.skipped})"
+    )
+
+
+@app.command()
+def retry(
+    failed: Annotated[bool, typer.Option("--failed", help="Retry failed jobs.")] = False,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    if not failed:
+        typer.echo("Pass --failed to retry failed jobs.")
+        raise typer.Exit(1)
+
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+    runtime_config = _runtime_config(app_config, config)
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session, session.begin():
+        summary = retry_failed_jobs(session, config=runtime_config, now=_utc_now())
+
+    typer.echo("Failed-job retry")
+    typer.echo("")
+    typer.echo(f"Eligible:          {summary.eligible}")
+    typer.echo(f"Reset to probe:    {summary.reset_to_probe}")
+    typer.echo(f"Reset to plan:     {summary.reset_to_plan}")
+    typer.echo(f"Reset to encode:   {summary.reset_to_encode}")
+    typer.echo(f"Reset to validate: {summary.reset_to_validate}")
+    typer.echo(f"Requires requeue:  {summary.requires_requeue}")
+
+
+@app.command()
+def pause(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session, session.begin():
+        pause_scheduler(session, now=_utc_now())
+
+    typer.echo("Scheduler pause requested")
+
+
+@app.command()
+def jobs(
+    status: Annotated[str | None, typer.Option("--status", help="Filter by job status.")] = None,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+
+    status_filter: JobStatus | None = None
+    if status is not None:
+        try:
+            status_filter = JobStatus(status)
+        except ValueError as exc:
+            typer.echo(f"Unknown job status: {status}")
+            raise typer.Exit(1) from exc
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        statement = select(Job).order_by(
+            col(Job.priority).desc(),
+            col(Job.created_at).asc(),
+            col(Job.id).asc(),
+        )
+        if status_filter is not None:
+            statement = statement.where(Job.status == status_filter)
+        rows = list(session.exec(statement).all())
+        media_by_id = {
+            media_file.id: media_file
+            for media_file in session.exec(select(MediaFile)).all()
+            if media_file.id is not None
+        }
+        validation_by_id = {
+            result.id: result
+            for result in session.exec(select(ValidationResult)).all()
+            if result.id is not None
+        }
+
+    typer.echo("ID  STATUS     STAGE     PRI  TRY  VALID  PROFILE          FILE")
+    for job in rows:
+        media_file = media_by_id.get(job.media_file_id)
+        path = Path(media_file.path).name if media_file is not None else "<missing>"
+        valid = _validation_status(job, validation_by_id)
+        typer.echo(
+            f"{job.id:<3} {_job_status_value(job.status):<10} {_job_stage_value(job.stage):<9} "
+            f"{job.priority:>3}  {job.attempts:>3}  {valid:<5}  {job.profile_name:<15}  {path}"
+        )
+        if _job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
+            typer.echo(f"    error: {_truncate_line(job.last_error_message)}")
+
+
 @app.command("probe")
 def probe_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to probe.")],
@@ -396,6 +574,106 @@ def inspect_file(
             raise typer.Exit(1) from exc
 
     typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
+
+
+@app.command("validate")
+def validate_file(
+    output: Annotated[Path, typer.Argument(help="Planned encoded output to validate.")],
+    against: Annotated[Path, typer.Option("--against", help="Source media file.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    upgrade_database(database_url)
+    runtime_config = _runtime_config(app_config, config)
+
+    output_path = _resolve_media_path(output)
+    source_path = _resolve_media_path(against)
+    engine = create_db_engine(database_url)
+
+    with Session(engine) as session:
+        media_file = _get_media_file(session, source_path)
+        if media_file is None:
+            _echo_untracked_file()
+            raise typer.Exit(1)
+        jobs = list(
+            session.exec(
+                select(Job).where(
+                    Job.media_file_id == media_file.id,
+                    Job.output_path == str(output_path),
+                    col(Job.plan_hash).is_not(None),
+                )
+            ).all()
+        )
+        if len(jobs) != 1:
+            typer.echo("Unable to find exactly one planned job for this output and source.")
+            raise typer.Exit(1)
+        job = jobs[0]
+        if job.id is None:
+            typer.echo("Job is missing a database id.")
+            raise typer.Exit(1)
+        job_id = job.id
+        if job.status == JobStatus.RUNNING:
+            typer.echo("Validation cannot run while the job is running.")
+            raise typer.Exit(1)
+        existing = _canonical_validation(session, job)
+        if (
+            job.status == JobStatus.COMPLETED
+            and job.stage == JobStage.VALIDATE
+            and existing is not None
+            and existing.passed
+        ):
+            report = ValidationReport.model_validate_json(existing.details_json)
+            typer.echo(format_validation_report_summary(report, reused=True))
+            typer.echo("")
+            typer.echo("Structured report:")
+            report_path = _report_path_for_job(engine, job_id)
+            typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
+            return
+        eligible = (
+            (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE)
+            or (job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE)
+        )
+        was_failed = job.status == JobStatus.FAILED
+        if not eligible:
+            typer.echo("Job is not eligible for validation.")
+            raise typer.Exit(1)
+
+    if was_failed:
+        with Session(engine) as session, session.begin():
+            stored = session.get(Job, job_id)
+            if stored is None:
+                typer.echo("Job disappeared before validation could run.")
+                raise typer.Exit(1)
+            stored.status = JobStatus.PENDING
+            stored.stage = JobStage.VALIDATE
+            stored.claimed_by = None
+            stored.last_error_type = None
+            stored.last_error_message = None
+            stored.finished_at = None
+            stored.updated_at = _utc_now()
+            session.add(stored)
+
+    result = asyncio.run(
+        execute_validation_job(
+            job_id=job_id,
+            runner_id=new_runner_id(),
+            config=runtime_config,
+        )
+    )
+    if result is None:
+        typer.echo("Validation could not run.")
+        raise typer.Exit(1)
+
+    report = ValidationReport.model_validate_json(result.details_json)
+    typer.echo(format_validation_report_summary(report))
+    typer.echo("")
+    typer.echo("Structured report:")
+    report_path = _report_path_for_job(engine, job_id)
+    typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
+    if not report.passed:
+        raise typer.Exit(1)
 
 
 @app.command("plan")
@@ -500,6 +778,17 @@ def _load_and_configure(config: Path) -> AppConfig:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     return app_config
+
+
+def _runtime_config(app_config: AppConfig, config: Path) -> AppConfig:
+    data_dir = resolve_data_dir(app_config, config)
+    database_url = resolve_database_url(app_config, config)
+    return app_config.model_copy(
+        update={
+            "app": app_config.app.model_copy(update={"data_dir": data_dir}),
+            "database": app_config.database.model_copy(update={"url": database_url}),
+        }
+    )
 
 
 def _write_default_config(config: Path) -> None:
@@ -705,6 +994,64 @@ def _display_optional(value: str | None) -> str:
     return value if value is not None else "unknown"
 
 
+def _echo_queue_counts(database_url: str) -> None:
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        jobs_by_status = {
+            status: len(session.exec(select(Job).where(Job.status == status)).all())
+            for status in JobStatus
+        }
+    typer.echo("Queue:")
+    typer.echo(f"  pending:   {jobs_by_status[JobStatus.PENDING]}")
+    typer.echo(f"  running:   {jobs_by_status[JobStatus.RUNNING]}")
+    typer.echo(f"  completed: {jobs_by_status[JobStatus.COMPLETED]}")
+    typer.echo(f"  failed:    {jobs_by_status[JobStatus.FAILED]}")
+
+
+def _truncate_line(value: str, *, max_length: int = 120) -> str:
+    line = " ".join(value.splitlines()).strip()
+    if len(line) <= max_length:
+        return line
+    return f"{line[: max_length - 3]}..."
+
+
+def _validation_status(
+    job: Job,
+    validation_by_id: dict[int, ValidationResult],
+) -> str:
+    if job.latest_validation_id is None:
+        return "-"
+    result = validation_by_id.get(job.latest_validation_id)
+    if result is None:
+        return "-"
+    return "PASS" if result.passed else "FAIL"
+
+
+def _canonical_validation(session: Session, job: Job) -> ValidationResult | None:
+    if job.latest_validation_id is None:
+        return None
+    result = session.get(ValidationResult, job.latest_validation_id)
+    if result is None or result.job_id != job.id:
+        return None
+    if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
+        return None
+    return result
+
+
+def _report_path_for_job(engine: Engine, job_id: int) -> Path | None:
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job is None or job.plan_path is None:
+            return None
+        try:
+            plan = TranscodePlan.model_validate_json(
+                Path(job.plan_path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValidationError, ValueError):
+            return None
+        return plan.runtime.validation_report
+
+
 def _echo_encode_dry_run(plan: TranscodePlan) -> None:
     mux_temporary_path = create_mux_temporary_path(plan.output_path)
     try:
@@ -735,6 +1082,16 @@ def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
     return status
+
+
+def _job_status_value(status: JobStatus | str) -> str:
+    if isinstance(status, JobStatus):
+        return status.value
+    return status
+
+
+def _job_stage_value(stage: object) -> str:
+    return str(getattr(stage, "value", stage))
 
 
 app.add_typer(db_app, name="db")

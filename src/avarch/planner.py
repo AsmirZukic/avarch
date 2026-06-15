@@ -25,11 +25,15 @@ from avarch.models.plan import (
     SubtitlePlan,
     SubtitleStreamPlan,
     TranscodePlan,
-    ValidationPolicy,
     VapourSynthPlan,
     VideoPlan,
 )
 from avarch.models.probe import NormalizedProbe, SubtitleStream, VideoStream
+from avarch.models.validation import (
+    DecodeSamplePolicy,
+    ExpectedSubtitlePolicy,
+    ValidationPolicy,
+)
 from avarch.probe import ProbeError, parse_normalized_probe_json
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import (
@@ -71,6 +75,12 @@ class TargetDimensions:
 
 
 SUPPORTED_AV1AN_VERSION_FAMILY = "0.5.x"
+ACCEPTED_CONTAINER_NAMES = {
+    "mkv": ["matroska,webm"],
+}
+EXPECTED_AUDIO_CODEC_NAMES = {
+    "libopus": "opus",
+}
 
 
 def parse_encoder_args(value: str) -> list[str]:
@@ -87,7 +97,7 @@ def build_profile_hash(
         exclude={"vapoursynth_template"},
     )
     profile_payload["vapoursynth_template_hash"] = template_hash
-    payload = b"profile-v2\0" + canonical_json(profile_payload).encode("utf-8")
+    payload = b"profile-v3\0" + canonical_json(profile_payload).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -110,7 +120,7 @@ def build_work_key(
             "execution_identity_hash": execution_identity_hash,
         }
     )
-    payload = b"work-v3\0" + payload_json.encode("utf-8")
+    payload = b"work-v4\0" + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=20).hexdigest()
 
 
@@ -156,12 +166,23 @@ def build_plan_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
 
 
 def build_plan_hash(plan: TranscodePlan) -> str:
-    payload = b"plan-v1\0" + canonical_json(build_plan_hash_payload(plan)).encode("utf-8")
+    payload = b"plan-v2\0" + canonical_json(build_plan_hash_payload(plan)).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
 def finalize_plan_hash(plan: TranscodePlan) -> TranscodePlan:
     return plan.model_copy(update={"plan_hash": build_plan_hash(plan)})
+
+
+def build_validation_policy_hash(policy: ValidationPolicy) -> str:
+    payload_data = policy.model_dump(mode="json")
+    payload_data.pop("policy_hash", None)
+    payload = b"validation-policy-v2\0" + canonical_json(payload_data).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=32).hexdigest()
+
+
+def finalize_validation_policy(policy: ValidationPolicy) -> ValidationPolicy:
+    return policy.model_copy(update={"policy_hash": build_validation_policy_hash(policy)})
 
 
 def load_planning_context(
@@ -369,6 +390,59 @@ def select_subtitles(
     return SubtitlePlan(streams=streams)
 
 
+def build_validation_policy(
+    *,
+    probe: NormalizedProbe,
+    profile: EncodingProfile,
+    video: VideoPlan,
+    audio: AudioPlan,
+    subtitles: SubtitlePlan,
+    source_size_bytes: int,
+) -> ValidationPolicy:
+    if probe.duration_seconds is None or probe.duration_seconds <= 0:
+        raise PlanningError("Source duration is missing or invalid.")
+    accepted_containers = ACCEPTED_CONTAINER_NAMES.get(profile.container)
+    if accepted_containers is None:
+        raise PlanningError(f"Unsupported output container for validation: {profile.container}")
+    expected_audio_codec = EXPECTED_AUDIO_CODEC_NAMES.get(audio.target_codec)
+    if expected_audio_codec is None:
+        raise PlanningError(f"Unsupported audio encoder for validation: {audio.target_codec}")
+
+    policy = ValidationPolicy(
+        policy_hash="",
+        accepted_container_names=accepted_containers,
+        source_duration_seconds=probe.duration_seconds,
+        source_size_bytes=source_size_bytes,
+        duration_tolerance_seconds=profile.validation.duration_tolerance_seconds,
+        expected_video_stream_count=1,
+        expected_video_codec="av1",
+        expected_width=video.target_width,
+        expected_height=video.target_height,
+        expected_audio_stream_count=1,
+        expected_audio_codec=expected_audio_codec,
+        expected_audio_channels=audio.target_channels,
+        expected_audio_language=audio.source_language,
+        expected_subtitles=[
+            ExpectedSubtitlePolicy(
+                output_order=order,
+                source_stream_index=stream.source_stream_index,
+                codec=stream.codec,
+                language=stream.language,
+                forced=stream.forced,
+            )
+            for order, stream in enumerate(subtitles.streams)
+        ],
+        minimum_output_bytes=profile.validation.minimum_output_bytes,
+        minimum_output_source_ratio=profile.validation.minimum_output_source_ratio,
+        minimum_size_reduction_percent=profile.validation.minimum_size_reduction_percent,
+        decode_sample=DecodeSamplePolicy(
+            enabled=profile.validation.decode_sample,
+            duration_seconds=profile.validation.decode_sample_seconds,
+        ),
+    )
+    return finalize_validation_policy(policy)
+
+
 def build_plan(
     context: PlanningContext,
     *,
@@ -485,16 +559,17 @@ def build_plan(
             mux_stderr_log=paths.runtime_dir / "mux.stderr.log",
             av1an_stage_marker=paths.runtime_dir / "av1an-stage.json",
             encode_result=paths.runtime_dir / "encode-result.json",
+            validation_report=paths.runtime_dir / "validation-report.json",
+            validation_decode_stdout_log=paths.runtime_dir / "validation.decode.stdout.log",
+            validation_decode_stderr_log=paths.runtime_dir / "validation.decode.stderr.log",
         ),
-        validation=ValidationPolicy(
-            expected_container=context.profile.container,
-            maximum_width=context.profile.video.max_width,
-            expected_audio_codec=context.profile.audio.codec,
-            expected_audio_channels=context.profile.audio.channels,
-            expected_subtitle_streams=[
-                stream.source_stream_index for stream in subtitles.streams
-            ],
-            source_duration_seconds=context.normalized_probe.duration_seconds,
+        validation=build_validation_policy(
+            probe=context.normalized_probe,
+            profile=context.profile,
+            video=video,
+            audio=audio,
+            subtitles=subtitles,
+            source_size_bytes=context.media_file.size_bytes,
         ),
         artifacts=paths.artifacts,
     )

@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+from sqlmodel import Session, select
+
+from avarch.db import create_db_engine, create_db_schema
+from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
+from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.scheduler import (
+    JobClaimError,
+    claim_job_stage,
+    complete_job_stage,
+    fail_job_stage,
+    interrupt_job_stage,
+)
+
+
+def test_claim_sets_job_running(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.RUNNING
+    assert job.claimed_by == "runner"
+
+
+def test_claim_creates_attempt(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+
+    with Session(engine) as session:
+        claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        session.commit()
+        attempt = session.exec(select(JobAttempt)).one()
+
+    assert attempt.stage == JobStage.PROBE
+    assert attempt.resource_class == ResourceClass.CHEAP
+
+
+def test_claim_increments_attempt_count(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+
+    with Session(engine) as session:
+        claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.attempts == 1
+
+
+def test_claim_sets_first_started_at_only_once(tmp_path: Path) -> None:
+    started = datetime.now(UTC) - timedelta(days=1)
+    engine, job_id = _stored_job(tmp_path, started_at=started)
+
+    with Session(engine) as session:
+        claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.started_at == started.replace(tzinfo=None)
+
+
+def test_claim_rejects_nonpending_job(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.COMPLETED)
+
+    with Session(engine) as session, pytest.raises(JobClaimError):
+        claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+
+
+def test_completion_advances_stage(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        complete_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            next_stage=JobStage.PLAN,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.PENDING
+    assert job.stage == JobStage.PLAN
+
+
+def test_final_completion_marks_job_completed(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        complete_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            next_stage=None,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED
+    assert job.finished_at is not None
+
+
+def test_failure_preserves_current_stage(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        fail_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            error=ValueError("broken"),
+            exit_code=2,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.stage == JobStage.ENCODE
+
+
+def test_failure_records_error_type_and_message(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        fail_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            error=ValueError("broken"),
+            exit_code=2,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        stored_attempt = session.get(JobAttempt, attempt.id)
+
+    assert stored_attempt is not None
+    assert stored_attempt.error_type == "ValueError"
+    assert stored_attempt.error_message == "broken"
+
+
+def test_interruption_returns_job_to_pending(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        interrupt_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.PENDING
+
+
+def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
+        interrupt_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            now=datetime.now(UTC),
+        )
+        session.commit()
+        stored_attempt = session.get(JobAttempt, attempt.id)
+
+    assert stored_attempt is not None
+    assert stored_attempt.status == AttemptStatus.INTERRUPTED
+    assert stored_attempt.exit_code == 130
+
+
+def _stored_job(
+    tmp_path: Path,
+    *,
+    status: JobStatus = JobStatus.PENDING,
+    stage: JobStage = JobStage.PROBE,
+    started_at: datetime | None = None,
+) -> tuple[Engine, int]:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        media_file = MediaFile(
+            path=str(tmp_path / "movie.mkv"),
+            size_bytes=1,
+            mtime_ns=2,
+            device_id=3,
+            inode=4,
+            fs_fingerprint="fingerprint",
+            discovered_at=now,
+            last_seen_at=now,
+            status=MediaFileStatus.PRESENT,
+        )
+        session.add(media_file)
+        session.commit()
+        session.refresh(media_file)
+        job = Job(
+            media_file_id=media_file.id or 0,
+            profile_name="av1_1080p_sdr",
+            profile_hash="profile-hash",
+            source_fs_fingerprint="fingerprint",
+            queue_key="queue-key",
+            status=status,
+            stage=stage,
+            created_at=now,
+            updated_at=now,
+            started_at=started_at,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        return engine, job.id or 0

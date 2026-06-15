@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from avarch.models.validation import ValidationPolicy
+
 AV1AN_COMMAND_CONTRACT_VERSION = 2
 FFMPEG_MUX_CONTRACT_VERSION = 1
 
@@ -166,6 +168,11 @@ class ExecutionRuntimePaths(BaseModel):
     av1an_stage_marker: Path
     encode_result: Path
 
+    validation_report: Path
+
+    validation_decode_stdout_log: Path
+    validation_decode_stderr_log: Path
+
 
 class Av1anStageMarker(BaseModel):
     schema_version: int = 1
@@ -227,23 +234,12 @@ class VapourSynthPlan(BaseModel):
     identity_hash: str
 
 
-class ValidationPolicy(BaseModel):
-    schema_version: int = 1
-    expected_container: str
-    expected_video_codec: Literal["av1"] = "av1"
-    maximum_width: int
-    expected_audio_codec: str
-    expected_audio_channels: int
-    expected_subtitle_streams: list[int]
-    source_duration_seconds: float | None
-
-
 class PromotionPolicy(BaseModel):
     mode: Literal["manual_review"] = "manual_review"
 
 
 class TranscodePlan(BaseModel):
-    schema_version: int = 3
+    schema_version: Literal[4] = 4
     plan_hash: str
 
     input_path: Path

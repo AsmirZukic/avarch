@@ -24,6 +24,64 @@ def test_create_db_schema(tmp_path: Path) -> None:
     assert value.value == "test"
 
 
+def test_sqlite_foreign_keys_are_enabled(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.connect() as connection:
+        enabled = connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+
+    assert enabled == 1
+
+
+def test_sqlite_busy_timeout_is_configured(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.connect() as connection:
+        timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+
+    assert timeout == 5000
+
+
+def test_file_database_uses_wal_mode(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
+
+    assert journal_mode == "wal"
+
+
+def test_in_memory_database_does_not_require_wal() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
+
+    assert journal_mode == "memory"
+
+
+def test_engine_allows_worker_thread_connections(tmp_path: Path) -> None:
+    import threading
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    create_db_schema(engine)
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            with Session(engine) as session:
+                session.add(AppMeta(key="thread", value="ok"))
+                session.commit()
+        except BaseException as exc:  # pragma: no cover - surfaced in assertion below
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert errors == []
+
+
 def test_insert_media_file(tmp_path: Path) -> None:
     db_path = tmp_path / "avarch.db"
     engine = create_db_engine(f"sqlite:///{db_path}")

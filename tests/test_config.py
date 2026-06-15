@@ -20,6 +20,14 @@ def test_default_config_has_console_logging() -> None:
     assert config.logging.format == "console"
 
 
+def test_default_resource_limits() -> None:
+    config = AppConfig()
+
+    assert config.resources.cheap_workers == 4
+    assert config.resources.av1an_jobs == 1
+    assert config.resources.file_ops == 1
+
+
 def test_load_config_from_toml(tmp_path: Path) -> None:
     config_file = tmp_path / "avarch.toml"
     config_file.write_text(
@@ -43,6 +51,44 @@ format = "json"
     assert config.database.url == "sqlite:///custom-data/custom.db"
     assert config.logging.level == "DEBUG"
     assert config.logging.format == "json"
+
+
+def test_config_loads_resource_limits(tmp_path: Path) -> None:
+    config_file = tmp_path / "avarch.toml"
+    config_file.write_text(
+        """
+[resources]
+cheap_workers = 8
+av1an_jobs = 2
+file_ops = 3
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.resources.cheap_workers == 8
+    assert config.resources.av1an_jobs == 2
+    assert config.resources.file_ops == 3
+
+
+def test_resource_limits_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"resources": {"cheap_workers": 0}})
+
+
+def test_existing_config_without_resources_still_loads(tmp_path: Path) -> None:
+    config_file = tmp_path / "avarch.toml"
+    config_file.write_text("[scanner]\nroots = []\n", encoding="utf-8")
+
+    config = load_config(config_file)
+
+    assert config.resources.cheap_workers == 4
+
+
+def test_resource_config_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate({"resources": {"surprise": 1}})
 
 
 def test_default_scanner_config_has_no_roots() -> None:

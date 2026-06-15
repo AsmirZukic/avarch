@@ -339,7 +339,69 @@ def test_migration_recovers_after_partial_source_fingerprint_add(tmp_path: Path)
     assert "fs_fingerprint" in media_columns
     assert "latest_probe_id" in media_columns
     assert probe_columns.count("source_fs_fingerprint") == 1
-    assert revision == "7d56d2f55f31"
+    assert revision == "1d4f0a7c9b2e"
+
+
+def test_fresh_upgrade_creates_queue_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    tables = set(inspect(engine).get_table_names())
+
+    assert {"job", "jobattempt", "schedulerstate"} <= tables
+
+
+def test_upgrade_seeds_scheduler_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    with engine.connect() as connection:
+        row = connection.execute(sa.text("SELECT * FROM schedulerstate")).mappings().one()
+
+    assert row["id"] == 1
+    assert row["paused"] == 0
+
+
+def test_job_foreign_keys_are_present(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    foreign_keys = inspect(engine).get_foreign_keys("job")
+
+    assert any(
+        foreign_key["referred_table"] == "mediafile"
+        and foreign_key["constrained_columns"] == ["media_file_id"]
+        for foreign_key in foreign_keys
+    )
+    assert any(
+        foreign_key["referred_table"] == "proberesult"
+        and foreign_key["constrained_columns"] == ["probe_result_id"]
+        for foreign_key in foreign_keys
+    )
+
+
+def test_job_indexes_are_present(tmp_path: Path) -> None:
+    db_path = tmp_path / "avarch.db"
+    database_url = f"sqlite:///{db_path}"
+
+    upgrade_database(database_url)
+
+    engine = create_db_engine(database_url)
+    job_indexes = {index["name"] for index in inspect(engine).get_indexes("job")}
+    attempt_indexes = {index["name"] for index in inspect(engine).get_indexes("jobattempt")}
+
+    assert "ix_job_queue_key" in job_indexes
+    assert "ix_job_plan_hash" in job_indexes
+    assert "ix_jobattempt_job_id" in attempt_indexes
 
 
 def _alembic_config(database_url: str) -> Config:

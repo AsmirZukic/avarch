@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from avarch.execution import (
+    _validate_mux_temporary_path,  # pyright: ignore[reportPrivateUsage]
     build_av1an_command,
     build_ffmpeg_mux_command,
     create_mux_temporary_path,
@@ -14,7 +15,6 @@ from avarch.execution import (
     preflight_execution,
     serialize_encoder_arguments,
     should_resume_av1an,
-    _validate_mux_temporary_path,
 )
 from avarch.models.execution import ToolUnavailableError, WorkDirectoryConflictError
 from avarch.models.plan import (
@@ -30,6 +30,7 @@ from avarch.models.plan import (
     VapourSynthPlan,
     VideoPlan,
 )
+from avarch.models.validation import DecodeSamplePolicy
 from avarch.scanner import create_file_snapshot
 
 
@@ -412,14 +413,26 @@ def _sample_plan(tmp_path: Path) -> TranscodePlan:
             mux_stderr_log=runtime_dir / "mux.stderr.log",
             av1an_stage_marker=runtime_dir / "av1an-stage.json",
             encode_result=runtime_dir / "encode-result.json",
+            validation_report=runtime_dir / "validation-report.json",
+            validation_decode_stdout_log=runtime_dir / "validation.decode.stdout.log",
+            validation_decode_stderr_log=runtime_dir / "validation.decode.stderr.log",
         ),
         validation=ValidationPolicy(
-            expected_container="mkv",
-            maximum_width=1920,
-            expected_audio_codec="libopus",
-            expected_audio_channels=2,
-            expected_subtitle_streams=[],
+            policy_hash="policy-hash",
+            accepted_container_names=["matroska,webm"],
             source_duration_seconds=600.0,
+            source_size_bytes=1024,
+            duration_tolerance_seconds=2.0,
+            expected_width=1920,
+            expected_height=1080,
+            expected_audio_codec="opus",
+            expected_audio_channels=2,
+            expected_audio_language="eng",
+            expected_subtitles=[],
+            minimum_output_bytes=1024,
+            minimum_output_source_ratio=0.01,
+            minimum_size_reduction_percent=None,
+            decode_sample=DecodeSamplePolicy(enabled=False, duration_seconds=5.0),
         ),
         artifacts=PlanArtifactPaths(
             artifact_dir=artifact_dir,
