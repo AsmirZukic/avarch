@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 
 def representative_probe_payload(*, duration: str = "600.000000") -> dict[str, Any]:
@@ -77,3 +77,26 @@ def representative_probe_payload(*, duration: str = "600.000000") -> dict[str, A
             "bit_rate": "8123456",
         },
     }
+
+
+def sdr_probe_payload(
+    *,
+    codec: str = "hevc",
+    width: int = 3840,
+    height: int = 2160,
+    pix_fmt: str = "yuv420p10le",
+    duration: str = "600.000000",
+) -> dict[str, Any]:
+    payload = representative_probe_payload(duration=duration)
+    streams = cast(list[dict[str, Any]], payload["streams"])
+    video = streams[0]
+    video["codec_name"] = codec
+    video["width"] = width
+    video["height"] = height
+    video["pix_fmt"] = pix_fmt
+    video["bits_per_raw_sample"] = "10" if "10" in pix_fmt else "8"
+    video["color_space"] = "bt709"
+    video["color_transfer"] = "bt709"
+    video["color_primaries"] = "bt709"
+    video.pop("side_data_list", None)
+    return payload

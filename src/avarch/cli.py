@@ -42,6 +42,14 @@ from avarch.probe import (
 )
 from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.tui.app import AvarchTuiApp
+from avarch.vapoursynth import (
+    VapourSynthGenerationError,
+    VspipeError,
+    check_vapoursynth_script,
+    generate_vapoursynth_script,
+    resolve_vapoursynth_template,
+    validate_script_syntax,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -387,6 +395,13 @@ def inspect_file(
 def plan_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to plan.")],
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    check_vpy: Annotated[
+        bool,
+        typer.Option(
+            "--check-vpy/--no-check-vpy",
+            help="Run vspipe --info after writing the generated script.",
+        ),
+    ] = False,
     config: ConfigOption = Path("avarch.toml"),
 ) -> None:
     config = _resolve_cli_path(config)
@@ -397,6 +412,7 @@ def plan_file(
 
     file_path = _resolve_media_path(file)
     engine = create_db_engine(database_url)
+    runtime_checked = False
     try:
         with Session(engine) as session:
             context = load_planning_context(
@@ -405,16 +421,38 @@ def plan_file(
                 profile_name=profile,
                 config=app_config,
             )
-            plan = build_plan(context, data_dir=data_dir)
-        write_plan_artifacts(plan)
+            resolved_template = resolve_vapoursynth_template(context.profile)
+            plan = build_plan(
+                context,
+                data_dir=data_dir,
+                resolved_template=resolved_template,
+            )
+        vapoursynth_script = generate_vapoursynth_script(
+            plan,
+            template=resolved_template,
+        )
+        validate_script_syntax(vapoursynth_script)
+        write_plan_artifacts(plan=plan, vapoursynth_script=vapoursynth_script)
     except PlanArtifactConflictError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except PlanningError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
+    except VapourSynthGenerationError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
-    _echo_plan_summary(plan)
+    if check_vpy:
+        try:
+            check_vapoursynth_script(plan.vapoursynth.script_path)
+            runtime_checked = True
+        except VspipeError as exc:
+            typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+
+    _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
 
 
 @app.command()
@@ -487,23 +525,42 @@ def _echo_untracked_file() -> None:
     typer.echo("Run avarch scan for the containing root first.")
 
 
-def _echo_plan_summary(plan: TranscodePlan) -> None:
+def _echo_plan_summary(
+    plan: TranscodePlan,
+    *,
+    runtime_checked: bool = False,
+    check_requested: bool = False,
+) -> None:
     typed_plan = plan
     subtitle_indexes = [
         str(stream.source_stream_index) for stream in typed_plan.subtitles.streams
     ]
     subtitles = ", ".join(subtitle_indexes) if subtitle_indexes else "none"
 
-    typer.echo(f"Plan hash: {typed_plan.plan_hash}")
-    typer.echo(f"Profile: {typed_plan.profile_name}")
-    typer.echo(f"Input: {typed_plan.input_path}")
-    typer.echo(f"Output: {typed_plan.output_path}")
+    typer.echo("Plan created")
+    typer.echo("")
+    typer.echo(f"Input:        {typed_plan.input_path}")
+    typer.echo(f"Profile:      {typed_plan.profile_name}")
+    typer.echo(f"Plan hash:    {typed_plan.plan_hash}")
+    typer.echo(f"Output:       {typed_plan.output_path}")
     typer.echo(f"Artifact dir: {typed_plan.artifacts.artifact_dir}")
+    typer.echo("")
+    typer.echo("Video:")
     typer.echo(
-        "Video: "
-        f"[{typed_plan.video.source_stream_index}] {typed_plan.video.source_codec} "
-        f"{typed_plan.video.source_width}x{typed_plan.video.source_height}"
+        f"  stream:     {typed_plan.video.source_stream_index}"
     )
+    typer.echo(
+        "  source:     "
+        f"{typed_plan.video.source_codec} "
+        f"{typed_plan.video.source_width}x{typed_plan.video.source_height} "
+        f"{_display_optional(typed_plan.video.source_pix_fmt)}"
+    )
+    typer.echo(
+        f"  output:     {typed_plan.video.target_width}x{typed_plan.video.target_height} "
+        f"{typed_plan.vapoursynth.output_format}"
+    )
+    typer.echo(f"  resize:     {'yes' if typed_plan.video.resize_required else 'no'}")
+    typer.echo("")
     typer.echo(
         "Audio: "
         f"[{typed_plan.audio.source_stream_index}] "
@@ -513,6 +570,19 @@ def _echo_plan_summary(plan: TranscodePlan) -> None:
         f"{typed_plan.audio.target_channels}ch"
     )
     typer.echo(f"Subtitles: {subtitles}")
+    typer.echo("")
+    typer.echo("VapourSynth:")
+    typer.echo(f"  mode:       {typed_plan.vapoursynth.mode}")
+    typer.echo(f"  generator:  {typed_plan.vapoursynth.generator_version}")
+    typer.echo(f"  script:     {typed_plan.vapoursynth.script_path}")
+    typer.echo(f"  index dir:  {typed_plan.vapoursynth.index_cache_dir}")
+    typer.echo("  syntax:     PASS")
+    typer.echo(
+        "  runtime:    "
+        f"{'PASS' if runtime_checked else 'not checked' if not check_requested else 'FAIL'}"
+    )
+    typer.echo("")
+    typer.echo("Dry run only. No encoding was started.")
 
 
 def _utc_now() -> datetime:

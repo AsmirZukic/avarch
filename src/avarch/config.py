@@ -43,6 +43,13 @@ class ProfileVideoSettings(BaseModel):
     hdr_to_sdr: bool = False
     source: Literal["vapoursynth"] = "vapoursynth"
 
+    @field_validator("max_width")
+    @classmethod
+    def require_even_max_width(cls, value: int) -> int:
+        if value % 2 != 0:
+            raise ValueError("max_width must be even")
+        return value
+
 
 class ProfileAv1anSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -88,6 +95,7 @@ class EncodingProfile(BaseModel):
 
     backend: Literal["av1an"]
     container: Literal["mkv"]
+    vapoursynth_template: Path | None = None
     match: ProfileMatchSettings
     video: ProfileVideoSettings
     av1an: ProfileAv1anSettings
@@ -225,7 +233,8 @@ def load_config(path: Path) -> AppConfig:
     with path.open("rb") as config_file:
         data = tomllib.load(config_file)
 
-    return AppConfig.model_validate(data)
+    config = AppConfig.model_validate(data)
+    return _resolve_profile_template_paths(config, path.parent)
 
 
 def resolve_data_dir(config: AppConfig, config_path: Path) -> Path:
@@ -247,3 +256,16 @@ def resolve_database_url(config: AppConfig, config_path: Path) -> str:
         db_path = config_path.parent / db_path
 
     return url.set(database=str(db_path)).render_as_string(hide_password=False)
+
+
+def _resolve_profile_template_paths(config: AppConfig, config_dir: Path) -> AppConfig:
+    profiles: dict[str, EncodingProfile] = {}
+    for name, profile in config.profiles.items():
+        template = profile.vapoursynth_template
+        if template is not None and not template.is_absolute():
+            profile = profile.model_copy(
+                update={"vapoursynth_template": config_dir / template}
+            )
+        profiles[name] = profile
+
+    return config.model_copy(update={"profiles": profiles})

@@ -120,6 +120,22 @@ def test_config_loads_profile(tmp_path: Path) -> None:
     assert profile.audio.codec == "libopus"
 
 
+def test_profile_accepts_optional_vapoursynth_template(tmp_path: Path) -> None:
+    template = tmp_path / "templates" / "custom.vpy"
+    config_file = tmp_path / "avarch.toml"
+    config_file.write_text(
+        _profile_config_text().replace(
+            'container = "mkv"',
+            'container = "mkv"\nvapoursynth_template = "templates/custom.vpy"',
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.profiles["av1_1080p_sdr"].vapoursynth_template == template
+
+
 def test_config_without_profiles_remains_valid() -> None:
     config = AppConfig.model_validate({"scanner": {"roots": []}})
 
@@ -171,6 +187,13 @@ def test_profile_rejects_nonpositive_max_width() -> None:
     with pytest.raises(ValidationError):
         AppConfig.model_validate(
             {"profiles": {"test": _profile_data(video={"max_width": 0})}}
+        )
+
+
+def test_profile_requires_even_max_width() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {"profiles": {"test": _profile_data(video={"max_width": 1919})}}
         )
 
 

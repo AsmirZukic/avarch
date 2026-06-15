@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+from avarch.config import AppConfig
+from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.planner import (
+    PlanningContext,
+    build_plan,
+    build_plan_hash_payload,
+)
+from avarch.probe import build_probe_hash, normalize_probe
+from avarch.serialization import canonical_json
+from tests.probe_fixtures import sdr_probe_payload
+
+
+def test_build_plan_copies_probe_pixel_and_color_metadata(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+
+    plan = build_plan(context, data_dir=tmp_path / ".avarch")
+
+    assert plan.video.source_pix_fmt == "yuv420p10le"
+    assert plan.video.source_bit_depth == 10
+    assert plan.video.source_color_transfer == "bt709"
+    assert plan.video.source_color_primaries == "bt709"
+    assert plan.video.source_color_space == "bt709"
+    assert plan.video.source_hdr_metadata_present is False
+    assert plan.vapoursynth.source_pix_fmt == plan.video.source_pix_fmt
+    assert plan.vapoursynth.source_color_transfer == plan.video.source_color_transfer
+
+
+def test_build_plan_populates_target_dimensions(tmp_path: Path) -> None:
+    plan = build_plan(_context(tmp_path), data_dir=tmp_path / ".avarch")
+
+    assert plan.video.target_width == 1920
+    assert plan.video.target_height == 1080
+    assert plan.video.resize_required is True
+    assert plan.vapoursynth.target_width == 1920
+    assert plan.vapoursynth.target_height == 1080
+
+
+def test_plan_hash_payload_excludes_plan_hash(tmp_path: Path) -> None:
+    plan = build_plan(_context(tmp_path), data_dir=tmp_path / ".avarch")
+
+    payload = build_plan_hash_payload(plan)
+
+    assert "plan_hash" not in payload
+    assert "vapoursynth" in payload
+
+
+def _context(tmp_path: Path) -> PlanningContext:
+    path = tmp_path / "movie.mkv"
+    path.write_bytes(b"media")
+    normalized = normalize_probe(sdr_probe_payload())
+    probe_hash = build_probe_hash(normalized)
+    now = datetime(2026, 6, 14, tzinfo=UTC)
+    media_file = MediaFile(
+        id=1,
+        path=str(path.resolve()),
+        size_bytes=5,
+        mtime_ns=1,
+        device_id=1,
+        inode=1,
+        fs_fingerprint="fs",
+        discovered_at=now,
+        last_seen_at=now,
+        status=MediaFileStatus.PRESENT,
+        latest_probe_id=1,
+    )
+    probe_result = ProbeResult(
+        id=1,
+        media_file_id=1,
+        ffprobe_json="{}",
+        normalized_json=canonical_json(normalized),
+        probe_hash=probe_hash,
+        source_fs_fingerprint="fs",
+        created_at=now,
+    )
+    config = AppConfig.model_validate(
+        {
+            "profiles": {
+                "av1_1080p_sdr": {
+                    "backend": "av1an",
+                    "container": "mkv",
+                    "match": {"video_codec_not": ["av1"]},
+                    "video": {
+                        "max_width": 1920,
+                        "hdr_to_sdr": True,
+                        "source": "vapoursynth",
+                    },
+                    "av1an": {
+                        "encoder": "svt-av1",
+                        "workers": 6,
+                        "video_args": "--preset 6 --crf 28",
+                    },
+                    "audio": {
+                        "codec": "libopus",
+                        "bitrate": "128k",
+                        "channels": 2,
+                        "languages": ["eng"],
+                    },
+                    "subtitles": {
+                        "languages": ["eng"],
+                        "keep_forced": True,
+                    },
+                }
+            }
+        }
+    )
+    return PlanningContext(
+        media_file=media_file,
+        probe_result=probe_result,
+        normalized_probe=normalized,
+        profile_name="av1_1080p_sdr",
+        profile=config.profiles["av1_1080p_sdr"],
+    )

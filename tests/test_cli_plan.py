@@ -15,7 +15,7 @@ from avarch.db import create_db_engine
 from avarch.models.db import MediaFile, MediaFileStatus
 from avarch.models.probe import AudioStream, NormalizedProbe, VideoStream
 from avarch.probe import normalize_probe, store_probe_result
-from tests.probe_fixtures import representative_probe_payload
+from tests.probe_fixtures import representative_probe_payload, sdr_probe_payload
 
 runner = CliRunner()
 
@@ -35,7 +35,28 @@ def test_plan_command_creates_bundle(tmp_path: Path) -> None:
     assert (artifact_dir / "plan.json").is_file()
     assert (artifact_dir / "av1an.command.json").is_file()
     assert (artifact_dir / "validation-policy.json").is_file()
-    assert not (artifact_dir / "movie.vpy").exists()
+    assert (artifact_dir / "movie.vpy").is_file()
+
+
+def test_plan_command_does_not_run_vspipe_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
+    _store_probe(config_path, media_file)
+
+    def fail_check(_path: Path) -> object:
+        raise AssertionError("plan must not run vspipe unless --check-vpy is requested")
+
+    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)
+
+    result = runner.invoke(
+        app,
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0
 
 
 def test_plan_command_prints_summary(tmp_path: Path) -> None:
@@ -50,8 +71,10 @@ def test_plan_command_prints_summary(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Plan hash:" in result.output
-    assert "Video: [0] hevc 3840x2160" in result.output
+    assert "source:     hevc 3840x2160 yuv420p10le" in result.output
     assert "Audio: [1] eac3 eng -> libopus 128k 2ch" in result.output
+    assert "syntax:     PASS" in result.output
+    assert "runtime:    not checked" in result.output
 
 
 def test_plan_command_executes_no_external_process(
@@ -114,6 +137,25 @@ def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
     assert "video codec is excluded: av1" in result.output
 
 
+def test_plan_command_rejects_builtin_hdr_source(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
+    _store_normalized_probe(
+        config_path,
+        media_file,
+        normalize_probe(representative_probe_payload()),
+        raw_probe=representative_probe_payload(),
+    )
+
+    result = runner.invoke(
+        app,
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "does not support HDR input" in result.output
+
+
 def test_plan_command_rejects_missing_audio_match(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
@@ -170,11 +212,12 @@ def _tracked_file(config_path: Path, path: Path) -> Path:
 
 
 def _store_probe(config_path: Path, media_file: Path) -> None:
+    payload = sdr_probe_payload()
     _store_normalized_probe(
         config_path,
         media_file,
-        normalize_probe(representative_probe_payload()),
-        raw_probe=representative_probe_payload(),
+        normalize_probe(payload),
+        raw_probe=payload,
     )
 
 

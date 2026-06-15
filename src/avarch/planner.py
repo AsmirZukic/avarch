@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlmodel import Session, select
 
@@ -20,11 +21,18 @@ from avarch.models.plan import (
     SubtitleStreamPlan,
     TranscodePlan,
     ValidationPolicy,
+    VapourSynthPlan,
     VideoPlan,
 )
 from avarch.models.probe import NormalizedProbe, SubtitleStream, VideoStream
 from avarch.probe import ProbeError, parse_normalized_probe_json
 from avarch.serialization import canonical_json
+from avarch.vapoursynth import (
+    GENERATOR_VERSION,
+    ResolvedVapourSynthTemplate,
+    build_vapoursynth_identity_hash,
+    validate_script_syntax,
+)
 
 
 class PlanningError(RuntimeError):
@@ -50,12 +58,28 @@ class ProfileMatchResult:
     reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TargetDimensions:
+    width: int
+    height: int
+    resize_required: bool
+
+
 def parse_encoder_args(value: str) -> list[str]:
     return shlex.split(value)
 
 
-def build_profile_hash(profile: EncodingProfile) -> str:
-    payload = b"profile-v1\0" + canonical_json(profile).encode("utf-8")
+def build_profile_hash(
+    profile: EncodingProfile,
+    *,
+    template_hash: str | None = None,
+) -> str:
+    profile_payload = profile.model_dump(
+        mode="json",
+        exclude={"vapoursynth_template"},
+    )
+    profile_payload["vapoursynth_template_hash"] = template_hash
+    payload = b"profile-v2\0" + canonical_json(profile_payload).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -65,6 +89,7 @@ def build_work_key(
     source_fs_fingerprint: str,
     probe_hash: str,
     profile_hash: str,
+    vapoursynth_identity_hash: str,
 ) -> str:
     payload_json = canonical_json(
         {
@@ -72,17 +97,26 @@ def build_work_key(
             "source_fs_fingerprint": source_fs_fingerprint,
             "probe_hash": probe_hash,
             "profile_hash": profile_hash,
+            "vapoursynth_identity_hash": vapoursynth_identity_hash,
         }
     )
-    payload = b"work-v1\0" + payload_json.encode("utf-8")
+    payload = b"work-v2\0" + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=20).hexdigest()
 
 
-def build_plan_hash(plan: TranscodePlan) -> str:
+def build_plan_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
     payload_data = plan.model_dump(mode="json")
     payload_data.pop("plan_hash", None)
-    payload = b"plan-v1\0" + canonical_json(payload_data).encode("utf-8")
+    return payload_data
+
+
+def build_plan_hash(plan: TranscodePlan) -> str:
+    payload = b"plan-v1\0" + canonical_json(build_plan_hash_payload(plan)).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
+
+
+def finalize_plan_hash(plan: TranscodePlan) -> TranscodePlan:
+    return plan.model_copy(update={"plan_hash": build_plan_hash(plan)})
 
 
 def load_planning_context(
@@ -173,17 +207,65 @@ def select_video(
     if stream.width is None or stream.height is None:
         raise PlanningError("Primary video dimensions are missing.")
 
+    dimensions = calculate_target_dimensions(
+        source_width=stream.width,
+        source_height=stream.height,
+        max_width=profile.video.max_width,
+    )
+
     return VideoPlan(
         source_stream_index=stream.index,
         source_codec=stream.codec,
         source_width=stream.width,
         source_height=stream.height,
         source_bit_depth=stream.bit_depth,
+        source_pix_fmt=stream.pix_fmt,
+        source_color_transfer=stream.color_transfer,
+        source_color_primaries=stream.color_primaries,
+        source_color_space=stream.color_space,
         source_hdr_metadata_present=stream.hdr_metadata_present,
         max_width=profile.video.max_width,
-        resize_required=stream.width > profile.video.max_width,
+        target_width=dimensions.width,
+        target_height=dimensions.height,
+        resize_required=dimensions.resize_required,
         hdr_to_sdr=profile.video.hdr_to_sdr,
         source=profile.video.source,
+    )
+
+
+def calculate_target_dimensions(
+    *,
+    source_width: int,
+    source_height: int,
+    max_width: int,
+) -> TargetDimensions:
+    if source_width <= 0:
+        raise PlanningError("Source width must be positive.")
+    if source_height <= 0:
+        raise PlanningError("Source height must be positive.")
+    if max_width <= 0:
+        raise PlanningError("Profile max_width must be positive.")
+    if max_width % 2 != 0:
+        raise PlanningError("Profile max_width must be even.")
+
+    candidate_width = min(source_width, max_width)
+    target_width = candidate_width - candidate_width % 2
+    if target_width < 2:
+        raise PlanningError("Target width must be at least 2.")
+
+    if target_width == source_width:
+        target_height = source_height - source_height % 2
+    else:
+        numerator = source_height * target_width
+        target_height = ((numerator + source_width) // (2 * source_width)) * 2
+
+    if target_height < 2:
+        raise PlanningError("Target height must be at least 2.")
+
+    return TargetDimensions(
+        width=target_width,
+        height=target_height,
+        resize_required=target_width != source_width or target_height != source_height,
     )
 
 
@@ -246,6 +328,8 @@ def build_plan(
     context: PlanningContext,
     *,
     data_dir: Path,
+    resolved_template: ResolvedVapourSynthTemplate | None = None,
+    generator_version: int = GENERATOR_VERSION,
 ) -> TranscodePlan:
     match = match_profile(context.profile, context.normalized_probe)
     if not match.matched:
@@ -255,7 +339,27 @@ def build_plan(
     if context.media_file.id is None:
         raise PlanningError("Media file must be persisted before planning.")
 
-    profile_hash = build_profile_hash(context.profile)
+    if context.profile.vapoursynth_template is None and resolved_template is not None:
+        raise PlanningError("Resolved template was provided for a profile without a template.")
+    if context.profile.vapoursynth_template is not None and resolved_template is None:
+        raise PlanningError("Profile requires a resolved VapourSynth template.")
+    if (
+        context.profile.vapoursynth_template is not None
+        and resolved_template is not None
+        and context.profile.vapoursynth_template != resolved_template.path
+    ):
+        raise PlanningError("Resolved template path does not match the selected profile.")
+
+    mode = "custom_template" if resolved_template is not None else "generated"
+    template_hash = resolved_template.template_hash if resolved_template is not None else None
+    vapoursynth_identity_hash = build_vapoursynth_identity_hash(
+        generator_version=generator_version,
+        mode=mode,
+        output_format="YUV420P10",
+        resize_filter="spline36",
+        template_hash=template_hash,
+    )
+    profile_hash = build_profile_hash(context.profile, template_hash=template_hash)
     input_path = Path(context.media_file.path).resolve()
     source_fs_fingerprint = context.media_file.fs_fingerprint
     work_key = build_work_key(
@@ -263,6 +367,7 @@ def build_plan(
         source_fs_fingerprint=source_fs_fingerprint,
         probe_hash=context.probe_result.probe_hash,
         profile_hash=profile_hash,
+        vapoursynth_identity_hash=vapoursynth_identity_hash,
     )
     paths = build_plan_paths(data_dir=data_dir, work_key=work_key, input_path=input_path)
     video = select_video(context.normalized_probe, context.profile)
@@ -282,6 +387,27 @@ def build_plan(
         video=video,
         audio=audio,
         subtitles=subtitles,
+        vapoursynth=VapourSynthPlan(
+            generator_version=generator_version,
+            mode=mode,
+            script_path=paths.artifacts.vapoursynth_script,
+            source_path=input_path,
+            source_stream_index=video.source_stream_index,
+            index_cache_dir=paths.index_cache_dir,
+            target_width=video.target_width,
+            target_height=video.target_height,
+            output_format="YUV420P10",
+            resize_filter="spline36",
+            source_pix_fmt=video.source_pix_fmt,
+            source_color_transfer=video.source_color_transfer,
+            source_color_primaries=video.source_color_primaries,
+            source_color_space=video.source_color_space,
+            source_hdr_metadata_present=video.source_hdr_metadata_present,
+            hdr_to_sdr=video.hdr_to_sdr,
+            template_path=resolved_template.path if resolved_template is not None else None,
+            template_hash=template_hash,
+            identity_hash=vapoursynth_identity_hash,
+        ),
         av1an=Av1anCommandSpec(
             input_path=paths.artifacts.vapoursynth_script,
             output_path=paths.output_path,
@@ -302,7 +428,7 @@ def build_plan(
         ),
         artifacts=paths.artifacts,
     )
-    return plan.model_copy(update={"plan_hash": build_plan_hash(plan)})
+    return finalize_plan_hash(plan)
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +436,7 @@ class DerivedPlanPaths:
     artifacts: PlanArtifactPaths
     output_path: Path
     temp_dir: Path
+    index_cache_dir: Path
 
 
 def build_plan_paths(
@@ -336,16 +463,22 @@ def build_plan_paths(
         ),
         output_path=output_path,
         temp_dir=temp_dir,
+        index_cache_dir=work_dir / "lsmas",
     )
 
 
-def write_plan_artifacts(plan: TranscodePlan) -> PlanArtifactPaths:
+def write_plan_artifacts(
+    *,
+    plan: TranscodePlan,
+    vapoursynth_script: str,
+) -> PlanArtifactPaths:
+    validate_script_syntax(vapoursynth_script)
     paths = plan.artifacts
     artifact_dir = paths.artifact_dir
     parent = artifact_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
 
-    artifact_payloads = _artifact_payloads(plan)
+    artifact_payloads = _artifact_payloads(plan, vapoursynth_script=vapoursynth_script)
     if artifact_dir.exists():
         if _artifact_dir_matches(artifact_payloads, artifact_dir):
             return paths
@@ -359,7 +492,11 @@ def write_plan_artifacts(plan: TranscodePlan) -> PlanArtifactPaths:
     )
     try:
         for relative_path, content in artifact_payloads.items():
-            (temp_dir / relative_path).write_text(content, encoding="utf-8")
+            path = temp_dir / relative_path
+            with path.open("w", encoding="utf-8", newline="\n") as output_file:
+                output_file.write(content)
+                output_file.flush()
+                os.fsync(output_file.fileno())
         os.replace(temp_dir, artifact_dir)
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -368,9 +505,14 @@ def write_plan_artifacts(plan: TranscodePlan) -> PlanArtifactPaths:
     return paths
 
 
-def _artifact_payloads(plan: TranscodePlan) -> dict[str, str]:
+def _artifact_payloads(
+    plan: TranscodePlan,
+    *,
+    vapoursynth_script: str,
+) -> dict[str, str]:
     return {
         "plan.json": canonical_json(plan) + "\n",
+        plan.artifacts.vapoursynth_script.name: vapoursynth_script,
         "av1an.command.json": canonical_json(plan.av1an) + "\n",
         "validation-policy.json": canonical_json(plan.validation) + "\n",
     }

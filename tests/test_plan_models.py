@@ -11,12 +11,13 @@ from avarch.models.plan import (
     SubtitleStreamPlan,
     TranscodePlan,
     ValidationPolicy,
+    VapourSynthPlan,
     VideoPlan,
 )
 
 
 def test_plan_serializes_paths_as_strings() -> None:
-    plan = _plan()
+    plan = sample_plan()
 
     data = plan.model_dump(mode="json")
 
@@ -25,7 +26,7 @@ def test_plan_serializes_paths_as_strings() -> None:
 
 
 def test_plan_round_trips_through_json() -> None:
-    plan = _plan()
+    plan = sample_plan()
 
     restored = TranscodePlan.model_validate_json(plan.model_dump_json())
 
@@ -33,12 +34,41 @@ def test_plan_round_trips_through_json() -> None:
 
 
 def test_plan_defaults_to_manual_review() -> None:
-    data = _plan().model_dump()
+    data = sample_plan().model_dump()
     data.pop("promotion")
 
     plan = TranscodePlan.model_validate(data)
 
     assert plan.promotion.mode == "manual_review"
+
+
+def test_transcode_plan_schema_version_is_two() -> None:
+    assert sample_plan().schema_version == 2
+
+
+def test_transcode_plan_contains_vapoursynth_spec() -> None:
+    plan = sample_plan()
+
+    assert plan.vapoursynth.mode == "generated"
+    assert plan.vapoursynth.output_format == "YUV420P10"
+    assert plan.vapoursynth.resize_filter == "spline36"
+
+
+def test_av1an_input_matches_vapoursynth_script_path() -> None:
+    data = sample_plan().model_dump()
+    data["av1an"]["input_path"] = Path("/other/movie.mkv")
+
+    with pytest.raises(ValidationError):
+        TranscodePlan.model_validate(data)
+
+
+def test_video_plan_contains_source_pixel_and_color_metadata() -> None:
+    plan = sample_plan()
+
+    assert plan.video.source_pix_fmt == "yuv420p10le"
+    assert plan.video.source_color_transfer == "bt709"
+    assert plan.video.source_color_primaries == "bt709"
+    assert plan.video.source_color_space == "bt709"
 
 
 def test_av1an_spec_defaults_to_resume() -> None:
@@ -62,18 +92,25 @@ def test_plan_requires_valid_stream_indexes() -> None:
             source_width=3840,
             source_height=2160,
             source_bit_depth=10,
+            source_pix_fmt="yuv420p10le",
+            source_color_transfer="bt709",
+            source_color_primaries="bt709",
+            source_color_space="bt709",
             source_hdr_metadata_present=True,
             max_width=1920,
+            target_width=1920,
+            target_height=1080,
             resize_required=True,
             hdr_to_sdr=True,
             source="vapoursynth",
         )
 
 
-def _plan() -> TranscodePlan:
+def sample_plan() -> TranscodePlan:
     input_path = Path("/media/movie.mkv")
     output_path = Path("/output/movie.mkv")
     temp_dir = Path("/work/temp")
+    script_path = Path("/work/movie.vpy")
     return TranscodePlan(
         plan_hash="plan-hash",
         input_path=input_path,
@@ -90,8 +127,14 @@ def _plan() -> TranscodePlan:
             source_width=3840,
             source_height=2160,
             source_bit_depth=10,
-            source_hdr_metadata_present=True,
+            source_pix_fmt="yuv420p10le",
+            source_color_transfer="bt709",
+            source_color_primaries="bt709",
+            source_color_space="bt709",
+            source_hdr_metadata_present=False,
             max_width=1920,
+            target_width=1920,
+            target_height=1080,
             resize_required=True,
             hdr_to_sdr=True,
             source="vapoursynth",
@@ -118,8 +161,24 @@ def _plan() -> TranscodePlan:
                 )
             ]
         ),
+        vapoursynth=VapourSynthPlan(
+            mode="generated",
+            script_path=script_path,
+            source_path=input_path,
+            source_stream_index=0,
+            index_cache_dir=Path("/work/lsmas"),
+            target_width=1920,
+            target_height=1080,
+            source_pix_fmt="yuv420p10le",
+            source_color_transfer="bt709",
+            source_color_primaries="bt709",
+            source_color_space="bt709",
+            source_hdr_metadata_present=False,
+            hdr_to_sdr=True,
+            identity_hash="identity-hash",
+        ),
         av1an=Av1anCommandSpec(
-            input_path=input_path,
+            input_path=script_path,
             output_path=output_path,
             temp_dir=temp_dir,
             encoder="svt-av1",
@@ -137,7 +196,7 @@ def _plan() -> TranscodePlan:
         artifacts=PlanArtifactPaths(
             artifact_dir=Path("/work"),
             plan_json=Path("/work/plan.json"),
-            vapoursynth_script=Path("/work/movie.vpy"),
+            vapoursynth_script=script_path,
             av1an_command_json=Path("/work/av1an.command.json"),
             validation_policy_json=Path("/work/validation-policy.json"),
         ),

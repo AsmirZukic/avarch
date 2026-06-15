@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from avarch.cli import app
-from tests.probe_fixtures import representative_probe_payload
+from tests.probe_fixtures import sdr_probe_payload
 
 runner = CliRunner()
 
@@ -129,7 +129,7 @@ def test_probe_inspect_and_plan_workflow_builds_reviewable_artifacts(
     assert (artifact_dir / "plan.json").is_file()
     assert (artifact_dir / "av1an.command.json").is_file()
     assert (artifact_dir / "validation-policy.json").is_file()
-    assert not (artifact_dir / "movie.vpy").exists()
+    assert (artifact_dir / "movie.vpy").is_file()
     assert repeated_plan_result.exit_code == 0
     assert _artifact_dir_from_output(repeated_plan_result.output) == artifact_dir
 
@@ -218,7 +218,7 @@ def test_tui_workflow_can_be_opened_before_and_after_init(
 
 
 def _fake_ffprobe(_path: Path) -> dict[str, Any]:
-    return representative_probe_payload()
+    return sdr_probe_payload()
 
 
 def _init_config(tmp_path: Path) -> Path:
