@@ -1,4 +1,15 @@
-.PHONY: test lint format typecheck check
+.PHONY: bootstrap setup doctor run test lint format typecheck check
+
+bootstrap:
+	./scripts/bootstrap
+
+setup: bootstrap
+
+doctor:
+	uv run avarch doctor
+
+run:
+	uv run avarch tui
 
 test:
 	uv run pytest
