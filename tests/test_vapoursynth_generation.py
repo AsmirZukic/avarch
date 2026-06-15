@@ -23,12 +23,12 @@ def test_builtin_script_uses_finalized_plan_hash() -> None:
     assert "# Plan hash: plan-hash" in script
 
 
-def test_builtin_script_uses_lwlibavsource_and_planned_stream() -> None:
+def test_builtin_script_uses_bestsource_loader() -> None:
     script = generate_builtin_script(sample_plan())
 
-    assert "core.lsmas.LWLibavSource" in script
-    assert "stream_index=0" in script
-    assert "cachedir=index_cache_dir" in script
+    assert "clip = core.bs.VideoSource(source=source_path)" in script
+    assert "core.lsmas" not in script
+    assert "LWLibavSource" not in script
 
 
 def test_builtin_script_uses_planned_dimensions_and_output_format() -> None:
@@ -60,8 +60,8 @@ def test_builtin_script_escapes_path_as_python_literal() -> None:
 
     script = generate_builtin_script(plan)
 
-    assert 'source_path = "/media/movie\\\'s.mkv"' not in script
-    assert "source_path = " in script
+    assert 'source_path = "/media/movie\'s.mkv"' in script
+    validate_script_syntax(script)
 
 
 def test_builtin_script_rejects_unsupported_pixel_format() -> None:

@@ -11,6 +11,7 @@ dependencies = [
     "structlog>=26.1.0",
     "textual>=8.2.7",
     "typer>=0.26.7",
+    "vapoursynth-bestsource>=18.0",
 ]
 
 [build-system]

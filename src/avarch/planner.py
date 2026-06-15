@@ -463,7 +463,7 @@ def build_plan_paths(
         ),
         output_path=output_path,
         temp_dir=temp_dir,
-        index_cache_dir=work_dir / "lsmas",
+        index_cache_dir=work_dir / "bestsource",
     )
 
 

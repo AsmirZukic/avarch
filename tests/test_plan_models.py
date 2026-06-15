@@ -166,7 +166,7 @@ def sample_plan() -> TranscodePlan:
             script_path=script_path,
             source_path=input_path,
             source_stream_index=0,
-            index_cache_dir=Path("/work/lsmas"),
+            index_cache_dir=Path("/work/bestsource"),
             target_width=1920,
             target_height=1080,
             source_pix_fmt="yuv420p10le",

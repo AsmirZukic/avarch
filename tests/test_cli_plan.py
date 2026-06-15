@@ -59,6 +59,46 @@ def test_plan_command_does_not_run_vspipe_by_default(
     assert result.exit_code == 0
 
 
+def test_plan_command_check_vpy_validates_bestsource_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
+    _store_probe(config_path, media_file)
+    calls: list[Path] = []
+
+    def fake_check(script_path: Path) -> object:
+        calls.append(script_path)
+        return object()
+
+    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            str(media_file),
+            "--profile",
+            "av1_1080p_sdr",
+            "--check-vpy",
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    artifact_dir = _artifact_dir_from_output(result.output)
+    script_path = artifact_dir / "movie.vpy"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert result.exit_code == 0
+    assert calls == [script_path]
+    assert "core.bs.VideoSource" in script
+    assert "core.lsmas" not in script
+    assert "LWLibavSource" not in script
+    assert "runtime:    PASS" in result.output
+
+
 def test_plan_command_prints_summary(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
