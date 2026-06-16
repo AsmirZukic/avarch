@@ -6,6 +6,7 @@ from enum import StrEnum
 from sqlalchemy import Column, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 
 
@@ -80,6 +81,11 @@ class Job(SQLModel, table=True):
     latest_validation_id: int | None = Field(
         default=None,
         foreign_key="validationresult.id",
+        index=True,
+    )
+    latest_promotion_id: int | None = Field(
+        default=None,
+        foreign_key="promotionrecord.id",
         index=True,
     )
 
@@ -157,6 +163,55 @@ class ValidationResult(SQLModel, table=True):
     details_json: str
 
     created_at: datetime
+
+
+class PromotionRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+    operation_id: str = Field(unique=True, index=True)
+
+    job_id: int = Field(foreign_key="job.id", index=True)
+    attempt_id: int = Field(foreign_key="jobattempt.id", unique=True, index=True)
+    validation_result_id: int = Field(foreign_key="validationresult.id", index=True)
+
+    mode: PromotionMode = Field(sa_column=Column(String(), nullable=False, index=True))
+    status: PromotionStatus = Field(sa_column=Column(String(), nullable=False, index=True))
+    phase: PromotionPhase = Field(sa_column=Column(String(), nullable=False, index=True))
+
+    source_path: str
+    validated_output_path: str
+    final_path: str
+    staging_path: str
+    backup_path: str | None
+
+    source_fingerprint_before: str
+    source_stat_json: str
+
+    validated_output_fingerprint: str
+    validated_output_digest: str | None
+
+    staging_digest: str | None
+
+    final_fingerprint: str | None
+    final_digest: str | None
+
+    journal_path: str
+
+    owner_token: str | None = Field(default=None, index=True)
+    heartbeat_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+
+    cleanup_completed: bool = False
+    cleanup_error: str | None = None
+
+    error_type: str | None = None
+    error_message: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    started_at: datetime
+    finished_at: datetime | None = None
 
 
 class SchedulerState(SQLModel, table=True):

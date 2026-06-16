@@ -35,9 +35,10 @@ from avarch.execution import (
     execute_plan,
 )
 from avarch.logging import configure_logging
-from avarch.models.db import Job, MediaFile, MediaFileStatus, ValidationResult
+from avarch.models.db import Job, MediaFile, MediaFileStatus, PromotionRecord, ValidationResult
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
+from avarch.models.promotion import PromotionMode, PromotionStatus
 from avarch.models.scheduler import JobStage, JobStatus
 from avarch.models.validation import ValidationReport
 from avarch.planner import (
@@ -55,6 +56,13 @@ from avarch.probe import (
     parse_normalized_probe_json,
     run_ffprobe,
     store_probe_result,
+)
+from avarch.promoter import (
+    PromotionError,
+    PromotionPreflightResult,
+    execute_promotion,
+    recover_promotion,
+    validate_promotion_preflight,
 )
 from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.scheduler import (
@@ -629,8 +637,8 @@ def validate_file(
             raise typer.Exit(1)
         existing = _canonical_validation(session, job)
         if (
-            job.status == JobStatus.COMPLETED
-            and job.stage == JobStage.VALIDATE
+            job.status == JobStatus.VALIDATED
+            and job.stage == JobStage.PROMOTE
             and existing is not None
             and existing.passed
         ):
@@ -683,6 +691,109 @@ def validate_file(
     typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
     if not report.passed:
         raise typer.Exit(1)
+
+
+@app.command("promote")
+def promote_job(
+    job_id: Annotated[int, typer.Argument(help="Validated job id to promote.")],
+    mode: Annotated[
+        PromotionMode,
+        typer.Option("--mode", help="Promotion filesystem mode."),
+    ] = PromotionMode.KEEP_ORIGINAL,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Preview promotion without changing files or database rows.",
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Execute the promotion transaction."),
+    ] = False,
+    recover: Annotated[
+        bool,
+        typer.Option("--recover", help="Recover an interrupted promotion for this job."),
+    ] = False,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    runtime_config = _runtime_config(app_config, config)
+    owner_token = new_runner_id()
+
+    if recover:
+        try:
+            record = asyncio.run(
+                recover_promotion(
+                    job_id=job_id,
+                    config=runtime_config,
+                    owner_token=owner_token,
+                )
+            )
+        except PromotionError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        _echo_promotion_complete(record)
+        return
+
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                typer.echo(f"Job not found: {job_id}")
+                raise typer.Exit(1)
+            if job.plan_path is None:
+                typer.echo("Job has no plan artifact.")
+                raise typer.Exit(1)
+            plan = TranscodePlan.model_validate_json(
+                Path(job.plan_path).read_text(encoding="utf-8")
+            )
+            validation = _canonical_validation(session, job)
+            if validation is None:
+                typer.echo("Job has no current validation result.")
+                raise typer.Exit(1)
+            completed = session.exec(
+                select(PromotionRecord).where(
+                    PromotionRecord.job_id == job_id,
+                    PromotionRecord.status == PromotionStatus.COMPLETED,
+                )
+            ).first()
+            if completed is not None:
+                typer.echo("Job already has a completed promotion.")
+                raise typer.Exit(1)
+            preflight = validate_promotion_preflight(
+                job=job,
+                plan=plan,
+                validation=validation,
+                mode=mode,
+                operation_id=new_runner_id(),
+            )
+    except (OSError, ValidationError, ValueError, PromotionError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    if dry_run or not confirm:
+        _echo_promotion_preview(preflight, dry_run=dry_run)
+        return
+
+    try:
+        record = asyncio.run(
+            execute_promotion(
+                job_id=job_id,
+                mode=mode,
+                config=runtime_config,
+                owner_token=owner_token,
+            )
+        )
+    except PromotionError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    _echo_promotion_complete(record)
 
 
 @app.command("plan")
@@ -1092,6 +1203,50 @@ def _echo_encode_dry_run(plan: TranscodePlan) -> None:
     typer.echo("No encoding was started.")
 
 
+def _echo_promotion_preview(preflight: PromotionPreflightResult, *, dry_run: bool) -> None:
+    result = preflight
+    typer.echo("Promotion dry run" if dry_run else "Promotion preview")
+    typer.echo("")
+    typer.echo(f"Job:               {result.job_id}")
+    typer.echo(f"Mode:              {result.mode.value}")
+    typer.echo(f"Source:            {result.source_path}")
+    typer.echo(f"Validated output:  {result.validated_output_path}")
+    typer.echo(f"Final path:        {result.final_path}")
+    backup_path = result.backup_path if result.backup_path is not None else "none"
+    typer.echo(f"Backup path:       {backup_path}")
+    typer.echo(f"Staging path:      {result.staging_path}")
+    typer.echo("")
+    typer.echo("Validation:")
+    typer.echo(f"  result:          {result.validation_result_id}")
+    typer.echo("  passed:          yes")
+    typer.echo("  output unchanged:yes")
+    typer.echo("")
+    typer.echo("Actions:")
+    typer.echo("  1. Hash validated output")
+    typer.echo("  2. Copy to destination-local staging")
+    typer.echo("  3. Verify staging digest")
+    typer.echo("  4. Atomically install final path")
+    typer.echo("  5. Verify final digest")
+    typer.echo("  6. Commit promotion")
+    typer.echo("  7. Clean disposable work files")
+    typer.echo("")
+    typer.echo("No files were changed.")
+
+
+def _echo_promotion_complete(record: PromotionRecord) -> None:
+    typer.echo("Promotion complete")
+    typer.echo("")
+    typer.echo(f"Job:               {record.job_id}")
+    typer.echo(f"Mode:              {_promotion_mode_value(record.mode)}")
+    typer.echo(f"Source retained:   {_source_retained_path(record)}")
+    typer.echo(f"Promoted output:   {record.final_path}")
+    typer.echo(f"Validation result: {record.validation_result_id}")
+    typer.echo(f"Promotion record:  {record.id}")
+    typer.echo(f"Cleanup:           {'complete' if record.cleanup_completed else 'warning'}")
+    if record.cleanup_error:
+        typer.echo(f"Cleanup warning:   {record.cleanup_error}")
+
+
 def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
@@ -1106,6 +1261,19 @@ def _job_status_value(status: JobStatus | str) -> str:
 
 def _job_stage_value(stage: object) -> str:
     return str(getattr(stage, "value", stage))
+
+
+def _promotion_mode_value(mode: object) -> str:
+    return str(getattr(mode, "value", mode))
+
+
+def _source_retained_path(record: PromotionRecord) -> str:
+    mode = _promotion_mode_value(record.mode)
+    if mode == PromotionMode.KEEP_ORIGINAL.value:
+        return record.source_path
+    if record.backup_path is not None:
+        return record.backup_path
+    return "none"
 
 
 app.add_typer(db_app, name="db")

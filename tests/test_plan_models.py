@@ -18,6 +18,7 @@ from avarch.models.plan import (
     VapourSynthPlan,
     VideoPlan,
 )
+from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import DecodeSamplePolicy, ExpectedSubtitlePolicy
 
 
@@ -38,22 +39,21 @@ def test_plan_round_trips_through_json() -> None:
     assert restored == plan
 
 
-def test_plan_defaults_to_manual_review() -> None:
+def test_plan_requires_promotion_policy() -> None:
     data = sample_plan().model_dump()
     data.pop("promotion")
 
-    plan = TranscodePlan.model_validate(data)
+    with pytest.raises(ValidationError):
+        TranscodePlan.model_validate(data)
 
-    assert plan.promotion.mode == "manual_review"
 
-
-def test_transcode_plan_schema_version_is_four() -> None:
-    assert sample_plan().schema_version == 4
+def test_transcode_plan_schema_version_is_five() -> None:
+    assert sample_plan().schema_version == 5
 
 
 def test_transcode_plan_rejects_schema_three() -> None:
     data = sample_plan().model_dump()
-    data["schema_version"] = 3
+    data["schema_version"] = 4
 
     with pytest.raises(ValidationError):
         TranscodePlan.model_validate(data)
@@ -291,6 +291,7 @@ def sample_plan() -> TranscodePlan:
             minimum_size_reduction_percent=None,
             decode_sample=DecodeSamplePolicy(enabled=False, duration_seconds=5.0),
         ),
+        promotion=PromotionPolicy(policy_hash="promotion-policy-hash"),
         artifacts=PlanArtifactPaths(
             artifact_dir=Path("/work"),
             plan_json=Path("/work/plan.json"),

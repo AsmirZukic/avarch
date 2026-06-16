@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.contracts import TRANSCODE_PLAN_SCHEMA_VERSION
 from avarch.models.db import Job, JobAttempt, ValidationResult
 from avarch.models.plan import ExecutionRuntimePaths, TranscodePlan
 from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus
@@ -585,10 +586,9 @@ def persist_validation_result(
         raise ValidationPersistenceError("Validation result id was not assigned.")
 
     job.latest_validation_id = result.id
-    job.stage = JobStage.VALIDATE
     job.claimed_by = None
     job.updated_at = now
-    job.finished_at = now
+    job.finished_at = None
     attempt.status = AttemptStatus.COMPLETED
     attempt.finished_at = now
     attempt.output_path = str(report.output_path)
@@ -602,11 +602,14 @@ def persist_validation_result(
         }
     )
     if report.passed:
-        job.status = JobStatus.COMPLETED
+        job.status = JobStatus.VALIDATED
+        job.stage = JobStage.PROMOTE
         job.last_error_type = None
         job.last_error_message = None
     else:
         job.status = JobStatus.FAILED
+        job.stage = JobStage.VALIDATE
+        job.finished_at = now
         job.last_error_type = "ValidationFailed"
         job.last_error_message = failed_check_summary(report)
     session.add(job)
@@ -742,7 +745,7 @@ def _verify_validation_contract(
     plan: TranscodePlan,
     policy: ValidationPolicy,
 ) -> None:
-    if plan.schema_version != 4:
+    if plan.schema_version != TRANSCODE_PLAN_SCHEMA_VERSION:
         raise ValidationPolicyError(
             "Unsupported plan schema.\n\nRegenerate this plan with the current avarch version."
         )

@@ -244,7 +244,7 @@ def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
 
     assert result.exit_code == 0
     assert "failed" in result.output
-    assert "completed" in result.output
+    assert "validated" in result.output
     assert "PASS" in result.output
     assert "encoder crashed" in result.output
 
@@ -514,12 +514,11 @@ def _store_completed_validation_job(
         plan_hash=plan.plan_hash,
         plan_path=str(plan.artifacts.plan_json),
         output_path=str(plan.output_path),
-        status=JobStatus.COMPLETED,
-        stage=JobStage.VALIDATE,
+        status=JobStatus.VALIDATED,
+        stage=JobStage.PROMOTE,
         attempts=1,
         created_at=now,
         updated_at=now,
-        finished_at=now,
     )
     session.add(job)
     session.flush()

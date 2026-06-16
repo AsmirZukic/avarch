@@ -30,6 +30,7 @@ def test_cli_version_exits_successfully() -> None:
         ["probe"],
         ["inspect"],
         ["plan"],
+        ["promote"],
         ["tui"],
         ["db"],
         ["db", "current"],

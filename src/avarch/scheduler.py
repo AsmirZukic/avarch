@@ -606,8 +606,8 @@ async def execute_validation_job(
     with Session(engine) as session, session.begin():
         job = _require_job(session, job_id)
         if (
-            job.status == JobStatus.COMPLETED
-            and job.stage == JobStage.VALIDATE
+            job.status == JobStatus.VALIDATED
+            and job.stage == JobStage.PROMOTE
             and _latest_validation_passed(session, job)
         ):
             return session.get(ValidationResult, job.latest_validation_id)
@@ -917,6 +917,8 @@ def resource_for_stage(stage: JobStage) -> ResourceClass:
         return ResourceClass.CHEAP
     if stage == JobStage.ENCODE:
         return ResourceClass.HEAVY_AV1AN
+    if stage == JobStage.PROMOTE:
+        return ResourceClass.FILE_OP
     raise ValueError(f"Unsupported job stage: {stage}")
 
 
@@ -1152,6 +1154,7 @@ def _snapshot_job(job: Job) -> Job:
         plan_path=job.plan_path,
         output_path=job.output_path,
         latest_validation_id=job.latest_validation_id,
+        latest_promotion_id=job.latest_promotion_id,
         status=JobStatus(job.status),
         stage=JobStage(job.stage),
         priority=job.priority,

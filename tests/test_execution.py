@@ -30,6 +30,7 @@ from avarch.models.plan import (
     VapourSynthPlan,
     VideoPlan,
 )
+from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import DecodeSamplePolicy
 from avarch.scanner import create_file_snapshot
 
@@ -434,6 +435,7 @@ def _sample_plan(tmp_path: Path) -> TranscodePlan:
             minimum_size_reduction_percent=None,
             decode_sample=DecodeSamplePolicy(enabled=False, duration_seconds=5.0),
         ),
+        promotion=PromotionPolicy(policy_hash="promotion-policy-hash"),
         artifacts=PlanArtifactPaths(
             artifact_dir=artifact_dir,
             plan_json=artifact_dir / "plan.json",

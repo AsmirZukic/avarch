@@ -39,6 +39,7 @@ def upgrade() -> None:
         sa.Column("plan_path", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("output_path", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("latest_validation_id", sa.Integer(), nullable=True),
+        sa.Column("latest_promotion_id", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("stage", sa.String(), nullable=False),
         sa.Column("priority", sa.Integer(), nullable=False),
@@ -56,6 +57,10 @@ def upgrade() -> None:
             ["validationresult.id"],
         ),
         sa.ForeignKeyConstraint(
+            ["latest_promotion_id"],
+            ["promotionrecord.id"],
+        ),
+        sa.ForeignKeyConstraint(
             ["media_file_id"],
             ["mediafile.id"],
         ),
@@ -70,6 +75,12 @@ def upgrade() -> None:
         op.f("ix_job_latest_validation_id"),
         "job",
         ["latest_validation_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_job_latest_promotion_id"),
+        "job",
+        ["latest_promotion_id"],
         unique=False,
     )
     op.create_index(
@@ -264,9 +275,103 @@ def upgrade() -> None:
         ["policy_hash"],
         unique=False,
     )
+    op.create_table(
+        "promotionrecord",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("operation_id", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("job_id", sa.Integer(), nullable=False),
+        sa.Column("attempt_id", sa.Integer(), nullable=False),
+        sa.Column("validation_result_id", sa.Integer(), nullable=False),
+        sa.Column("mode", sa.String(), nullable=False),
+        sa.Column("status", sa.String(), nullable=False),
+        sa.Column("phase", sa.String(), nullable=False),
+        sa.Column("source_path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("validated_output_path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("final_path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("staging_path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("backup_path", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("source_fingerprint_before", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("source_stat_json", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column(
+            "validated_output_fingerprint",
+            sqlmodel.sql.sqltypes.AutoString(),
+            nullable=False,
+        ),
+        sa.Column("validated_output_digest", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("staging_digest", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("final_fingerprint", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("final_digest", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("journal_path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("owner_token", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("heartbeat_at", sa.DateTime(), nullable=True),
+        sa.Column("lease_expires_at", sa.DateTime(), nullable=True),
+        sa.Column("cleanup_completed", sa.Boolean(), nullable=False),
+        sa.Column("cleanup_error", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("error_type", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("error_message", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("started_at", sa.DateTime(), nullable=False),
+        sa.Column("finished_at", sa.DateTime(), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["attempt_id"],
+            ["jobattempt.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["job_id"],
+            ["job.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["validation_result_id"],
+            ["validationresult.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        op.f("ix_promotionrecord_attempt_id"),
+        "promotionrecord",
+        ["attempt_id"],
+        unique=True,
+    )
+    op.create_index(op.f("ix_promotionrecord_job_id"), "promotionrecord", ["job_id"], unique=False)
+    op.create_index(op.f("ix_promotionrecord_mode"), "promotionrecord", ["mode"], unique=False)
+    op.create_index(
+        op.f("ix_promotionrecord_operation_id"),
+        "promotionrecord",
+        ["operation_id"],
+        unique=True,
+    )
+    op.create_index(
+        op.f("ix_promotionrecord_owner_token"),
+        "promotionrecord",
+        ["owner_token"],
+        unique=False,
+    )
+    op.create_index(op.f("ix_promotionrecord_phase"), "promotionrecord", ["phase"], unique=False)
+    op.create_index(
+        op.f("ix_promotionrecord_status"),
+        "promotionrecord",
+        ["status"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_promotionrecord_validation_result_id"),
+        "promotionrecord",
+        ["validation_result_id"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(op.f("ix_promotionrecord_validation_result_id"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_status"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_phase"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_owner_token"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_operation_id"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_mode"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_job_id"), table_name="promotionrecord")
+    op.drop_index(op.f("ix_promotionrecord_attempt_id"), table_name="promotionrecord")
+    op.drop_table("promotionrecord")
     op.drop_index(op.f("ix_validationresult_policy_hash"), table_name="validationresult")
     op.drop_index(op.f("ix_validationresult_plan_hash"), table_name="validationresult")
     op.drop_index(op.f("ix_validationresult_passed"), table_name="validationresult")
@@ -299,6 +404,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_job_priority"), table_name="job")
     op.drop_index(op.f("ix_job_plan_hash"), table_name="job")
     op.drop_index(op.f("ix_job_media_file_id"), table_name="job")
+    op.drop_index(op.f("ix_job_latest_promotion_id"), table_name="job")
     op.drop_index(op.f("ix_job_latest_validation_id"), table_name="job")
     op.drop_index(op.f("ix_job_claimed_by"), table_name="job")
     op.drop_table("job")

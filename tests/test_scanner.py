@@ -111,6 +111,35 @@ def test_scan_root_ignores_unsupported_extensions(tmp_path: Path) -> None:
     assert snapshots == []
 
 
+def test_scan_root_ignores_top_level_original_backup(tmp_path: Path) -> None:
+    (tmp_path / "movie.mkv.avarch-original").write_bytes(b"abc")
+
+    snapshots = scan_root(tmp_path, extensions={".avarch-original"}, exclude_directories=set())
+
+    assert snapshots == []
+
+
+def test_scan_root_ignores_nested_original_backup(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "movie.mkv.avarch-original").write_bytes(b"abc")
+
+    snapshots = scan_root(tmp_path, extensions={".avarch-original"}, exclude_directories=set())
+
+    assert snapshots == []
+
+
+def test_scan_root_keeps_similarly_named_media_without_exact_backup_suffix(
+    tmp_path: Path,
+) -> None:
+    movie = tmp_path / "movie.avarch-original.mkv"
+    movie.write_bytes(b"abc")
+
+    snapshots = scan_root(tmp_path, extensions={".mkv"}, exclude_directories=set())
+
+    assert [snapshot.path for snapshot in snapshots] == [movie.resolve()]
+
+
 def test_scan_root_accepts_uppercase_extensions(tmp_path: Path) -> None:
     movie = tmp_path / "movie.MKV"
     movie.write_bytes(b"abc")

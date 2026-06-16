@@ -16,6 +16,7 @@ from avarch.contracts import (
     EXECUTION_IDENTITY_HASH_CONTRACT,
     PLAN_HASH_CONTRACT,
     PROFILE_HASH_CONTRACT,
+    PROMOTION_POLICY_HASH_CONTRACT,
     VALIDATION_POLICY_HASH_CONTRACT,
     WORK_KEY_CONTRACT,
 )
@@ -36,6 +37,7 @@ from avarch.models.plan import (
     VideoPlan,
 )
 from avarch.models.probe import NormalizedProbe, SubtitleStream, VideoStream
+from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import (
     DecodeSamplePolicy,
     ExpectedSubtitlePolicy,
@@ -118,6 +120,7 @@ def build_work_key(
     profile_hash: str,
     vapoursynth_identity_hash: str,
     execution_identity_hash: str,
+    promotion_policy_hash: str,
 ) -> str:
     payload_json = canonical_json(
         {
@@ -127,6 +130,7 @@ def build_work_key(
             "profile_hash": profile_hash,
             "vapoursynth_identity_hash": vapoursynth_identity_hash,
             "execution_identity_hash": execution_identity_hash,
+            "promotion_policy_hash": promotion_policy_hash,
         }
     )
     payload = f"{WORK_KEY_CONTRACT}\0".encode() + payload_json.encode("utf-8")
@@ -198,6 +202,19 @@ def build_validation_policy_hash(policy: ValidationPolicy) -> str:
 
 def finalize_validation_policy(policy: ValidationPolicy) -> ValidationPolicy:
     return policy.model_copy(update={"policy_hash": build_validation_policy_hash(policy)})
+
+
+def build_promotion_policy_hash(policy: PromotionPolicy) -> str:
+    payload_data = policy.model_dump(mode="json")
+    payload_data.pop("policy_hash", None)
+    payload = f"{PROMOTION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(
+        payload_data
+    ).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=32).hexdigest()
+
+
+def finalize_promotion_policy(policy: PromotionPolicy) -> PromotionPolicy:
+    return policy.model_copy(update={"policy_hash": build_promotion_policy_hash(policy)})
 
 
 def load_planning_context(
@@ -493,6 +510,7 @@ def build_plan(
     )
     profile_hash = build_profile_hash(context.profile, template_hash=template_hash)
     execution_identity = build_execution_identity()
+    promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
     input_path = Path(context.media_file.path).resolve()
     source_fs_fingerprint = context.media_file.fs_fingerprint
     work_key = build_work_key(
@@ -502,6 +520,7 @@ def build_plan(
         profile_hash=profile_hash,
         vapoursynth_identity_hash=vapoursynth_identity_hash,
         execution_identity_hash=execution_identity.identity_hash,
+        promotion_policy_hash=promotion_policy.policy_hash,
     )
     paths = build_plan_paths(data_dir=data_dir, work_key=work_key, input_path=input_path)
     video = select_video(context.normalized_probe, context.profile)
@@ -582,6 +601,7 @@ def build_plan(
             subtitles=subtitles,
             source_size_bytes=context.media_file.size_bytes,
         ),
+        promotion=promotion_policy,
         artifacts=paths.artifacts,
     )
     return finalize_plan_hash(plan)

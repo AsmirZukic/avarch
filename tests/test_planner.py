@@ -9,6 +9,7 @@ from avarch.planner import (
     PlanningContext,
     build_plan,
     build_plan_hash_payload,
+    build_work_key,
 )
 from avarch.probe import build_probe_hash, normalize_probe
 from avarch.serialization import canonical_json
@@ -47,6 +48,37 @@ def test_plan_hash_payload_excludes_plan_hash(tmp_path: Path) -> None:
 
     assert "plan_hash" not in payload
     assert "vapoursynth" in payload
+
+
+def test_plan_hash_payload_includes_promotion_policy(tmp_path: Path) -> None:
+    plan = build_plan(_context(tmp_path), data_dir=tmp_path / ".avarch")
+
+    payload = build_plan_hash_payload(plan)
+
+    assert payload["promotion"]["policy_hash"] == plan.promotion.policy_hash
+
+
+def test_work_key_uses_promotion_policy_hash(tmp_path: Path) -> None:
+    first = build_work_key(
+        input_path=tmp_path / "movie.mkv",
+        source_fs_fingerprint="source-fs",
+        probe_hash="probe",
+        profile_hash="profile",
+        vapoursynth_identity_hash="vpy",
+        execution_identity_hash="execution",
+        promotion_policy_hash="one",
+    )
+    second = build_work_key(
+        input_path=tmp_path / "movie.mkv",
+        source_fs_fingerprint="source-fs",
+        probe_hash="probe",
+        profile_hash="profile",
+        vapoursynth_identity_hash="vpy",
+        execution_identity_hash="execution",
+        promotion_policy_hash="two",
+    )
+
+    assert first != second
 
 
 def _context(tmp_path: Path) -> PlanningContext:

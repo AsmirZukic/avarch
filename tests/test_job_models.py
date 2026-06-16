@@ -8,7 +8,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus, SchedulerState
+from avarch.models.db import (
+    Job,
+    JobAttempt,
+    MediaFile,
+    MediaFileStatus,
+    PromotionRecord,
+    SchedulerState,
+    ValidationResult,
+)
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 
 
@@ -173,6 +182,118 @@ def test_job_enums_round_trip_through_sqlite(tmp_path: Path) -> None:
     assert stored.status == JobStatus.PENDING
 
 
+def test_validated_promote_job_enums_round_trip(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        media_file = _media_file(now)
+        session.add(media_file)
+        session.commit()
+        session.refresh(media_file)
+        session.add(
+            _job(
+                media_file.id or 0,
+                now,
+                status=JobStatus.VALIDATED,
+                stage=JobStage.PROMOTE,
+            )
+        )
+        session.commit()
+
+        stored = session.exec(select(Job)).one()
+
+    assert stored.status == JobStatus.VALIDATED
+    assert stored.stage == JobStage.PROMOTE
+
+
+def test_insert_prepared_promotion_record(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        media_file = _media_file(now)
+        session.add(media_file)
+        session.commit()
+        session.refresh(media_file)
+        job = _job(media_file.id or 0, now, stage=JobStage.PROMOTE)
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        validation_attempt = JobAttempt(
+            job_id=job.id or 0,
+            attempt_number=1,
+            stage=JobStage.VALIDATE,
+            resource_class=ResourceClass.CHEAP,
+            status=AttemptStatus.COMPLETED,
+            runner_id="runner",
+            started_at=now,
+            finished_at=now,
+        )
+        session.add(validation_attempt)
+        session.commit()
+        session.refresh(validation_attempt)
+        validation = ValidationResult(
+            job_id=job.id or 0,
+            attempt_id=validation_attempt.id or 0,
+            plan_hash="plan-hash",
+            policy_hash="policy-hash",
+            output_path="/work/movie.av1.mkv",
+            output_fs_fingerprint="output-fs",
+            passed=True,
+            details_json="{}",
+            created_at=now,
+        )
+        session.add(validation)
+        session.commit()
+        session.refresh(validation)
+        promotion_attempt = JobAttempt(
+            job_id=job.id or 0,
+            attempt_number=2,
+            stage=JobStage.PROMOTE,
+            resource_class=ResourceClass.FILE_OP,
+            status=AttemptStatus.RUNNING,
+            runner_id="runner",
+            started_at=now,
+        )
+        session.add(promotion_attempt)
+        session.commit()
+        session.refresh(promotion_attempt)
+        session.add(
+            PromotionRecord(
+                operation_id="operation",
+                job_id=job.id or 0,
+                attempt_id=promotion_attempt.id or 0,
+                validation_result_id=validation.id or 0,
+                mode=PromotionMode.KEEP_ORIGINAL,
+                status=PromotionStatus.RUNNING,
+                phase=PromotionPhase.PREPARED,
+                source_path="/media/movie.mkv",
+                validated_output_path="/work/movie.av1.mkv",
+                final_path="/media/movie.av1.mkv",
+                staging_path="/media/.movie.av1.mkv.avarch-promote-operation.tmp",
+                backup_path=None,
+                source_fingerprint_before="source-fs",
+                source_stat_json="{}",
+                validated_output_fingerprint="output-fs",
+                validated_output_digest=None,
+                staging_digest=None,
+                final_fingerprint=None,
+                final_digest=None,
+                journal_path="/work/runtime/promotion-journal.json",
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+            )
+        )
+        session.commit()
+
+        stored = session.exec(select(PromotionRecord)).one()
+
+    assert stored.mode == PromotionMode.KEEP_ORIGINAL
+    assert stored.phase == PromotionPhase.PREPARED
+
+
 def _engine(tmp_path: Path):
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
@@ -199,6 +320,7 @@ def _job(
     *,
     queue_key: str = "queue-key",
     plan_hash: str | None = None,
+    status: JobStatus = JobStatus.PENDING,
     stage: JobStage = JobStage.PROBE,
 ) -> Job:
     return Job(
@@ -208,7 +330,7 @@ def _job(
         source_fs_fingerprint="fingerprint",
         queue_key=queue_key,
         plan_hash=plan_hash,
-        status=JobStatus.PENDING,
+        status=status,
         stage=stage,
         created_at=now,
         updated_at=now,

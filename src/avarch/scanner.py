@@ -105,6 +105,8 @@ def scan_root(
             ]
 
             for filename in filenames:
+                if filename.endswith(".avarch-original"):
+                    continue
                 path = Path(directory) / filename
                 if path.is_symlink() or path.suffix.lower() not in normalized_extensions:
                     continue

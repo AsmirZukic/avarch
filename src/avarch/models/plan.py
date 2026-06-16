@@ -15,6 +15,7 @@ from avarch.contracts import (
     TRANSCODE_PLAN_SCHEMA_VERSION,
     VAPOURSYNTH_PLAN_SCHEMA_VERSION,
 )
+from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import ValidationPolicy
 
 AV1AN_COMMAND_CONTRACT_VERSION = 2
@@ -239,12 +240,8 @@ class VapourSynthPlan(BaseModel):
     identity_hash: str
 
 
-class PromotionPolicy(BaseModel):
-    mode: Literal["manual_review"] = "manual_review"
-
-
 class TranscodePlan(BaseModel):
-    schema_version: Literal[4] = TRANSCODE_PLAN_SCHEMA_VERSION
+    schema_version: Literal[5] = TRANSCODE_PLAN_SCHEMA_VERSION
     plan_hash: str
 
     input_path: Path
@@ -268,7 +265,7 @@ class TranscodePlan(BaseModel):
     mux: FfmpegMuxSpec
     runtime: ExecutionRuntimePaths
     validation: ValidationPolicy
-    promotion: PromotionPolicy = Field(default_factory=PromotionPolicy)
+    promotion: PromotionPolicy
     artifacts: PlanArtifactPaths
 
     @model_validator(mode="after")

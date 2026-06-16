@@ -9,6 +9,7 @@ from pathlib import Path
 
 from avarch.config import EncodingProfile
 from avarch.contracts import (
+    TRANSCODE_PLAN_SCHEMA_VERSION,
     VAPOURSYNTH_IDENTITY_HASH_CONTRACT,
     VAPOURSYNTH_TEMPLATE_HASH_CONTRACT,
 )
@@ -367,7 +368,7 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
 
 
 def _validate_common_plan(plan: TranscodePlan) -> None:
-    if plan.schema_version != 4:
+    if plan.schema_version != TRANSCODE_PLAN_SCHEMA_VERSION:
         raise VapourSynthGenerationError(f"unsupported plan schema version: {plan.schema_version}")
     if plan.vapoursynth.schema_version != 1:
         raise VapourSynthGenerationError(

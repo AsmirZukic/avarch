@@ -40,6 +40,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
         "proberesult",
         "job",
         "jobattempt",
+        "promotionrecord",
         "schedulerstate",
         "validationresult",
     } <= tables
@@ -55,6 +56,7 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     probe_indexes = {index["name"] for index in inspector.get_indexes("proberesult")}
     job_indexes = {index["name"] for index in inspector.get_indexes("job")}
     validation_indexes = {index["name"] for index in inspector.get_indexes("validationresult")}
+    promotion_indexes = {index["name"] for index in inspector.get_indexes("promotionrecord")}
 
     assert "ix_mediafile_fs_fingerprint" in media_indexes
     assert "ix_mediafile_latest_probe_id" in media_indexes
@@ -63,6 +65,8 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     assert "ix_job_queue_key" in job_indexes
     assert "ix_job_plan_hash" in job_indexes
     assert "ix_validationresult_attempt_id" in validation_indexes
+    assert "ix_promotionrecord_operation_id" in promotion_indexes
+    assert "ix_promotionrecord_attempt_id" in promotion_indexes
 
 
 def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
@@ -95,6 +99,18 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
         table="validationresult",
         columns=["job_id"],
         referred_table="job",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="job",
+        columns=["latest_promotion_id"],
+        referred_table="promotionrecord",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="promotionrecord",
+        columns=["validation_result_id"],
+        referred_table="validationresult",
     )
 
 
@@ -132,9 +148,18 @@ def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Pa
             "validationresult",
             _validation_values(job_id, attempt_id, now),
         )
+        promotion_id = _insert(
+            connection,
+            "promotionrecord",
+            _promotion_values(job_id, attempt_id, validation_id, now),
+        )
         connection.execute(
             sa.text("UPDATE job SET latest_validation_id = :validation_id WHERE id = :job_id"),
             {"validation_id": validation_id, "job_id": job_id},
+        )
+        connection.execute(
+            sa.text("UPDATE job SET latest_promotion_id = :promotion_id WHERE id = :job_id"),
+            {"promotion_id": promotion_id, "job_id": job_id},
         )
 
         violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
@@ -254,6 +279,35 @@ def _validation_values(job_id: int, attempt_id: int, now: datetime) -> dict[str,
         "passed": True,
         "details_json": "{}",
         "created_at": now,
+    }
+
+
+def _promotion_values(
+    job_id: int,
+    attempt_id: int,
+    validation_id: int,
+    now: datetime,
+) -> dict[str, object]:
+    return {
+        "operation_id": "operation",
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "validation_result_id": validation_id,
+        "mode": "keep-original",
+        "status": "completed",
+        "phase": "committed",
+        "source_path": "/media/movie.mkv",
+        "validated_output_path": "/work/movie.av1.mkv",
+        "final_path": "/media/movie.av1.mkv",
+        "staging_path": "/media/.movie.av1.mkv.avarch-promote-operation.tmp",
+        "source_fingerprint_before": "source-fs",
+        "source_stat_json": "{}",
+        "validated_output_fingerprint": "output-fs",
+        "journal_path": "/work/runtime/promotion-journal.json",
+        "cleanup_completed": True,
+        "created_at": now,
+        "updated_at": now,
+        "started_at": now,
     }
 
 
