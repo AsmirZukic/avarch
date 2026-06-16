@@ -23,11 +23,7 @@ def upgrade_database(database_url: str) -> None:
     try:
         command.upgrade(_alembic_config(database_url), "head")
     except CommandError as exc:
-        raise UnsupportedDatabaseSchemaError(
-            "Unsupported development database schema.\n"
-            "Delete .avarch and initialize a fresh database.\n\n"
-            f"{RESET_DATABASE_MESSAGE}"
-        ) from exc
+        raise UnsupportedDatabaseSchemaError(RESET_DATABASE_MESSAGE) from exc
 
 
 def get_current_revision(database_url: str) -> str | None:

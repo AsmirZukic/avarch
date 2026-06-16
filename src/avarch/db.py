@@ -8,14 +8,11 @@ from sqlmodel import SQLModel, create_engine
 
 from avarch.contracts import ALEMBIC_BASELINE_REVISION
 
-RESET_DATABASE_MESSAGE = """This database belongs to an unsupported development schema.
+RESET_DATABASE_MESSAGE = """This database cannot be used by this avarch build.
 
-avarch no longer provides migration compatibility for earlier
-development builds.
+Move or remove the configured avarch data directory, then initialize
+fresh local state:
 
-Delete the .avarch database and regenerate local state:
-
-    rm -rf .avarch
     uv run avarch init --config ./avarch.toml
     uv run avarch db upgrade --config ./avarch.toml
     uv run avarch scan --config ./avarch.toml"""

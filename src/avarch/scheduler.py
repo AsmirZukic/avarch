@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
 from avarch.config import AppConfig, EncodingProfile
-from avarch.contracts import QUEUE_CONTRACT, TRANSCODE_PLAN_SCHEMA_VERSION
+from avarch.contracts import QUEUE_CONTRACT
 from avarch.db import create_db_engine
 from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.models.db import (
@@ -161,7 +161,6 @@ def build_queue_key(
             "probe_hash": probe_hash,
             "vapoursynth_identity_hash": vapoursynth_identity_hash,
             "execution_identity_hash": execution_identity_hash,
-            "plan_schema_version": TRANSCODE_PLAN_SCHEMA_VERSION,
             "queue_contract": QUEUE_CONTRACT,
         }
     )

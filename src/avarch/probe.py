@@ -307,10 +307,6 @@ def parse_normalized_probe_json(value: str) -> NormalizedProbe:
         normalized = NormalizedProbe.model_validate(data)
     except ValidationError as exc:
         raise ProbeOutputError("Stored normalized probe JSON is not supported") from exc
-    if normalized.schema_version != 1:
-        raise ProbeOutputError(
-            f"Unsupported normalized probe schema version: {normalized.schema_version}"
-        )
     return normalized
 
 

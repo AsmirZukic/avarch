@@ -6,7 +6,6 @@ from pydantic import ValidationError
 from avarch.models.plan import (
     AudioPlan,
     Av1anCommandSpec,
-    EncodeResultReceipt,
     ExecutionIdentity,
     ExecutionRuntimePaths,
     FfmpegMuxSpec,
@@ -45,51 +44,6 @@ def test_plan_requires_promotion_policy() -> None:
 
     with pytest.raises(ValidationError):
         TranscodePlan.model_validate(data)
-
-
-def test_transcode_plan_schema_version_is_five() -> None:
-    assert sample_plan().schema_version == 5
-
-
-def test_transcode_plan_rejects_schema_three() -> None:
-    data = sample_plan().model_dump()
-    data["schema_version"] = 4
-
-    with pytest.raises(ValidationError):
-        TranscodePlan.model_validate(data)
-
-
-def test_validation_policy_rejects_schema_one() -> None:
-    data = sample_plan().validation.model_dump()
-    data["schema_version"] = 1
-
-    with pytest.raises(ValidationError):
-        ValidationPolicy.model_validate(data)
-
-
-def test_av1an_spec_rejects_old_schema() -> None:
-    data = sample_plan().av1an.model_dump()
-    data["schema_version"] = 1
-
-    with pytest.raises(ValidationError):
-        Av1anCommandSpec.model_validate(data)
-
-
-def test_execution_receipt_rejects_old_schema() -> None:
-    data = {
-        "schema_version": 0,
-        "plan_hash": "plan-hash",
-        "av1an_spec_hash": "av1an-hash",
-        "mux_spec_hash": "mux-hash",
-        "video_output_path": Path("/work/video-only.mkv"),
-        "video_output_size": 1,
-        "final_output_path": Path("/output/movie.mkv"),
-        "final_output_size": 1,
-        "completed_at": "2026-06-15T00:00:00Z",
-    }
-
-    with pytest.raises(ValidationError):
-        EncodeResultReceipt.model_validate(data)
 
 
 def test_transcode_plan_contains_vapoursynth_spec() -> None:

@@ -749,9 +749,13 @@ def promote_job(
             if job.plan_path is None:
                 typer.echo("Job has no plan artifact.")
                 raise typer.Exit(1)
-            plan = TranscodePlan.model_validate_json(
-                Path(job.plan_path).read_text(encoding="utf-8")
-            )
+            try:
+                plan = TranscodePlan.model_validate_json(
+                    Path(job.plan_path).read_text(encoding="utf-8")
+                )
+            except (OSError, ValidationError, ValueError) as exc:
+                typer.echo("Job plan artifact is not usable. Regenerate the plan for this job.")
+                raise typer.Exit(1) from exc
             validation = _canonical_validation(session, job)
             if validation is None:
                 typer.echo("Job has no current validation result.")
@@ -772,7 +776,7 @@ def promote_job(
                 mode=mode,
                 operation_id=new_runner_id(),
             )
-    except (OSError, ValidationError, ValueError, PromotionError) as exc:
+    except PromotionError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 

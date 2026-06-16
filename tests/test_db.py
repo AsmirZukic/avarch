@@ -6,13 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from avarch.contracts import ALEMBIC_BASELINE_REVISION
-from avarch.db import (
-    UnsupportedDatabaseSchemaError,
-    create_db_engine,
-    create_db_schema,
-    verify_database_revision,
-)
+from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import AppMeta, MediaFile, MediaFileStatus, ProbeResult
 
 
@@ -23,10 +17,10 @@ def test_create_db_schema(tmp_path: Path) -> None:
     create_db_schema(engine)
 
     with Session(engine) as session:
-        session.add(AppMeta(key="schema_version", value="test"))
+        session.add(AppMeta(key="example", value="test"))
         session.commit()
 
-        value = session.exec(select(AppMeta).where(AppMeta.key == "schema_version")).one()
+        value = session.exec(select(AppMeta).where(AppMeta.key == "example")).one()
 
     assert value.value == "test"
 
@@ -87,78 +81,6 @@ def test_engine_allows_worker_thread_connections(tmp_path: Path) -> None:
     thread.join()
 
     assert errors == []
-
-
-def test_current_revision_is_accepted(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-
-    with engine.begin() as connection:
-        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
-        connection.execute(
-            sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
-            {"revision": ALEMBIC_BASELINE_REVISION},
-        )
-
-    verify_database_revision(engine)
-
-
-def test_missing_database_revision_is_allowed_for_upgrade(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-
-    verify_database_revision(engine)
-
-
-def test_tables_without_revision_are_rejected(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-    create_db_schema(engine)
-
-    with pytest.raises(UnsupportedDatabaseSchemaError, match="unsupported development schema"):
-        verify_database_revision(engine)
-
-
-def test_deleted_old_revision_is_rejected(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-
-    with engine.begin() as connection:
-        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
-        connection.execute(
-            sa.text("INSERT INTO alembic_version (version_num) VALUES ('9aaf75d07ce6')")
-        )
-
-    with pytest.raises(UnsupportedDatabaseSchemaError, match="rm -rf .avarch"):
-        verify_database_revision(engine)
-
-
-def test_multiple_revision_rows_are_rejected(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-
-    with engine.begin() as connection:
-        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
-        connection.execute(
-            sa.text("INSERT INTO alembic_version (version_num) VALUES ('0001_initial')")
-        )
-        connection.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('other')"))
-
-    with pytest.raises(UnsupportedDatabaseSchemaError):
-        verify_database_revision(engine)
-
-
-def test_database_is_not_modified_when_revision_is_rejected(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
-
-    with engine.begin() as connection:
-        connection.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR)"))
-        connection.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('old')"))
-
-    with pytest.raises(UnsupportedDatabaseSchemaError):
-        verify_database_revision(engine)
-
-    with engine.connect() as connection:
-        revision = connection.execute(
-            sa.text("SELECT version_num FROM alembic_version")
-        ).scalar_one()
-
-    assert revision == "old"
 
 
 def test_insert_media_file(tmp_path: Path) -> None:

@@ -12,7 +12,6 @@ from typing import Any
 
 from sqlmodel import Session
 
-from avarch.contracts import TRANSCODE_PLAN_SCHEMA_VERSION
 from avarch.models.db import Job, JobAttempt, ValidationResult
 from avarch.models.plan import ExecutionRuntimePaths, TranscodePlan
 from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus
@@ -745,12 +744,6 @@ def _verify_validation_contract(
     plan: TranscodePlan,
     policy: ValidationPolicy,
 ) -> None:
-    if plan.schema_version != TRANSCODE_PLAN_SCHEMA_VERSION:
-        raise ValidationPolicyError(
-            "Unsupported plan schema.\n\nRegenerate this plan with the current avarch version."
-        )
-    if policy.schema_version != 2:
-        raise ValidationPolicyError("Unsupported validation policy schema.")
     if job.plan_hash != plan.plan_hash:
         raise ValidationTargetError("Job plan hash does not match the validation plan.")
     if job.output_path is not None and Path(job.output_path) != plan.output_path:

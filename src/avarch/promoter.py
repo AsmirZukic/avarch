@@ -307,8 +307,6 @@ def validate_promotion_preflight(
         or Path(validation.output_path) != plan.output_path
     ):
         raise PromotionEligibilityError("Validation result does not match the planned output.")
-    if plan.schema_version != 5 or plan.promotion.schema_version != 1:
-        raise PromotionEligibilityError("Plan does not use the latest promotion schema.")
     if mode.value not in plan.promotion.allowed_modes:
         raise PromotionEligibilityError(f"Promotion mode is not allowed by the plan: {mode.value}")
 
