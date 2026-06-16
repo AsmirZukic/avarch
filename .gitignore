@@ -5,3 +5,9 @@ __pycache__/
 *.py[cod]
 avarch.toml
 .avarch/
+
+
+profiles/
+
+.codex/
+.uv-cache/

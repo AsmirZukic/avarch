@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
-from avarch.config import AppConfig, EncodingProfile
+from avarch.config import AppConfig
 from avarch.contracts import QUEUE_CONTRACT
 from avarch.db import create_db_engine
 from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
@@ -56,6 +56,7 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
+from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from avarch.validation import (
@@ -246,8 +247,8 @@ def enqueue_inventory(
     priority: int,
     now: datetime,
 ) -> EnqueueSummary:
-    profile = _require_profile(config, profile_name)
-    identity = _planning_identity(profile)
+    resolved_profile = _require_profile(config, profile_name)
+    identity = _planning_identity(resolved_profile)
     media_files = list(session.exec(select(MediaFile).order_by(MediaFile.path)).all())
     selected = 0
     created = 0
@@ -264,7 +265,7 @@ def enqueue_inventory(
         queue_key = build_queue_key(
             media_path=Path(media_file.path),
             source_fs_fingerprint=media_file.fs_fingerprint,
-            profile_name=profile_name,
+            profile_name=resolved_profile.name,
             profile_hash=identity.profile_hash,
             probe_hash=probe_hash,
             vapoursynth_identity_hash=identity.vapoursynth_identity_hash,
@@ -277,7 +278,7 @@ def enqueue_inventory(
         session.add(
             Job(
                 media_file_id=_require_id(media_file),
-                profile_name=profile_name,
+                profile_name=resolved_profile.name,
                 profile_hash=identity.profile_hash,
                 source_fs_fingerprint=media_file.fs_fingerprint,
                 queue_key=queue_key,
@@ -540,12 +541,12 @@ async def execute_plan_job(
     try:
         with Session(engine) as session:
             job = _require_job(session, job_id)
+            resolved_profile = _require_profile(config, job.profile_name)
             _verify_job_profile(config, job)
             context = load_planning_context(
                 session,
                 input_path=input_path,
-                profile_name=job.profile_name,
-                config=config,
+                resolved_profile=resolved_profile,
             )
             if context.probe_result.probe_hash != job.probe_hash:
                 raise JobPreparationError("Canonical probe no longer matches the queued job.")
@@ -1503,7 +1504,8 @@ class _PlanningIdentity:
     execution_identity_hash: str
 
 
-def _planning_identity(profile: EncodingProfile) -> _PlanningIdentity:
+def _planning_identity(resolved_profile: ResolvedProfile) -> _PlanningIdentity:
+    profile = resolved_profile.profile
     resolved_template = resolve_vapoursynth_template(profile)
     mode = "custom_template" if resolved_template is not None else "generated"
     template_hash = resolved_template.template_hash if resolved_template is not None else None
@@ -1650,8 +1652,7 @@ def _verify_media_snapshot(media_file: MediaFile, *, expected_fingerprint: str) 
 
 
 def _verify_job_profile(config: AppConfig, job: Job) -> None:
-    profile = _require_profile(config, job.profile_name)
-    identity = _planning_identity(profile)
+    identity = _planning_identity(_require_profile(config, job.profile_name))
     if identity.profile_hash != job.profile_hash:
         raise StaleJobProfileError("Profile changed after enqueue; re-enqueue this work.")
 
@@ -1973,11 +1974,13 @@ def _snapshot_job(job: Job) -> Job:
     )
 
 
-def _require_profile(config: AppConfig, profile_name: str) -> EncodingProfile:
-    profile = config.profiles.get(profile_name)
-    if profile is None:
+def _require_profile(config: AppConfig, profile_name: str) -> ResolvedProfile:
+    try:
+        return ProfileRegistry.from_config(config).get(profile_name)
+    except UnknownProfileError as exc:
         raise JobPreparationError(f"Unknown profile: {profile_name}")
-    return profile
+    except Exception as exc:
+        raise JobPreparationError(str(exc)) from exc
 
 
 def _require_job(session: Session, job_id: int) -> Job:

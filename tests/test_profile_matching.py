@@ -6,12 +6,13 @@ import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.config import AppConfig, EncodingProfile
 from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.models.probe import NormalizedProbe, VideoStream
 from avarch.planner import PlanningError, load_planning_context, match_profile
 from avarch.probe import build_probe_hash, store_probe_result
+from avarch.profiles.models import EncodingProfile, ProfileDocument
+from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json
 
 
@@ -24,28 +25,13 @@ def test_context_loads_canonical_probe(tmp_path: Path) -> None:
         context = load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
     assert context.media_file.id == media_file.id
     assert context.probe_result.id == probe_result.id
     assert context.normalized_probe.video_streams[0].codec == "hevc"
     assert context.profile_name == "av1_1080p_sdr"
-
-
-def test_context_rejects_unknown_profile(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    media_file = _insert_media_file(engine, tmp_path / "movie.mkv")
-    _store_probe(engine, media_file)
-
-    with Session(engine) as session, pytest.raises(PlanningError, match="Unknown profile"):
-        load_planning_context(
-            session,
-            input_path=Path(media_file.path),
-            profile_name="missing",
-            config=_config(),
-        )
 
 
 def test_context_rejects_untracked_file(tmp_path: Path) -> None:
@@ -55,8 +41,7 @@ def test_context_rejects_untracked_file(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=tmp_path / "movie.mkv",
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -73,8 +58,7 @@ def test_context_rejects_missing_media_file(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -86,8 +70,7 @@ def test_context_rejects_null_latest_probe_id(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -100,8 +83,7 @@ def test_context_rejects_missing_referenced_probe(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -121,8 +103,7 @@ def test_context_rejects_probe_owned_by_another_file(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(first.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -144,8 +125,7 @@ def test_context_rejects_stale_probe(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -163,8 +143,7 @@ def test_context_does_not_fallback_to_other_probe_rows(tmp_path: Path) -> None:
         load_planning_context(
             session,
             input_path=Path(media_file.path),
-            profile_name="av1_1080p_sdr",
-            config=_config(),
+            resolved_profile=_resolved_profile(),
         )
 
 
@@ -303,42 +282,47 @@ def _normalized_probe() -> NormalizedProbe:
     )
 
 
-def _config() -> AppConfig:
-    return AppConfig.model_validate(
+def _profile() -> EncodingProfile:
+    return _resolved_profile().profile
+
+
+def _resolved_profile() -> ResolvedProfile:
+    document = ProfileDocument.model_validate(
         {
-            "profiles": {
-                "av1_1080p_sdr": {
-                    "backend": "av1an",
-                    "container": "mkv",
-                    "match": {"video_codec_not": ["av1"]},
-                    "video": {
-                        "max_width": 1920,
-                        "hdr_to_sdr": True,
-                        "source": "vapoursynth",
-                    },
-                    "av1an": {
-                        "encoder": "svt-av1",
-                        "workers": 6,
-                        "video_args": "--preset 6 --crf 28 --keyint 240",
-                    },
-                    "audio": {
-                        "codec": "libopus",
-                        "bitrate": "128k",
-                        "channels": 2,
-                        "languages": ["eng"],
-                    },
-                    "subtitles": {
-                        "languages": ["eng"],
-                        "keep_forced": True,
-                    },
-                }
-            }
+            "schema_version": 1,
+            "name": "av1_1080p_sdr",
+            "backend": "av1an",
+            "container": "mkv",
+            "match": {"video_codec_not": ["av1"]},
+            "video": {
+                "max_width": 1920,
+                "hdr_to_sdr": True,
+                "source": "vapoursynth",
+            },
+            "av1an": {
+                "encoder": "svt-av1",
+                "workers": 2,
+                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+            },
+            "audio": {
+                "codec": "libopus",
+                "bitrate": "128k",
+                "channels": 2,
+                "languages": ["eng"],
+            },
+            "subtitles": {
+                "languages": ["eng"],
+                "keep_forced": True,
+            },
         }
     )
-
-
-def _profile() -> EncodingProfile:
-    return _config().profiles["av1_1080p_sdr"]
+    return ResolvedProfile(
+        name=document.name,
+        document=document,
+        profile=document.encoding_profile(),
+        origin=ProfileOrigin.USER,
+        source="test",
+    )
 
 
 def _probe_with_video_codec(codec: str | None) -> NormalizedProbe:

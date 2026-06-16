@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from avarch.config import AppConfig
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.planner import (
     PlanningContext,
@@ -12,6 +11,8 @@ from avarch.planner import (
     build_work_key,
 )
 from avarch.probe import build_probe_hash, normalize_probe
+from avarch.profiles.models import ProfileDocument
+from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json
 from tests.probe_fixtures import sdr_probe_payload
 
@@ -109,41 +110,50 @@ def _context(tmp_path: Path) -> PlanningContext:
         source_fs_fingerprint="fs",
         created_at=now,
     )
-    config = AppConfig.model_validate(
-        {
-            "profiles": {
-                "av1_1080p_sdr": {
-                    "backend": "av1an",
-                    "container": "mkv",
-                    "match": {"video_codec_not": ["av1"]},
-                    "video": {
-                        "max_width": 1920,
-                        "hdr_to_sdr": True,
-                        "source": "vapoursynth",
-                    },
-                    "av1an": {
-                        "encoder": "svt-av1",
-                        "workers": 6,
-                        "video_args": "--preset 6 --crf 28",
-                    },
-                    "audio": {
-                        "codec": "libopus",
-                        "bitrate": "128k",
-                        "channels": 2,
-                        "languages": ["eng"],
-                    },
-                    "subtitles": {
-                        "languages": ["eng"],
-                        "keep_forced": True,
-                    },
-                }
-            }
-        }
-    )
+    resolved_profile = _resolved_profile()
     return PlanningContext(
         media_file=media_file,
         probe_result=probe_result,
         normalized_probe=normalized,
-        profile_name="av1_1080p_sdr",
-        profile=config.profiles["av1_1080p_sdr"],
+        profile_name=resolved_profile.name,
+        profile=resolved_profile.profile,
+    )
+
+
+def _resolved_profile() -> ResolvedProfile:
+    document = ProfileDocument.model_validate(
+        {
+            "schema_version": 1,
+            "name": "av1_1080p_sdr",
+            "backend": "av1an",
+            "container": "mkv",
+            "match": {"video_codec_not": ["av1"]},
+            "video": {
+                "max_width": 1920,
+                "hdr_to_sdr": True,
+                "source": "vapoursynth",
+            },
+            "av1an": {
+                "encoder": "svt-av1",
+                "workers": 2,
+                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+            },
+            "audio": {
+                "codec": "libopus",
+                "bitrate": "128k",
+                "channels": 2,
+                "languages": ["eng"],
+            },
+            "subtitles": {
+                "languages": ["eng"],
+                "keep_forced": True,
+            },
+        }
+    )
+    return ResolvedProfile(
+        name=document.name,
+        document=document,
+        profile=document.encoding_profile(),
+        origin=ProfileOrigin.USER,
+        source="test",
     )

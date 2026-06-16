@@ -39,97 +39,10 @@ class ResourceSettings(BaseModel):
     file_ops: int = Field(default=1, ge=1)
 
 
-class ProfileMatchSettings(BaseModel):
+class ProfileRegistrySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    video_codec_not: list[str] = Field(default_factory=list)
-
-    @field_validator("video_codec_not", mode="before")
-    @classmethod
-    def normalize_video_codecs(cls, value: object) -> list[str]:
-        return _normalized_text_list(value)
-
-
-class ProfileVideoSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_width: int = Field(gt=0)
-    hdr_to_sdr: bool = False
-    source: Literal["vapoursynth"] = "vapoursynth"
-
-    @field_validator("max_width")
-    @classmethod
-    def require_even_max_width(cls, value: int) -> int:
-        if value % 2 != 0:
-            raise ValueError("max_width must be even")
-        return value
-
-
-class ProfileAv1anSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    encoder: Literal["svt-av1"]
-    workers: int = Field(gt=0)
-    video_args: str
-
-
-class ProfileAudioSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    codec: str
-    bitrate: str
-    channels: int = Field(gt=0)
-    languages: list[str]
-
-    @field_validator("codec", mode="before")
-    @classmethod
-    def normalize_codec(cls, value: object) -> str:
-        return str(value).strip().lower()
-
-    @field_validator("languages", mode="before")
-    @classmethod
-    def normalize_languages(cls, value: object) -> list[str]:
-        return _dedupe_preserving_order(_normalized_text_list(value))
-
-
-class ProfileSubtitleSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    languages: list[str]
-    keep_forced: bool = True
-
-    @field_validator("languages", mode="before")
-    @classmethod
-    def normalize_languages(cls, value: object) -> list[str]:
-        return _dedupe_preserving_order(_normalized_text_list(value))
-
-
-class ProfileValidationSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    duration_tolerance_seconds: float = Field(default=2.0, ge=0)
-
-    minimum_output_bytes: int = Field(default=1024, ge=1)
-    minimum_output_source_ratio: float = Field(default=0.01, ge=0, le=1)
-
-    decode_sample: bool = False
-    decode_sample_seconds: float = Field(default=5.0, gt=0)
-
-    minimum_size_reduction_percent: float | None = Field(default=None, ge=0, lt=100)
-
-
-class EncodingProfile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    backend: Literal["av1an"]
-    container: Literal["mkv"]
-    vapoursynth_template: Path | None = None
-    match: ProfileMatchSettings
-    video: ProfileVideoSettings
-    av1an: ProfileAv1anSettings
-    audio: ProfileAudioSettings
-    subtitles: ProfileSubtitleSettings
-    validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
+    search_paths: list[Path] = Field(default_factory=lambda: [Path("./profiles")])
 
 
 def _default_roots() -> list[Path]:
@@ -216,7 +129,7 @@ class AppConfig(BaseModel):
     logging: LoggingSettings = LoggingSettings()
     resources: ResourceSettings = ResourceSettings()
     scanner: ScannerSettings = ScannerSettings()
-    profiles: dict[str, EncodingProfile] = Field(default_factory=dict)
+    profile_registry: ProfileRegistrySettings = ProfileRegistrySettings()
 
 
 DEFAULT_CONFIG_TEXT = """[app]
@@ -239,39 +152,10 @@ roots = []
 extensions = [".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"]
 exclude_directories = [".avarch", ".avarch-work", ".avarch-output"]
 
-[profiles.av1_1080p_sdr]
-backend = "av1an"
-container = "mkv"
-
-[profiles.av1_1080p_sdr.match]
-video_codec_not = ["av1"]
-
-[profiles.av1_1080p_sdr.video]
-max_width = 1920
-hdr_to_sdr = true
-source = "vapoursynth"
-
-[profiles.av1_1080p_sdr.av1an]
-encoder = "svt-av1"
-workers = 2
-video_args = "--preset 6 --crf 28 --keyint 240 --lp 2"
-
-[profiles.av1_1080p_sdr.audio]
-codec = "libopus"
-bitrate = "128k"
-channels = 2
-languages = ["eng"]
-
-[profiles.av1_1080p_sdr.subtitles]
-languages = ["eng"]
-keep_forced = true
-
-[profiles.av1_1080p_sdr.validation]
-duration_tolerance_seconds = 2.0
-minimum_output_bytes = 1024
-minimum_output_source_ratio = 0.01
-decode_sample = false
-decode_sample_seconds = 5.0
+[profile_registry]
+# Avarch reads profile documents from this directory.
+# `avarch init` seeds starter profile files here so you can inspect and edit them.
+search_paths = ["./profiles"]
 """
 
 
@@ -280,7 +164,7 @@ def load_config(path: Path) -> AppConfig:
         data = tomllib.load(config_file)
 
     config = AppConfig.model_validate(data)
-    return _resolve_profile_template_paths(config, path.parent)
+    return _resolve_profile_search_paths(config, path.parent)
 
 
 def resolve_data_dir(config: AppConfig, config_path: Path) -> Path:
@@ -304,12 +188,15 @@ def resolve_database_url(config: AppConfig, config_path: Path) -> str:
     return url.set(database=str(db_path)).render_as_string(hide_password=False)
 
 
-def _resolve_profile_template_paths(config: AppConfig, config_dir: Path) -> AppConfig:
-    profiles: dict[str, EncodingProfile] = {}
-    for name, profile in config.profiles.items():
-        template = profile.vapoursynth_template
-        if template is not None and not template.is_absolute():
-            profile = profile.model_copy(update={"vapoursynth_template": config_dir / template})
-        profiles[name] = profile
-
-    return config.model_copy(update={"profiles": profiles})
+def _resolve_profile_search_paths(config: AppConfig, config_dir: Path) -> AppConfig:
+    search_paths = [
+        path if path.is_absolute() else config_dir / path
+        for path in config.profile_registry.search_paths
+    ]
+    return config.model_copy(
+        update={
+            "profile_registry": config.profile_registry.model_copy(
+                update={"search_paths": search_paths}
+            )
+        }
+    )

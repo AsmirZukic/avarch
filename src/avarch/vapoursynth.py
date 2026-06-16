@@ -7,7 +7,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from avarch.config import EncodingProfile
 from avarch.contracts import (
     VAPOURSYNTH_IDENTITY_HASH_CONTRACT,
     VAPOURSYNTH_TEMPLATE_HASH_CONTRACT,
@@ -18,6 +17,7 @@ from avarch.models.plan import (
     VapourSynthOutputFormat,
     VapourSynthResizeFilter,
 )
+from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
 
 GENERATOR_VERSION = 3

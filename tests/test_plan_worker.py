@@ -13,6 +13,7 @@ from avarch.models.db import Job, MediaFile, MediaFileStatus
 from avarch.models.scheduler import JobStage, JobStatus
 from avarch.planner import build_plan, load_planning_context, write_plan_artifacts
 from avarch.probe import normalize_probe, store_probe_result
+from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.scheduler import enqueue_inventory, execute_plan_job
 from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
@@ -39,8 +40,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
         context = load_planning_context(
             session,
             input_path=source,
-            profile_name="av1_1080p_sdr",
-            config=config,
+            resolved_profile=ProfileRegistry.from_config(config).get("av1_1080p_sdr"),
         )
         template = resolve_vapoursynth_template(context.profile)
         plan = build_plan(context, data_dir=Path(".avarch"), resolved_template=template)
@@ -107,29 +107,5 @@ def _config(database_url: str) -> AppConfig:
         {
             "app": {"data_dir": ".avarch"},
             "database": {"url": database_url},
-            "profiles": {
-                "av1_1080p_sdr": {
-                    "backend": "av1an",
-                    "container": "mkv",
-                    "match": {"video_codec_not": ["av1"]},
-                    "video": {
-                        "max_width": 1920,
-                        "hdr_to_sdr": True,
-                        "source": "vapoursynth",
-                    },
-                    "av1an": {
-                        "encoder": "svt-av1",
-                        "workers": 6,
-                        "video_args": "--preset 6 --crf 28 --keyint 240",
-                    },
-                    "audio": {
-                        "codec": "libopus",
-                        "bitrate": "128k",
-                        "channels": 2,
-                        "languages": ["eng"],
-                    },
-                    "subtitles": {"languages": ["eng"], "keep_forced": True},
-                }
-            },
         }
     )

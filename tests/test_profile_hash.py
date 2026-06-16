@@ -2,8 +2,8 @@ from typing import cast
 
 import pytest
 
-from avarch.config import AppConfig, EncodingProfile
 from avarch.planner import build_profile_hash, parse_encoder_args
+from avarch.profiles.models import EncodingProfile
 
 
 def test_parse_encoder_args() -> None:
@@ -140,8 +140,7 @@ def _profile(overrides: dict[str, object] | None = None) -> EncodingProfile:
             else:
                 profile[key] = value
 
-    config = AppConfig.model_validate({"profiles": {"test": profile}})
-    return config.profiles["test"]
+    return EncodingProfile.model_validate(profile)
 
 
 def _profile_data() -> dict[str, object]:

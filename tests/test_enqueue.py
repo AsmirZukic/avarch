@@ -191,20 +191,24 @@ def test_enqueue_allows_new_job_when_probe_hash_changes(tmp_path: Path) -> None:
 def test_enqueue_allows_new_job_when_profile_changes(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
+    profile_dir = tmp_path / "profiles"
+    _write_profile(profile_dir, name="custom_1920", max_width=1920)
+    _write_profile(profile_dir, name="custom_1280", max_width=1280)
+    config = _config(profile_dir=profile_dir)
 
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         enqueue_inventory(
             session,
-            config=_config(max_width=1920),
-            profile_name="av1_1080p_sdr",
+            config=config,
+            profile_name="custom_1920",
             priority=0,
             now=now,
         )
         enqueue_inventory(
             session,
-            config=_config(max_width=1280),
-            profile_name="av1_1080p_sdr",
+            config=config,
+            profile_name="custom_1280",
             priority=0,
             now=now,
         )
@@ -260,32 +264,44 @@ def _add_probe(session: Session, media_file: MediaFile, now: datetime) -> None:
     session.refresh(media_file)
 
 
-def _config(*, max_width: int = 1920) -> AppConfig:
-    return AppConfig.model_validate(
-        {
-            "profiles": {
-                "av1_1080p_sdr": {
-                    "backend": "av1an",
-                    "container": "mkv",
-                    "match": {"video_codec_not": ["av1"]},
-                    "video": {
-                        "max_width": max_width,
-                        "hdr_to_sdr": True,
-                        "source": "vapoursynth",
-                    },
-                    "av1an": {
-                        "encoder": "svt-av1",
-                        "workers": 6,
-                        "video_args": "--preset 6 --crf 28",
-                    },
-                    "audio": {
-                        "codec": "libopus",
-                        "bitrate": "128k",
-                        "channels": 2,
-                        "languages": ["eng"],
-                    },
-                    "subtitles": {"languages": ["eng"], "keep_forced": True},
-                }
-            }
-        }
+def _config(*, profile_dir: Path | None = None) -> AppConfig:
+    if profile_dir is None:
+        return AppConfig()
+    return AppConfig.model_validate({"profile_registry": {"search_paths": [profile_dir]}})
+
+
+def _write_profile(profile_dir: Path, *, name: str, max_width: int) -> None:
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / f"{name}.toml").write_text(
+        f"""
+schema_version = 1
+name = "{name}"
+
+backend = "av1an"
+container = "mkv"
+
+[match]
+video_codec_not = ["av1"]
+
+[video]
+max_width = {max_width}
+hdr_to_sdr = true
+source = "vapoursynth"
+
+[av1an]
+encoder = "svt-av1"
+workers = 6
+video_args = "--preset 6 --crf 28"
+
+[audio]
+codec = "libopus"
+bitrate = "128k"
+channels = 2
+languages = ["eng"]
+
+[subtitles]
+languages = ["eng"]
+keep_forced = true
+""".strip(),
+        encoding="utf-8",
     )

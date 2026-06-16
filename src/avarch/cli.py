@@ -66,6 +66,12 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
+from avarch.profiles.registry import (
+    ProfileRegistry,
+    ProfileRegistryError,
+    UnknownProfileError,
+    seed_packaged_profiles,
+)
 from avarch.promoter import (
     PromotionError,
     PromotionPreflightResult,
@@ -169,13 +175,24 @@ def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False)
 
     data_dir = resolve_data_dir(app_config, config)
     data_dir.mkdir(parents=True, exist_ok=True)
+    seeded_profiles = _ensure_visible_profiles(app_config)
 
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
     log.info("database_upgraded", database_url=database_url)
 
+    profiles = ", ".join(
+        profile.name for profile in ProfileRegistry.from_config(app_config).list_profiles()
+    )
+    primary_profiles_dir = _primary_profile_search_path(app_config)
+
     typer.echo(f"Config: {config}")
     typer.echo(f"Data dir: {data_dir}")
+    if primary_profiles_dir is not None:
+        typer.echo(f"Profiles dir: {primary_profiles_dir}")
+    typer.echo(f"Profiles: {profiles}")
+    if seeded_profiles:
+        typer.echo("Starter profiles were copied into the profiles directory.")
 
 
 @db_app.command("upgrade")
@@ -441,6 +458,8 @@ def run_queue(
         "Scheduler stopped "
         f"(completed={summary.completed}, failed={summary.failed}, skipped={summary.skipped})"
     )
+    if summary.failed:
+        _echo_recent_failed_jobs(database_url)
 
 
 @queue_app.command("retry")
@@ -742,7 +761,7 @@ def jobs_show(
     if job.last_error_message:
         typer.echo("")
         typer.echo("Last error:")
-        typer.echo(f"  {job.last_error_type or 'Error'}: {_truncate_line(job.last_error_message)}")
+        _echo_error_block(job.last_error_type, job.last_error_message, indent="  ")
     typer.echo("")
     typer.echo("Attempts:")
     for attempt in attempts:
@@ -1275,12 +1294,13 @@ def plan_file(
     engine = create_db_engine(database_url)
     runtime_checked = False
     try:
+        registry = ProfileRegistry.from_config(app_config)
+        resolved_profile = registry.get(profile)
         with Session(engine) as session:
             context = load_planning_context(
                 session,
                 input_path=file_path,
-                profile_name=profile,
-                config=app_config,
+                resolved_profile=resolved_profile,
             )
             resolved_template = resolve_vapoursynth_template(context.profile)
             plan = build_plan(
@@ -1298,6 +1318,9 @@ def plan_file(
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except PlanningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except (ProfileRegistryError, UnknownProfileError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except VapourSynthGenerationError as exc:
@@ -1361,6 +1384,13 @@ def _load_and_configure(config: Path) -> AppConfig:
 
     data_dir = resolve_data_dir(app_config, config)
     data_dir.mkdir(parents=True, exist_ok=True)
+    seeded_profiles = _ensure_visible_profiles(app_config)
+    if seeded_profiles:
+        log.info(
+            "default_profiles_seeded",
+            directory=str(seeded_profiles[0].parent),
+            profiles=[path.stem for path in seeded_profiles],
+        )
 
     return app_config
 
@@ -1379,6 +1409,31 @@ def _runtime_config(app_config: AppConfig, config: Path) -> AppConfig:
 def _write_default_config(config: Path) -> None:
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+
+
+def _ensure_visible_profiles(config: AppConfig) -> tuple[Path, ...]:
+    search_paths = config.profile_registry.search_paths
+    for search_path in search_paths:
+        search_path.mkdir(parents=True, exist_ok=True)
+
+    has_profiles = any(
+        any(path.is_file() for path in search_path.glob("*.toml")) for search_path in search_paths
+    )
+    if has_profiles:
+        return ()
+
+    primary_search_path = _primary_profile_search_path(config)
+    if primary_search_path is None:
+        return ()
+
+    return seed_packaged_profiles(primary_search_path)
+
+
+def _primary_profile_search_path(config: AppConfig) -> Path | None:
+    search_paths = config.profile_registry.search_paths
+    if not search_paths:
+        return None
+    return search_paths[0]
 
 
 def _resolve_cli_path(path: Path) -> Path:
@@ -1488,12 +1543,13 @@ def encode_file(
     file_path = _resolve_media_path(file)
     engine = create_db_engine(database_url)
     try:
+        registry = ProfileRegistry.from_config(app_config)
+        resolved_profile = registry.get(profile)
         with Session(engine) as session:
             context = load_planning_context(
                 session,
                 input_path=file_path,
-                profile_name=profile,
-                config=app_config,
+                resolved_profile=resolved_profile,
             )
             resolved_template = resolve_vapoursynth_template(context.profile)
             plan = build_plan(
@@ -1513,6 +1569,9 @@ def encode_file(
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except PlanningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except (ProfileRegistryError, UnknownProfileError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except VapourSynthGenerationError as exc:
@@ -1587,6 +1646,51 @@ def _echo_queue_counts(database_url: str) -> None:
     typer.echo(f"  running:   {jobs_by_status[JobStatus.RUNNING]}")
     typer.echo(f"  completed: {jobs_by_status[JobStatus.COMPLETED]}")
     typer.echo(f"  failed:    {jobs_by_status[JobStatus.FAILED]}")
+
+
+def _echo_recent_failed_jobs(database_url: str, *, limit: int = 5) -> None:
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        failed_jobs = list(
+            session.exec(
+                select(Job)
+                .where(Job.status == JobStatus.FAILED)
+                .order_by(col(Job.id).desc())
+                .limit(limit)
+            ).all()
+        )
+        media_by_id = {
+            media_file.id: media_file
+            for media_file in session.exec(select(MediaFile)).all()
+            if media_file.id is not None
+        }
+        attempts_by_job: dict[int, JobAttempt] = {}
+        if failed_jobs:
+            job_ids = [job.id for job in failed_jobs if job.id is not None]
+            attempts = list(
+                session.exec(
+                    select(JobAttempt)
+                    .where(col(JobAttempt.job_id).in_(job_ids))
+                    .order_by(col(JobAttempt.attempt_number).desc())
+                ).all()
+            )
+            for attempt in attempts:
+                attempts_by_job.setdefault(attempt.job_id, attempt)
+
+    if not failed_jobs:
+        return
+
+    typer.echo("")
+    typer.echo("Failed jobs:")
+    for job in failed_jobs:
+        media_file = media_by_id.get(job.media_file_id)
+        path = Path(media_file.path).name if media_file is not None else "<missing>"
+        typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
+        _echo_error_block(job.last_error_type, job.last_error_message, indent="    ")
+        if job.id is not None:
+            attempt = attempts_by_job.get(job.id)
+            if attempt is not None:
+                _echo_attempt_log_status(attempt, indent="    ")
 
 
 def _parse_job_statuses(value: str | None) -> set[JobStatus] | None:
@@ -1719,6 +1823,40 @@ def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None
     text = data.decode("utf-8", errors="replace")
     if text:
         typer.echo(text.rstrip())
+
+
+def _echo_attempt_log_status(attempt: JobAttempt, *, indent: str) -> None:
+    statuses = []
+    for label, log_path in (("stdout", attempt.stdout_log), ("stderr", attempt.stderr_log)):
+        if log_path is None:
+            statuses.append(f"{label}: -")
+            continue
+        path = Path(log_path)
+        suffix = "" if path.exists() else " (missing)"
+        statuses.append(f"{label}: {path}{suffix}")
+    typer.echo(f"{indent}logs: {', '.join(statuses)}")
+
+
+def _echo_error_block(
+    error_type: str | None,
+    error_message: str | None,
+    *,
+    indent: str,
+    max_length: int = 2000,
+) -> None:
+    typer.echo(f"{indent}{error_type or 'Error'}:")
+    if not error_message:
+        typer.echo(f"{indent}  -")
+        return
+    for line in _truncate_text(error_message, max_length=max_length).splitlines():
+        typer.echo(f"{indent}  {line}")
+
+
+def _truncate_text(value: str, *, max_length: int) -> str:
+    text = value.strip()
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 15].rstrip()}\n... truncated ..."
 
 
 def _truncate_line(value: str, *, max_length: int = 120) -> str:

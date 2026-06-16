@@ -217,17 +217,17 @@ def test_custom_template_workflow_supports_hdr_and_preserves_user_body(
     template_path.parent.mkdir()
     template_path.write_text(template_body, encoding="utf-8")
     config_path, movie = _tracked_movie(tmp_path)
-    _insert_profile_line(
-        config_path,
-        'container = "mkv"',
-        'vapoursynth_template = "templates/custom.vpy"',
+    _write_user_profile(
+        config_path.parent / "profiles" / "custom_template.toml",
+        name="custom_template",
+        extra='vapoursynth_template = "../templates/custom.vpy"\n',
     )
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_hdr_ffprobe)
     _probe(config_path, movie)
 
     result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "custom_template", "--config", str(config_path)],
     )
 
     artifact_dir = _artifact_dir_from_output(result.output)
@@ -357,7 +357,38 @@ def _replace_config_line(config_path: Path, old: str, new: str) -> None:
     config_path.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def _insert_profile_line(config_path: Path, anchor: str, line: str) -> None:
-    text = config_path.read_text(encoding="utf-8")
-    assert anchor in text
-    config_path.write_text(text.replace(anchor, f"{anchor}\n{line}", 1), encoding="utf-8")
+def _write_user_profile(profile_path: Path, *, name: str, extra: str = "") -> None:
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(
+        f"""
+schema_version = 1
+name = "{name}"
+
+backend = "av1an"
+container = "mkv"
+{extra}
+[match]
+video_codec_not = ["av1"]
+
+[video]
+max_width = 1920
+hdr_to_sdr = true
+source = "vapoursynth"
+
+[av1an]
+encoder = "svt-av1"
+workers = 6
+video_args = "--preset 6 --crf 28 --keyint 240"
+
+[audio]
+codec = "libopus"
+bitrate = "128k"
+channels = 2
+languages = ["eng"]
+
+[subtitles]
+languages = ["eng"]
+keep_forced = true
+""".strip(),
+        encoding="utf-8",
+    )

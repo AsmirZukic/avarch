@@ -22,6 +22,7 @@ from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStat
 from avarch.models.scheduler import JobEventType, JobStage, JobStatus
 from avarch.planner import build_profile_hash
 from avarch.probe import normalize_probe, store_probe_result
+from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.scheduler import JobControlError, clear_queue, retry_job, retry_queue
 from avarch.serialization import canonical_json
@@ -308,8 +309,8 @@ def _retry_job(
     now: datetime,
 ) -> Job:
     media_file = _store_media_file(session, tmp_path / f"{state}.mkv", now)
-    profile = config.profiles["av1_1080p_sdr"]
-    profile_hash = build_profile_hash(profile)
+    profile = ProfileRegistry.from_config(config).get("av1_1080p_sdr")
+    profile_hash = build_profile_hash(profile.profile)
     probe_hash: str | None = None
     probe_result_id: int | None = None
     if state != "missing_probe":

@@ -30,6 +30,7 @@ from avarch.models.validation import (
 )
 from avarch.planner import build_profile_hash
 from avarch.probe import normalize_probe, store_probe_result
+from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from avarch.validation import validate_output
@@ -96,7 +97,7 @@ def test_first_time_user_can_recover_from_existing_config_with_force(tmp_path: P
     assert second.exit_code != 0
     assert "Config already exists" in second.output
     assert forced.exit_code == 0
-    assert "[profiles.av1_1080p_sdr]" in config_path.read_text(encoding="utf-8")
+    assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
 
 
 def test_scan_workflows_report_missing_roots_file_roots_and_multiple_roots(
@@ -324,7 +325,9 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
             Job(
                 media_file_id=media_file.id or 0,
                 profile_name="av1_1080p_sdr",
-                profile_hash=build_profile_hash(app_config.profiles["av1_1080p_sdr"]),
+                profile_hash=build_profile_hash(
+                    ProfileRegistry.from_config(app_config).get("av1_1080p_sdr").profile
+                ),
                 source_fs_fingerprint=media_file.fs_fingerprint,
                 queue_key="failed-validation",
                 probe_result_id=probe_result.id,

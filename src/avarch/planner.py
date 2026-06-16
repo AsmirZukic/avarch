@@ -11,7 +11,6 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from avarch.config import AppConfig, EncodingProfile
 from avarch.contracts import (
     EXECUTION_IDENTITY_HASH_CONTRACT,
     PLAN_HASH_CONTRACT,
@@ -44,6 +43,8 @@ from avarch.models.validation import (
     ValidationPolicy,
 )
 from avarch.probe import ProbeError, parse_normalized_probe_json
+from avarch.profiles.models import EncodingProfile
+from avarch.profiles.registry import ResolvedProfile
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import (
     GENERATOR_VERSION,
@@ -221,13 +222,8 @@ def load_planning_context(
     session: Session,
     *,
     input_path: Path,
-    profile_name: str,
-    config: AppConfig,
+    resolved_profile: ResolvedProfile,
 ) -> PlanningContext:
-    profile = config.profiles.get(profile_name)
-    if profile is None:
-        raise PlanningError(f"Unknown profile: {profile_name}")
-
     media_file = session.exec(
         select(MediaFile).where(MediaFile.path == str(input_path.resolve()))
     ).first()
@@ -260,8 +256,8 @@ def load_planning_context(
         media_file=media_file,
         probe_result=probe_result,
         normalized_probe=normalized_probe,
-        profile_name=profile_name,
-        profile=profile,
+        profile_name=resolved_profile.name,
+        profile=resolved_profile.profile,
     )
 
 

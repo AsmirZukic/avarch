@@ -7,6 +7,8 @@ import pytest
 from typer.testing import CliRunner
 
 from avarch.cli import app
+from avarch.config import load_config
+from avarch.profiles.registry import ProfileOrigin, ProfileRegistry
 from tests.probe_fixtures import sdr_probe_payload
 
 runner = CliRunner()
@@ -16,6 +18,9 @@ def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "avarch.toml"
+    profiles_path = tmp_path / "profiles"
+    profile_path = profiles_path / "av1_1080p_sdr.toml"
+    readme_path = profiles_path / "README.md"
 
     help_result = runner.invoke(app, ["--help"])
     init_result = runner.invoke(app, ["init", "--config", str(config_path)])
@@ -25,7 +30,15 @@ def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
 
     assert help_result.exit_code == 0
     assert init_result.exit_code == 0
-    assert "[profiles.av1_1080p_sdr]" in config_path.read_text(encoding="utf-8")
+    assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
+    assert profiles_path.is_dir()
+    assert profile_path.is_file()
+    assert readme_path.is_file()
+    assert "Inspect the .toml files here" in readme_path.read_text(encoding="utf-8")
+    assert f"Profiles dir: {profiles_path}" in init_result.output
+    assert "Profiles: av1_1080p_sdr" in init_result.output
+    resolved_profile = ProfileRegistry.from_config(load_config(config_path)).get("av1_1080p_sdr")
+    assert resolved_profile.origin == ProfileOrigin.USER
     assert doctor_result.exit_code == 0
     assert "PASS config_exists" in doctor_result.output
     assert db_current_result.exit_code == 0

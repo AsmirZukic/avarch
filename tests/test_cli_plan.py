@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,28 @@ def test_plan_command_creates_bundle(tmp_path: Path) -> None:
     assert (artifact_dir / "av1an.command.json").is_file()
     assert (artifact_dir / "validation-policy.json").is_file()
     assert (artifact_dir / "movie.vpy").is_file()
+
+
+def test_plan_command_reseeds_default_profiles_when_user_profiles_dir_is_missing(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    profiles_dir = tmp_path / "profiles"
+    profile_path = profiles_dir / "av1_1080p_sdr.toml"
+    shutil.rmtree(profiles_dir)
+    media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
+    _store_probe(config_path, media_file)
+
+    result = runner.invoke(
+        app,
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Profile:      av1_1080p_sdr" in result.output
+    assert profiles_dir.is_dir()
+    assert profile_path.is_file()
+    assert "name = \"av1_1080p_sdr\"" in profile_path.read_text(encoding="utf-8")
 
 
 def test_plan_command_does_not_run_vspipe_by_default(
