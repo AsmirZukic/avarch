@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -35,7 +36,15 @@ from avarch.execution import (
     execute_plan,
 )
 from avarch.logging import configure_logging
-from avarch.models.db import Job, MediaFile, MediaFileStatus, PromotionRecord, ValidationResult
+from avarch.models.db import (
+    Job,
+    JobAttempt,
+    JobEvent,
+    MediaFile,
+    MediaFileStatus,
+    PromotionRecord,
+    ValidationResult,
+)
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionStatus
@@ -66,14 +75,28 @@ from avarch.promoter import (
 )
 from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.scheduler import (
+    MAX_CLI_LOG_TAIL_BYTES,
+    JobControlError,
     JobPreparationError,
     SchedulerAlreadyRunningError,
+    SchedulerControlError,
+    cancel_job,
+    clear_queue,
+    cli_actor,
+    drain_scheduler,
     enqueue_inventory,
     execute_validation_job,
+    hold_job,
     new_runner_id,
     pause_scheduler,
-    retry_failed_jobs,
+    release_job,
+    resume_scheduler,
+    retry_job,
+    retry_queue,
     run_scheduler,
+    scheduler_status,
+    stop_scheduler,
+    update_job_priority,
 )
 from avarch.tui.app import AvarchTuiApp
 from avarch.validation import format_validation_report_summary
@@ -94,6 +117,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 db_app = typer.Typer(help="Database commands.")
+scheduler_app = typer.Typer(help="Scheduler commands.")
+jobs_app = typer.Typer(help="Job commands.")
+queue_app = typer.Typer(help="Queue commands.")
 
 
 def version_callback(value: bool) -> None:
@@ -377,8 +403,14 @@ def enqueue(
     typer.echo(f"Missing skipped: {summary.missing_skipped}")
 
 
-@app.command("run")
-def run_queue(config: ConfigOption = Path("avarch.toml")) -> None:
+@scheduler_app.command("run")
+def run_queue(
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Resume a paused scheduler before starting."),
+    ] = False,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
@@ -395,8 +427,10 @@ def run_queue(config: ConfigOption = Path("avarch.toml")) -> None:
     _echo_queue_counts(database_url)
 
     try:
-        summary = asyncio.run(run_scheduler(config=runtime_config, runner_id=new_runner_id()))
-    except SchedulerAlreadyRunningError as exc:
+        summary = asyncio.run(
+            run_scheduler(config=runtime_config, runner_id=new_runner_id(), resume=resume)
+        )
+    except (SchedulerAlreadyRunningError, SchedulerControlError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except KeyboardInterrupt as exc:
@@ -409,15 +443,24 @@ def run_queue(config: ConfigOption = Path("avarch.toml")) -> None:
     )
 
 
-@app.command()
-def retry(
-    failed: Annotated[bool, typer.Option("--failed", help="Retry failed jobs.")] = False,
+@queue_app.command("retry")
+def queue_retry_command(
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Comma-separated job statuses."),
+    ] = "failed,canceled",
+    stage: Annotated[str | None, typer.Option("--stage", help="Comma-separated stages.")] = None,
+    profile: Annotated[str | None, typer.Option("--profile", help="Profile name.")] = None,
+    job_id: Annotated[list[int] | None, typer.Option("--job-id", help="Specific job id.")] = None,
+    all_jobs: Annotated[bool, typer.Option("--all", help="Select all eligible jobs.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview without changing jobs."),
+    ] = False,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Apply retry updates.")] = False,
     config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    if not failed:
-        typer.echo("Pass --failed to retry failed jobs.")
-        raise typer.Exit(1)
-
+    del dry_run
     config = _resolve_cli_path(config)
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
@@ -425,36 +468,42 @@ def retry(
     runtime_config = _runtime_config(app_config, config)
 
     engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
-        summary = retry_failed_jobs(session, config=runtime_config, now=_utc_now())
+    try:
+        with Session(engine) as session, session.begin():
+            summary = retry_queue(
+                session,
+                config=runtime_config,
+                actor=cli_actor(),
+                now=_utc_now(),
+                job_ids=set(job_id or []) or None,
+                statuses=_parse_job_statuses(status),
+                stages=_parse_job_stages(stage),
+                profile=profile,
+                all_jobs=all_jobs,
+                confirm=confirm,
+            )
+    except JobControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
-    typer.echo("Failed-job retry")
+    typer.echo("Queue retry" if confirm else "Queue retry preview")
     typer.echo("")
-    typer.echo(f"Eligible:          {summary.eligible}")
-    typer.echo(f"Reset to probe:    {summary.reset_to_probe}")
-    typer.echo(f"Reset to plan:     {summary.reset_to_plan}")
-    typer.echo(f"Reset to encode:   {summary.reset_to_encode}")
-    typer.echo(f"Reset to validate: {summary.reset_to_validate}")
+    typer.echo(f"Matched:           {summary.matched}")
+    typer.echo(f"Retryable:         {summary.retryable}")
     typer.echo(f"Requires requeue:  {summary.requires_requeue}")
+    typer.echo(f"Resume probe:      {summary.reset_to_probe}")
+    typer.echo(f"Resume plan:       {summary.reset_to_plan}")
+    typer.echo(f"Resume encode:     {summary.reset_to_encode}")
+    typer.echo(f"Resume validate:   {summary.reset_to_validate}")
+    typer.echo(f"Return to promote: {summary.return_to_promote}")
+    if not confirm:
+        typer.echo("")
+        typer.echo("No jobs were changed.")
 
 
-@app.command()
-def pause(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-
-    engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
-        pause_scheduler(session, now=_utc_now())
-
-    typer.echo("Scheduler pause requested")
-
-
-@app.command()
-def jobs(
-    status: Annotated[str | None, typer.Option("--status", help="Filter by job status.")] = None,
+@scheduler_app.command("pause")
+def pause(
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
     config: ConfigOption = Path("avarch.toml"),
 ) -> None:
     config = _resolve_cli_path(config)
@@ -462,13 +511,142 @@ def jobs(
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
 
-    status_filter: JobStatus | None = None
-    if status is not None:
-        try:
-            status_filter = JobStatus(status)
-        except ValueError as exc:
-            typer.echo(f"Unknown job status: {status}")
-            raise typer.Exit(1) from exc
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            pause_scheduler(session, now=_utc_now(), reason=reason)
+    except SchedulerControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo("Scheduler pause requested")
+
+
+@scheduler_app.command("resume")
+def resume_scheduler_command(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            resume_scheduler(session, now=_utc_now())
+    except SchedulerControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Scheduler resumed")
+
+
+@scheduler_app.command("drain")
+def drain_scheduler_command(
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
+    timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            drain_scheduler(session, now=_utc_now(), reason=reason)
+    except SchedulerControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Scheduler drain requested")
+    if wait and not _wait_for_scheduler_inactive(engine, timeout_seconds=timeout_seconds):
+        typer.echo("Timed out waiting for scheduler drain.")
+        raise typer.Exit(1)
+
+
+@scheduler_app.command("stop")
+def stop_scheduler_command(
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
+    timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            stop_scheduler(session, now=_utc_now(), reason=reason)
+    except SchedulerControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Scheduler stop requested")
+    if wait and not _wait_for_scheduler_inactive(engine, timeout_seconds=timeout_seconds):
+        typer.echo("Timed out waiting for scheduler stop.")
+        raise typer.Exit(1)
+
+
+@scheduler_app.command("status")
+def scheduler_status_command(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        status = scheduler_status(session, now=_utc_now())
+        media_by_id = {
+            media_file.id: media_file
+            for media_file in session.exec(select(MediaFile)).all()
+            if media_file.id is not None
+        }
+    typer.echo("Scheduler")
+    typer.echo("")
+    typer.echo(f"Mode:             {status.mode.value}")
+    typer.echo(f"Control request:  {status.control_generation}")
+    typer.echo(f"Acknowledged:     {status.acknowledged_generation}")
+    typer.echo("")
+    typer.echo(f"Runner:           {status.runner_id or 'none'}")
+    typer.echo(f"Lease:            {status.lease_state}")
+    typer.echo(f"Heartbeat:        {_format_relative_time(status.heartbeat_at)}")
+    typer.echo(f"Expires:          {_format_expiry(status.lease_expires_at)}")
+    typer.echo("")
+    typer.echo("Queue:")
+    for job_status in JobStatus:
+        typer.echo(f"  {job_status.value:<10} {status.counts_by_status[job_status]}")
+    typer.echo("")
+    typer.echo("Control requests:")
+    typer.echo(f"  cancel pending: {status.cancel_pending}")
+    typer.echo(f"  hold pending:   {status.hold_pending}")
+    if status.active_jobs:
+        typer.echo("")
+        typer.echo("Active:")
+        for job in status.active_jobs:
+            media_file = media_by_id.get(job.media_file_id)
+            path = Path(media_file.path).name if media_file is not None else "<missing>"
+            typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
+
+
+@jobs_app.command("list")
+def jobs_list(
+    status: Annotated[str | None, typer.Option("--status", help="Filter by job status.")] = None,
+    stage: Annotated[str | None, typer.Option("--stage", help="Filter by job stage.")] = None,
+    profile: Annotated[str | None, typer.Option("--profile", help="Filter by profile.")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", help="Maximum rows to print.")] = None,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+
+    try:
+        status_filters = _parse_job_statuses(status)
+        stage_filters = _parse_job_stages(stage)
+    except ValueError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
     engine = create_db_engine(database_url)
     with Session(engine) as session:
@@ -477,31 +655,305 @@ def jobs(
             col(Job.created_at).asc(),
             col(Job.id).asc(),
         )
-        if status_filter is not None:
-            statement = statement.where(Job.status == status_filter)
+        if status_filters is not None:
+            statement = statement.where(col(Job.status).in_(status_filters))
+        if stage_filters is not None:
+            statement = statement.where(col(Job.stage).in_(stage_filters))
+        if profile is not None:
+            statement = statement.where(Job.profile_name == profile)
+        if limit is not None:
+            statement = statement.limit(limit)
         rows = list(session.exec(statement).all())
         media_by_id = {
             media_file.id: media_file
             for media_file in session.exec(select(MediaFile)).all()
             if media_file.id is not None
         }
-        validation_by_id = {
-            result.id: result
-            for result in session.exec(select(ValidationResult)).all()
-            if result.id is not None
-        }
 
-    typer.echo("ID  STATUS     STAGE     PRI  TRY  VALID  PROFILE          FILE")
+    typer.echo("ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE")
     for job in rows:
         media_file = media_by_id.get(job.media_file_id)
         path = Path(media_file.path).name if media_file is not None else "<missing>"
-        valid = _validation_status(job, validation_by_id)
+        control = _job_control_label(job)
         typer.echo(
             f"{job.id:<3} {_job_status_value(job.status):<10} {_job_stage_value(job.stage):<9} "
-            f"{job.priority:>3}  {job.attempts:>3}  {valid:<5}  {job.profile_name:<15}  {path}"
+            f"{job.priority:>3}  {job.attempts:>3}  {control:<7}  {job.profile_name:<15}  {path}"
         )
         if _job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
             typer.echo(f"    error: {_truncate_line(job.last_error_message)}")
+
+
+@jobs_app.command("show")
+def jobs_show(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            typer.echo(f"Job not found: {job_id}")
+            raise typer.Exit(1)
+        media_file = session.get(MediaFile, job.media_file_id)
+        attempts = list(
+            session.exec(
+                select(JobAttempt)
+                .where(JobAttempt.job_id == job_id)
+                .order_by(col(JobAttempt.attempt_number).asc())
+            ).all()
+        )
+        events = list(
+            session.exec(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(col(JobEvent.id).asc())
+            ).all()
+        )
+
+    typer.echo(f"Job {job_id}")
+    typer.echo("")
+    typer.echo(f"Source:       {media_file.path if media_file is not None else '<missing>'}")
+    typer.echo(f"Profile:      {job.profile_name}")
+    typer.echo(f"Profile hash: {job.profile_hash}")
+    typer.echo(f"Queue key:    {job.queue_key}")
+    typer.echo(f"Priority:     {job.priority}")
+    typer.echo(f"Status:       {_job_status_value(job.status)}")
+    typer.echo(f"Stage:        {_job_stage_value(job.stage)}")
+    typer.echo(f"Claimed by:   {job.claimed_by or '-'}")
+    typer.echo(f"Attempts:     {job.attempts}")
+    typer.echo(f"Created:      {_display_optional_datetime(job.created_at)}")
+    typer.echo(f"Started:      {_display_optional_datetime(job.started_at)}")
+    typer.echo(f"Finished:     {_display_optional_datetime(job.finished_at)}")
+    typer.echo("")
+    typer.echo("Control:")
+    typer.echo(f"  cancel:     {_display_optional_datetime(job.cancel_requested_at)}")
+    typer.echo(f"  hold:       {_display_optional_datetime(job.hold_requested_at)}")
+    typer.echo("")
+    typer.echo("Artifacts:")
+    typer.echo(f"  probe hash: {job.probe_hash or '-'}")
+    typer.echo(f"  plan hash:  {job.plan_hash or '-'}")
+    typer.echo(f"  plan path:  {job.plan_path or '-'}")
+    typer.echo(f"  output:     {job.output_path or '-'}")
+    typer.echo(f"  validation: {job.latest_validation_id or '-'}")
+    typer.echo(f"  promotion:  {job.latest_promotion_id or '-'}")
+    if job.last_error_message:
+        typer.echo("")
+        typer.echo("Last error:")
+        typer.echo(f"  {job.last_error_type or 'Error'}: {_truncate_line(job.last_error_message)}")
+    typer.echo("")
+    typer.echo("Attempts:")
+    for attempt in attempts:
+        typer.echo(
+            f"  {attempt.attempt_number:<3} {_job_stage_value(attempt.stage):<9} "
+            f"{_attempt_status_value(attempt.status):<11} {attempt.runner_id}"
+        )
+    typer.echo("")
+    typer.echo("Events:")
+    for event in events:
+        typer.echo(
+            f"  {event.id:<3} {_display_optional_datetime(event.created_at)} "
+            f"{_event_type_value(event.event_type):<16} {event.actor}"
+        )
+
+
+@jobs_app.command("logs")
+def jobs_logs(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    attempt_number: Annotated[int | None, typer.Option("--attempt", help="Attempt number.")] = None,
+    tail_bytes: Annotated[
+        int,
+        typer.Option("--tail-bytes", help="Bytes to tail per log."),
+    ] = 16 * 1024,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    tail_bytes = min(tail_bytes, MAX_CLI_LOG_TAIL_BYTES)
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        statement = select(JobAttempt).where(JobAttempt.job_id == job_id)
+        if attempt_number is not None:
+            statement = statement.where(JobAttempt.attempt_number == attempt_number)
+        statement = statement.order_by(col(JobAttempt.attempt_number).desc())
+        attempt = session.exec(statement).first()
+    if attempt is None:
+        typer.echo("No matching attempt.")
+        raise typer.Exit(1)
+    typer.echo(f"Attempt: {attempt.attempt_number}")
+    _echo_log_tail("stdout", attempt.stdout_log, tail_bytes=tail_bytes)
+    _echo_log_tail("stderr", attempt.stderr_log, tail_bytes=tail_bytes)
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    wait: Annotated[bool, typer.Option("--wait", help="Wait for cancellation to settle.")] = False,
+    timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            cancel_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
+    except JobControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Job cancellation requested")
+    if wait and not _wait_for_job_status(engine, job_id, JobStatus.CANCELED, timeout_seconds):
+        typer.echo("Timed out waiting for job cancellation.")
+        raise typer.Exit(1)
+
+
+@jobs_app.command("hold")
+def jobs_hold(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    reason: Annotated[str | None, typer.Option("--reason")] = None,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            hold_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
+    except JobControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Job hold requested")
+
+
+@jobs_app.command("release")
+def jobs_release(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session, session.begin():
+        changed = release_job(session, job_id=job_id, actor=cli_actor(), now=_utc_now())
+    typer.echo("Job released" if changed else "No hold request exists")
+
+
+@jobs_app.command("retry")
+def jobs_retry(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    runtime_config = _runtime_config(app_config, config)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            next_stage = retry_job(
+                session,
+                job_id=job_id,
+                config=runtime_config,
+                actor=cli_actor(),
+                now=_utc_now(),
+            )
+    except JobControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"Job retry prepared at {_job_stage_value(next_stage)}")
+
+
+@jobs_app.command("priority")
+def jobs_priority(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    value: Annotated[int, typer.Argument(help="New priority.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            update_job_priority(
+                session,
+                job_id=job_id,
+                priority=value,
+                actor=cli_actor(),
+                now=_utc_now(),
+            )
+    except JobControlError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Job priority updated")
+
+
+@queue_app.command("clear")
+def queue_clear_command(
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Comma-separated statuses."),
+    ] = None,
+    stage: Annotated[str | None, typer.Option("--stage", help="Comma-separated stages.")] = None,
+    profile: Annotated[str | None, typer.Option("--profile", help="Profile name.")] = None,
+    job_id: Annotated[list[int] | None, typer.Option("--job-id", help="Specific job id.")] = None,
+    all_jobs: Annotated[bool, typer.Option("--all", help="Select all eligible jobs.")] = False,
+    cancel_running: Annotated[bool, typer.Option("--cancel-running")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+    wait: Annotated[bool, typer.Option("--wait")] = False,
+    timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    del dry_run
+    config = _resolve_cli_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    try:
+        with Session(engine) as session, session.begin():
+            summary = clear_queue(
+                session,
+                actor=cli_actor(),
+                now=_utc_now(),
+                job_ids=set(job_id or []) or None,
+                statuses=_parse_job_statuses(status),
+                stages=_parse_job_stages(stage),
+                profile=profile,
+                all_jobs=all_jobs,
+                cancel_running=cancel_running,
+                confirm=confirm,
+            )
+    except (JobControlError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Queue clear" if confirm else "Queue clear preview")
+    typer.echo("")
+    typer.echo(f"Matched:            {summary.matched}")
+    typer.echo(f"Immediate cancel:   {summary.immediate_cancel}")
+    typer.echo(f"Running requests:   {summary.running_requests}")
+    typer.echo(f"Promotion excluded: {summary.promotion_excluded}")
+    typer.echo(f"Completed excluded: {summary.completed_excluded}")
+    if not confirm:
+        typer.echo("")
+        typer.echo("No jobs were changed.")
+    if wait and not _wait_for_queue_clear(engine, timeout_seconds=timeout_seconds):
+        typer.echo("Timed out waiting for running cancellations.")
+        raise typer.Exit(1)
 
 
 @app.command("probe")
@@ -1137,23 +1589,143 @@ def _echo_queue_counts(database_url: str) -> None:
     typer.echo(f"  failed:    {jobs_by_status[JobStatus.FAILED]}")
 
 
+def _parse_job_statuses(value: str | None) -> set[JobStatus] | None:
+    if value is None or value.strip() == "":
+        return None
+    statuses: set[JobStatus] = set()
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            statuses.add(JobStatus(item))
+        except ValueError as exc:
+            raise ValueError(f"Unknown job status: {item}") from exc
+    return statuses or None
+
+
+def _parse_job_stages(value: str | None) -> set[JobStage] | None:
+    if value is None or value.strip() == "":
+        return None
+    stages: set[JobStage] = set()
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            stages.add(JobStage(item))
+        except ValueError as exc:
+            raise ValueError(f"Unknown job stage: {item}") from exc
+    return stages or None
+
+
+def _job_control_label(job: Job) -> str:
+    if job.cancel_requested_at is not None and _job_status_value(job.status) != JobStatus.CANCELED:
+        return "cancel"
+    if job.hold_requested_at is not None:
+        return "hold"
+    if _job_status_value(job.status) == JobStatus.HELD.value:
+        return "held"
+    return "-"
+
+
+def _attempt_status_value(status: object) -> str:
+    return str(getattr(status, "value", status))
+
+
+def _event_type_value(event_type: object) -> str:
+    return str(getattr(event_type, "value", event_type))
+
+
+def _display_optional_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.isoformat(sep=" ", timespec="seconds")
+
+
+def _format_relative_time(value: datetime | None) -> str:
+    if value is None:
+        return "unknown"
+    seconds = int((_utc_now().replace(tzinfo=None) - value.replace(tzinfo=None)).total_seconds())
+    if seconds < 0:
+        return "now"
+    return f"{seconds} seconds ago"
+
+
+def _format_expiry(value: datetime | None) -> str:
+    if value is None:
+        return "none"
+    seconds = int((value.replace(tzinfo=None) - _utc_now().replace(tzinfo=None)).total_seconds())
+    if seconds < 0:
+        return f"{abs(seconds)} seconds ago"
+    return f"in {seconds} seconds"
+
+
+def _wait_for_scheduler_inactive(engine: Engine, *, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        with Session(engine) as session:
+            status = scheduler_status(session, now=_utc_now())
+            if status.lease_state == "inactive":
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _wait_for_job_status(
+    engine: Engine,
+    job_id: int,
+    expected: JobStatus,
+    timeout_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if job is not None and job.status == expected:
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _wait_for_queue_clear(engine: Engine, *, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() <= deadline:
+        with Session(engine) as session:
+            pending = session.exec(
+                select(Job).where(
+                    Job.status == JobStatus.RUNNING,
+                    col(Job.cancel_requested_at).is_not(None),
+                )
+            ).first()
+            if pending is None:
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None:
+    typer.echo("")
+    typer.echo(f"{label}: {log_path or 'none'}")
+    if log_path is None:
+        return
+    path = Path(log_path)
+    if not path.exists():
+        typer.echo("  missing")
+        return
+    data = path.read_bytes()
+    if len(data) > tail_bytes:
+        data = b"... truncated ...\n" + data[-tail_bytes:]
+    text = data.decode("utf-8", errors="replace")
+    if text:
+        typer.echo(text.rstrip())
+
+
 def _truncate_line(value: str, *, max_length: int = 120) -> str:
     line = " ".join(value.splitlines()).strip()
     if len(line) <= max_length:
         return line
     return f"{line[: max_length - 3]}..."
-
-
-def _validation_status(
-    job: Job,
-    validation_by_id: dict[int, ValidationResult],
-) -> str:
-    if job.latest_validation_id is None:
-        return "-"
-    result = validation_by_id.get(job.latest_validation_id)
-    if result is None:
-        return "-"
-    return "PASS" if result.passed else "FAIL"
 
 
 def _canonical_validation(session: Session, job: Job) -> ValidationResult | None:
@@ -1281,3 +1853,6 @@ def _source_retained_path(record: PromotionRecord) -> str:
 
 
 app.add_typer(db_app, name="db")
+app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(jobs_app, name="jobs")
+app.add_typer(queue_app, name="queue")

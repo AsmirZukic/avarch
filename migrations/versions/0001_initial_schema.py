@@ -48,6 +48,14 @@ def upgrade() -> None:
         sa.Column("last_error_type", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("last_error_message", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("skip_reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("cancel_requested_at", sa.DateTime(), nullable=True),
+        sa.Column("cancel_requested_by", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("cancel_reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("canceled_at", sa.DateTime(), nullable=True),
+        sa.Column("hold_requested_at", sa.DateTime(), nullable=True),
+        sa.Column("hold_requested_by", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("hold_reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("held_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.Column("started_at", sa.DateTime(), nullable=True),
@@ -101,6 +109,23 @@ def upgrade() -> None:
     op.create_index(op.f("ix_job_queue_key"), "job", ["queue_key"], unique=True)
     op.create_index(op.f("ix_job_stage"), "job", ["stage"], unique=False)
     op.create_index(op.f("ix_job_status"), "job", ["status"], unique=False)
+    op.create_table(
+        "jobevent",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("job_id", sa.Integer(), nullable=False),
+        sa.Column("event_type", sa.String(), nullable=False),
+        sa.Column("actor", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("details_json", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["job_id"],
+            ["job.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(op.f("ix_jobevent_event_type"), "jobevent", ["event_type"], unique=False)
+    op.create_index(op.f("ix_jobevent_job_id"), "jobevent", ["job_id"], unique=False)
     op.create_table(
         "jobattempt",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -204,13 +229,19 @@ def upgrade() -> None:
     op.create_table(
         "schedulerstate",
         sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("paused", sa.Boolean(), nullable=False),
+        sa.Column("mode", sa.String(), nullable=False),
+        sa.Column("control_generation", sa.Integer(), nullable=False),
+        sa.Column("acknowledged_generation", sa.Integer(), nullable=False),
+        sa.Column("control_requested_at", sa.DateTime(), nullable=True),
+        sa.Column("control_acknowledged_at", sa.DateTime(), nullable=True),
+        sa.Column("control_reason", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("runner_id", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("heartbeat_at", sa.DateTime(), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(), nullable=True),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index(op.f("ix_schedulerstate_mode"), "schedulerstate", ["mode"], unique=False)
     op.create_index(
         op.f("ix_schedulerstate_runner_id"),
         "schedulerstate",
@@ -383,6 +414,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_validationresult_attempt_id"), table_name="validationresult")
     op.drop_table("validationresult")
     op.drop_index(op.f("ix_schedulerstate_runner_id"), table_name="schedulerstate")
+    op.drop_index(op.f("ix_schedulerstate_mode"), table_name="schedulerstate")
     op.drop_table("schedulerstate")
     op.drop_index(op.f("ix_proberesult_probe_hash"), table_name="proberesult")
     op.drop_index(op.f("ix_proberesult_media_file_id"), table_name="proberesult")
@@ -396,6 +428,9 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_jobattempt_resource_class"), table_name="jobattempt")
     op.drop_index(op.f("ix_jobattempt_job_id"), table_name="jobattempt")
     op.drop_table("jobattempt")
+    op.drop_index(op.f("ix_jobevent_job_id"), table_name="jobevent")
+    op.drop_index(op.f("ix_jobevent_event_type"), table_name="jobevent")
+    op.drop_table("jobevent")
     op.drop_index(op.f("ix_job_status"), table_name="job")
     op.drop_index(op.f("ix_job_stage"), table_name="job")
     op.drop_index(op.f("ix_job_queue_key"), table_name="job")

@@ -7,7 +7,14 @@ from sqlalchemy import Column, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobEventType,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+    SchedulerMode,
+)
 
 
 class AppMeta(SQLModel, table=True):
@@ -101,11 +108,35 @@ class Job(SQLModel, table=True):
     last_error_message: str | None = None
     skip_reason: str | None = None
 
+    cancel_requested_at: datetime | None = None
+    cancel_requested_by: str | None = None
+    cancel_reason: str | None = None
+    canceled_at: datetime | None = None
+
+    hold_requested_at: datetime | None = None
+    hold_requested_by: str | None = None
+    hold_reason: str | None = None
+    held_at: datetime | None = None
+
     created_at: datetime
     updated_at: datetime
 
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class JobEvent(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+    job_id: int = Field(foreign_key="job.id", index=True)
+
+    event_type: JobEventType = Field(sa_column=Column(String(), nullable=False, index=True))
+
+    actor: str
+    reason: str | None = None
+    details_json: str | None = None
+
+    created_at: datetime
 
 
 class JobAttempt(SQLModel, table=True):
@@ -217,7 +248,18 @@ class PromotionRecord(SQLModel, table=True):
 class SchedulerState(SQLModel, table=True):
     id: int = Field(default=1, primary_key=True)
 
-    paused: bool = False
+    mode: SchedulerMode = Field(
+        default=SchedulerMode.RUNNING,
+        sa_column=Column(String(), nullable=False, index=True),
+    )
+
+    control_generation: int = 0
+    acknowledged_generation: int = 0
+
+    control_requested_at: datetime | None = None
+    control_acknowledged_at: datetime | None = None
+
+    control_reason: str | None = None
 
     runner_id: str | None = Field(default=None, index=True)
 

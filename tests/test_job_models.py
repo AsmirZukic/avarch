@@ -18,7 +18,13 @@ from avarch.models.db import (
     ValidationResult,
 )
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+    SchedulerMode,
+)
 
 
 def test_insert_pending_probe_job(tmp_path: Path) -> None:
@@ -155,13 +161,13 @@ def test_scheduler_state_singleton_can_be_created(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session:
-        session.add(SchedulerState(id=1, paused=False, updated_at=now))
+        session.add(SchedulerState(id=1, mode=SchedulerMode.RUNNING, updated_at=now))
         session.commit()
 
         stored = session.get(SchedulerState, 1)
 
     assert stored is not None
-    assert stored.paused is False
+    assert stored.mode == SchedulerMode.RUNNING
 
 
 def test_job_enums_round_trip_through_sqlite(tmp_path: Path) -> None:

@@ -55,10 +55,25 @@ runner = CliRunner()
         ["plan"],
         ["encode"],
         ["enqueue"],
-        ["run"],
-        ["retry"],
-        ["pause"],
+        ["scheduler"],
+        ["scheduler", "run"],
+        ["scheduler", "pause"],
+        ["scheduler", "resume"],
+        ["scheduler", "drain"],
+        ["scheduler", "stop"],
+        ["scheduler", "status"],
         ["jobs"],
+        ["jobs", "list"],
+        ["jobs", "show"],
+        ["jobs", "logs"],
+        ["jobs", "cancel"],
+        ["jobs", "hold"],
+        ["jobs", "release"],
+        ["jobs", "retry"],
+        ["jobs", "priority"],
+        ["queue"],
+        ["queue", "clear"],
+        ["queue", "retry"],
         ["validate"],
         ["tui"],
     ],
@@ -194,16 +209,16 @@ def test_queue_workflows_report_profile_status_and_retry_errors(tmp_path: Path) 
     )
     invalid_status = runner.invoke(
         app,
-        ["jobs", "--status", "confused", "--config", str(config_path)],
+        ["jobs", "list", "--status", "confused", "--config", str(config_path)],
     )
-    retry_without_flag = runner.invoke(app, ["retry", "--config", str(config_path)])
+    retry_preview = runner.invoke(app, ["queue", "retry", "--config", str(config_path)])
 
     assert missing_profile.exit_code != 0
     assert "Unknown profile: does_not_exist" in missing_profile.output
     assert invalid_status.exit_code != 0
     assert "Unknown job status: confused" in invalid_status.output
-    assert retry_without_flag.exit_code != 0
-    assert "Pass --failed" in retry_without_flag.output
+    assert retry_preview.exit_code == 0
+    assert "Queue retry preview" in retry_preview.output
 
 
 def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
@@ -240,12 +255,11 @@ def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
         )
         assert passing_job.id is not None
 
-    result = runner.invoke(app, ["jobs", "--config", str(config_path)])
+    result = runner.invoke(app, ["jobs", "list", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "failed" in result.output
     assert "validated" in result.output
-    assert "PASS" in result.output
     assert "encoder crashed" in result.output
 
 
@@ -304,6 +318,8 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
         assert probe_result is not None
         plan = _localized_plan(tmp_path=tmp_path, media_file=media_file)
         _write_plan(plan)
+        plan.output_path.parent.mkdir(parents=True, exist_ok=True)
+        plan.output_path.write_bytes(b"encoded")
         session.add(
             Job(
                 media_file_id=media_file.id or 0,
@@ -326,13 +342,16 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
             )
         )
 
-    result = runner.invoke(app, ["retry", "--failed", "--config", str(config_path)])
+    result = runner.invoke(
+        app,
+        ["queue", "retry", "--status", "failed", "--confirm", "--config", str(config_path)],
+    )
 
     with Session(engine) as session:
         job = session.get(Job, 1)
 
     assert result.exit_code == 0
-    assert "Reset to validate: 1" in result.output
+    assert "Resume validate:   1" in result.output
     assert job is not None
     assert job.status == JobStatus.PENDING
     assert job.stage == JobStage.VALIDATE

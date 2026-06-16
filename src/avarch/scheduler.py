@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import socket
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ from avarch.execution import build_av1an_command, execute_plan, should_resume_av
 from avarch.models.db import (
     Job,
     JobAttempt,
+    JobEvent,
     MediaFile,
     MediaFileStatus,
     ProbeResult,
@@ -27,7 +30,14 @@ from avarch.models.db import (
 )
 from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobEventType,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+    SchedulerMode,
+)
 from avarch.planner import (
     PlanArtifactConflictError,
     PlanningError,
@@ -69,6 +79,8 @@ SCHEDULER_LEASE_SECONDS = 30.0
 SCHEDULER_HEARTBEAT_SECONDS = 5.0
 SCHEDULER_POLL_SECONDS = 1.0
 SCHEDULER_IDLE_EXIT_SECONDS = 2.0
+SCHEDULER_CONTROL_POLL_SECONDS = 0.5
+MAX_CLI_LOG_TAIL_BYTES = 64 * 1024
 
 ProgressCallback = Callable[[int, float | None], None]
 JobWorker = Callable[..., Awaitable[Any]]
@@ -86,7 +98,15 @@ class SchedulerLeaseLostError(SchedulerError):
     pass
 
 
+class SchedulerControlError(SchedulerError):
+    pass
+
+
 class JobClaimError(SchedulerError):
+    pass
+
+
+class JobControlError(SchedulerError):
     pass
 
 
@@ -138,8 +158,50 @@ class SchedulerRunSummary:
     idle: bool
 
 
+@dataclass(frozen=True, slots=True)
+class QueueClearSummary:
+    matched: int
+    immediate_cancel: int
+    running_requests: int
+    promotion_excluded: int
+    completed_excluded: int
+    changed: int
+    operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRetrySummary:
+    matched: int
+    retryable: int
+    requires_requeue: int
+    reset_to_probe: int
+    reset_to_plan: int
+    reset_to_encode: int
+    reset_to_validate: int
+    return_to_promote: int
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerStatus:
+    mode: SchedulerMode
+    control_generation: int
+    acknowledged_generation: int
+    runner_id: str | None
+    heartbeat_at: datetime | None
+    lease_expires_at: datetime | None
+    lease_state: str
+    counts_by_status: dict[JobStatus, int]
+    cancel_pending: int
+    hold_pending: int
+    active_jobs: list[Job]
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def cli_actor() -> str:
+    return f"cli:{socket.gethostname()}:{os.getpid()}"
 
 
 def build_queue_key(
@@ -282,6 +344,10 @@ def complete_job_stage(
 ) -> None:
     job = _require_job(session, job_id)
     attempt = _require_attempt(session, attempt_id)
+    if job.cancel_requested_at is not None:
+        _cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+        return
+
     attempt.status = AttemptStatus.COMPLETED
     attempt.finished_at = now
     job.last_error_type = None
@@ -292,9 +358,19 @@ def complete_job_stage(
         job.status = JobStatus.COMPLETED
         job.finished_at = now
     else:
-        job.status = JobStatus.PENDING
+        job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
         job.stage = next_stage
         job.finished_at = None
+        if job.status == JobStatus.HELD:
+            job.held_at = now
+            _add_job_event(
+                session,
+                job_id=job_id,
+                event_type=JobEventType.HELD,
+                actor=job.hold_requested_by or "scheduler",
+                reason=job.hold_reason,
+                now=now,
+            )
     session.add(job)
     session.add(attempt)
 
@@ -310,6 +386,10 @@ def fail_job_stage(
 ) -> None:
     job = _require_job(session, job_id)
     attempt = _require_attempt(session, attempt_id)
+    if job.cancel_requested_at is not None:
+        _cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+        return
+
     attempt.status = AttemptStatus.FAILED
     attempt.error_type = error.__class__.__name__
     attempt.error_message = str(error)
@@ -319,6 +399,7 @@ def fail_job_stage(
     job.claimed_by = None
     job.last_error_type = attempt.error_type
     job.last_error_message = attempt.error_message
+    _clear_hold_fields(job)
     job.updated_at = now
     job.finished_at = now
     session.add(job)
@@ -334,10 +415,26 @@ def interrupt_job_stage(
 ) -> None:
     job = _require_job(session, job_id)
     attempt = _require_attempt(session, attempt_id)
+    if job.cancel_requested_at is not None:
+        _cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+        return
+
     attempt.status = AttemptStatus.INTERRUPTED
     attempt.finished_at = now
     attempt.exit_code = 130
-    job.status = JobStatus.PENDING
+    if job.hold_requested_at is not None:
+        job.status = JobStatus.HELD
+        job.held_at = now
+        _add_job_event(
+            session,
+            job_id=job_id,
+            event_type=JobEventType.HELD,
+            actor=job.hold_requested_by or "scheduler",
+            reason=job.hold_reason,
+            now=now,
+        )
+    else:
+        job.status = JobStatus.PENDING
     job.claimed_by = None
     job.updated_at = now
     job.finished_at = None
@@ -654,6 +751,10 @@ async def execute_validation_job(
 
     with Session(engine) as session, session.begin():
         job = _require_job(session, job_id)
+        if job.cancel_requested_at is not None:
+            attempt = _require_attempt(session, attempt_id)
+            _cancel_claimed_job(session, job=job, attempt=attempt, now=utc_now())
+            return None
         attempt = _require_attempt(session, attempt_id)
         result = persist_validation_result(
             session,
@@ -661,6 +762,8 @@ async def execute_validation_job(
             attempt=attempt,
             report=report,
         )
+        if report.passed and job.hold_requested_at is not None:
+            _clear_hold_fields(job)
         attempt.details_json = canonical_json(
             {
                 "result_id": result.id,
@@ -679,18 +782,37 @@ def acquire_scheduler_lease(
     *,
     runner_id: str,
     now: datetime,
+    resume: bool = False,
 ) -> SchedulerState:
     state = _get_or_create_scheduler_state(session, now=now)
     if (
         state.runner_id is not None
         and state.lease_expires_at is not None
-        and state.lease_expires_at > now
+        and _datetime_after(state.lease_expires_at, now)
         and state.runner_id != runner_id
     ):
         raise SchedulerAlreadyRunningError("Another scheduler lease is still active.")
 
+    if resume and state.mode == SchedulerMode.PAUSED:
+        _request_scheduler_mode(
+            state,
+            mode=SchedulerMode.RUNNING,
+            now=now,
+            reason=None,
+            increment=True,
+        )
+    elif state.mode == SchedulerMode.PAUSED:
+        raise SchedulerControlError("Scheduler is paused. Run `avarch scheduler resume` first.")
+
+    if state.mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING} and not _lease_active(
+        state, now=now
+    ):
+        state.mode = SchedulerMode.RUNNING
+        state.control_requested_at = None
+        state.control_acknowledged_at = None
+        state.control_reason = None
+
     state.runner_id = runner_id
-    state.paused = False
     state.heartbeat_at = now
     state.lease_expires_at = now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)
     state.updated_at = now
@@ -725,6 +847,11 @@ def release_scheduler_lease(
     state.runner_id = None
     state.lease_expires_at = None
     state.heartbeat_at = now
+    if state.mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING}:
+        state.mode = SchedulerMode.RUNNING
+        state.control_requested_at = None
+        state.control_acknowledged_at = None
+        state.control_reason = None
     state.updated_at = now
     session.add(state)
 
@@ -740,23 +867,65 @@ def recover_abandoned_jobs(
     interrupted_attempts = 0
     jobs = list(session.exec(select(Job).where(Job.status == JobStatus.RUNNING)).all())
     for job in jobs:
+        if job.stage == JobStage.PROMOTE:
+            continue
         attempt = session.exec(
             select(JobAttempt)
             .where(JobAttempt.job_id == job.id, JobAttempt.status == AttemptStatus.RUNNING)
             .order_by(col(JobAttempt.attempt_number).desc())
         ).first()
-        if attempt is not None:
+        if attempt is not None and job.cancel_requested_at is not None:
+            _cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+            interrupted_attempts += 1
+        elif attempt is not None:
             attempt.status = AttemptStatus.INTERRUPTED
             attempt.finished_at = now
             attempt.error_type = "SchedulerRecovered"
             attempt.error_message = "Running attempt was recovered after scheduler restart."
             session.add(attempt)
             interrupted_attempts += 1
-        job.status = JobStatus.PENDING
-        job.claimed_by = None
-        job.finished_at = None
-        job.updated_at = now
-        session.add(job)
+            job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
+            if job.status == JobStatus.HELD:
+                job.held_at = now
+                _add_job_event(
+                    session,
+                    job_id=_require_id(job),
+                    event_type=JobEventType.HELD,
+                    actor=job.hold_requested_by or "scheduler",
+                    reason=job.hold_reason,
+                    now=now,
+                )
+            job.claimed_by = None
+            job.finished_at = None
+            job.updated_at = now
+            session.add(job)
+        else:
+            job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
+            if job.cancel_requested_at is not None:
+                job.status = JobStatus.CANCELED
+                job.canceled_at = now
+                job.finished_at = now
+                _add_job_event(
+                    session,
+                    job_id=_require_id(job),
+                    event_type=JobEventType.CANCELED,
+                    actor=job.cancel_requested_by or "scheduler",
+                    reason=job.cancel_reason,
+                    now=now,
+                )
+            elif job.status == JobStatus.HELD:
+                job.held_at = now
+                _add_job_event(
+                    session,
+                    job_id=_require_id(job),
+                    event_type=JobEventType.HELD,
+                    actor=job.hold_requested_by or "scheduler",
+                    reason=job.hold_reason,
+                    now=now,
+                )
+            job.claimed_by = None
+            job.updated_at = now
+            session.add(job)
         recovered_jobs += 1
     return RecoverySummary(recovered_jobs=recovered_jobs, interrupted_attempts=interrupted_attempts)
 
@@ -765,10 +934,11 @@ async def run_scheduler(
     *,
     config: AppConfig,
     runner_id: str,
+    resume: bool = False,
 ) -> SchedulerRunSummary:
     engine = create_db_engine(config.database.url)
     with Session(engine) as session, session.begin():
-        acquire_scheduler_lease(session, runner_id=runner_id, now=utc_now())
+        acquire_scheduler_lease(session, runner_id=runner_id, now=utc_now(), resume=resume)
         recover_abandoned_jobs(session, new_runner_id=runner_id, now=utc_now())
 
     workers = {
@@ -781,7 +951,7 @@ async def run_scheduler(
     active_job_ids: set[int] = set()
     last_heartbeat = utc_now()
     idle_since: datetime | None = None
-    stopped_by_pause = False
+    current_mode = SchedulerMode.RUNNING
 
     try:
         while True:
@@ -795,13 +965,39 @@ async def run_scheduler(
             for task in done:
                 job_id, _stage = active.pop(task)
                 active_job_ids.discard(job_id)
-                task.result()
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    _interrupt_running_job(engine, job_id=job_id)
 
             with Session(engine) as session:
                 state = _get_or_create_scheduler_state(session, now=now)
-                if state.paused:
-                    stopped_by_pause = True
-                if not stopped_by_pause:
+                if state.runner_id != runner_id:
+                    raise SchedulerLeaseLostError("Scheduler lease belongs to another runner.")
+                current_mode = SchedulerMode(state.mode)
+                if state.acknowledged_generation != state.control_generation:
+                    with Session(engine) as ack_session, ack_session.begin():
+                        ack_state = _get_or_create_scheduler_state(ack_session, now=utc_now())
+                        if ack_state.runner_id == runner_id:
+                            ack_state.acknowledged_generation = ack_state.control_generation
+                            ack_state.control_acknowledged_at = utc_now()
+                            ack_session.add(ack_state)
+
+                canceled_active_ids: set[int] = set()
+                for job_id in active_job_ids:
+                    active_job = session.get(Job, job_id)
+                    if active_job is not None and active_job.cancel_requested_at is not None:
+                        canceled_active_ids.add(job_id)
+                if canceled_active_ids:
+                    for task, (job_id, _stage) in active.items():
+                        if job_id in canceled_active_ids:
+                            task.cancel()
+
+                if current_mode == SchedulerMode.STOPPING:
+                    for task in active:
+                        task.cancel()
+
+                if current_mode == SchedulerMode.RUNNING:
                     for job in _claimable_jobs(session, active_job_ids=active_job_ids):
                         if not _has_resource_capacity(job, active, config=config):
                             continue
@@ -814,11 +1010,15 @@ async def run_scheduler(
                         active_job_ids.add(job_id)
 
             if active:
-                await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+                await asyncio.sleep(SCHEDULER_CONTROL_POLL_SECONDS)
                 continue
 
-            if stopped_by_pause:
+            if current_mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING}:
                 break
+
+            if current_mode == SchedulerMode.PAUSED:
+                await asyncio.sleep(SCHEDULER_CONTROL_POLL_SECONDS)
+                continue
 
             with Session(engine) as session:
                 pending_count = session.exec(
@@ -842,11 +1042,267 @@ async def run_scheduler(
     return SchedulerRunSummary(completed=completed, failed=failed, skipped=skipped, idle=True)
 
 
-def pause_scheduler(session: Session, *, now: datetime) -> None:
+def pause_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
     state = _get_or_create_scheduler_state(session, now=now)
-    state.paused = True
-    state.updated_at = now
+    if state.mode == SchedulerMode.PAUSED:
+        return
+    if state.mode != SchedulerMode.RUNNING:
+        raise SchedulerControlError(f"Cannot pause while scheduler is {state.mode}.")
+    _request_scheduler_mode(state, mode=SchedulerMode.PAUSED, now=now, reason=reason)
     session.add(state)
+
+
+def resume_scheduler(session: Session, *, now: datetime) -> None:
+    state = _get_or_create_scheduler_state(session, now=now)
+    if state.mode == SchedulerMode.RUNNING:
+        return
+    if state.mode != SchedulerMode.PAUSED:
+        raise SchedulerControlError(f"Cannot resume while scheduler is {state.mode}.")
+    _request_scheduler_mode(state, mode=SchedulerMode.RUNNING, now=now, reason=None)
+    session.add(state)
+
+
+def drain_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
+    state = _get_or_create_scheduler_state(session, now=now)
+    if not _lease_active(state, now=now):
+        raise SchedulerControlError("No active scheduler lease is running.")
+    if state.mode != SchedulerMode.RUNNING:
+        raise SchedulerControlError(f"Cannot drain while scheduler is {state.mode}.")
+    _request_scheduler_mode(state, mode=SchedulerMode.DRAINING, now=now, reason=reason)
+    session.add(state)
+
+
+def stop_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
+    state = _get_or_create_scheduler_state(session, now=now)
+    if not _lease_active(state, now=now):
+        raise SchedulerControlError("No active scheduler lease is running.")
+    if state.mode not in {SchedulerMode.RUNNING, SchedulerMode.PAUSED}:
+        raise SchedulerControlError(f"Cannot stop while scheduler is {state.mode}.")
+    _request_scheduler_mode(state, mode=SchedulerMode.STOPPING, now=now, reason=reason)
+    session.add(state)
+
+
+def scheduler_status(session: Session, *, now: datetime) -> SchedulerStatus:
+    state = _get_or_create_scheduler_state(session, now=now)
+    counts_by_status = {
+        status: len(session.exec(select(Job).where(Job.status == status)).all())
+        for status in JobStatus
+    }
+    active_jobs = list(
+        session.exec(
+            select(Job)
+            .where(Job.status == JobStatus.RUNNING)
+            .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
+        ).all()
+    )
+    cancel_pending = len(
+        session.exec(
+            select(Job).where(
+                col(Job.cancel_requested_at).is_not(None),
+                Job.status == JobStatus.RUNNING,
+            )
+        ).all()
+    )
+    hold_pending = len(
+        session.exec(
+            select(Job).where(
+                col(Job.hold_requested_at).is_not(None),
+                Job.status == JobStatus.RUNNING,
+            )
+        ).all()
+    )
+    lease_state = "inactive"
+    if state.runner_id is not None:
+        lease_state = "active" if _lease_active(state, now=now) else "stale"
+    return SchedulerStatus(
+        mode=SchedulerMode(state.mode),
+        control_generation=state.control_generation,
+        acknowledged_generation=state.acknowledged_generation,
+        runner_id=state.runner_id,
+        heartbeat_at=state.heartbeat_at,
+        lease_expires_at=state.lease_expires_at,
+        lease_state=lease_state,
+        counts_by_status=counts_by_status,
+        cancel_pending=cancel_pending,
+        hold_pending=hold_pending,
+        active_jobs=active_jobs,
+    )
+
+
+def cancel_job(
+    session: Session,
+    *,
+    job_id: int,
+    actor: str,
+    now: datetime,
+    reason: str | None = None,
+    event_type: JobEventType = JobEventType.CANCEL_REQUESTED,
+    details_json: str | None = None,
+) -> None:
+    job = _require_job(session, job_id)
+    if job.status == JobStatus.CANCELED:
+        return
+    if job.status in {JobStatus.COMPLETED, JobStatus.SKIPPED}:
+        raise JobControlError(f"Job {job_id} cannot be canceled from {job.status}.")
+    if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+        raise JobControlError(
+            "This job has an active promotion transaction. Use promotion recovery or interrupt "
+            "the owning promote command."
+        )
+
+    job.cancel_requested_at = job.cancel_requested_at or now
+    job.cancel_requested_by = job.cancel_requested_by or actor
+    job.cancel_reason = reason
+    if job.status == JobStatus.RUNNING:
+        _add_job_event(
+            session,
+            job_id=job_id,
+            event_type=event_type,
+            actor=actor,
+            reason=reason,
+            details_json=details_json,
+            now=now,
+        )
+    else:
+        job.status = JobStatus.CANCELED
+        job.canceled_at = now
+        job.finished_at = now
+        job.claimed_by = None
+        _clear_hold_fields(job)
+        _add_job_event(
+            session,
+            job_id=job_id,
+            event_type=JobEventType.CANCELED
+            if event_type == JobEventType.CANCEL_REQUESTED
+            else event_type,
+            actor=actor,
+            reason=reason,
+            details_json=details_json,
+            now=now,
+        )
+    job.updated_at = now
+    session.add(job)
+
+
+def hold_job(
+    session: Session,
+    *,
+    job_id: int,
+    actor: str,
+    now: datetime,
+    reason: str | None = None,
+) -> None:
+    job = _require_job(session, job_id)
+    if job.status == JobStatus.HELD:
+        return
+    if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+        raise JobControlError("Running promotion jobs cannot be held by the scheduler.")
+    if job.status in {
+        JobStatus.FAILED,
+        JobStatus.CANCELED,
+        JobStatus.COMPLETED,
+        JobStatus.SKIPPED,
+        JobStatus.VALIDATED,
+    }:
+        raise JobControlError(f"Job {job_id} cannot be held from {job.status}.")
+
+    job.hold_requested_at = job.hold_requested_at or now
+    job.hold_requested_by = job.hold_requested_by or actor
+    job.hold_reason = reason
+    if job.status == JobStatus.RUNNING:
+        _add_job_event(
+            session,
+            job_id=job_id,
+            event_type=JobEventType.HOLD_REQUESTED,
+            actor=actor,
+            reason=reason,
+            now=now,
+        )
+    else:
+        job.status = JobStatus.HELD
+        job.held_at = now
+        _add_job_event(
+            session,
+            job_id=job_id,
+            event_type=JobEventType.HELD,
+            actor=actor,
+            reason=reason,
+            now=now,
+        )
+    job.updated_at = now
+    session.add(job)
+
+
+def release_job(session: Session, *, job_id: int, actor: str, now: datetime) -> bool:
+    job = _require_job(session, job_id)
+    had_hold = job.hold_requested_at is not None or job.status == JobStatus.HELD
+    if not had_hold:
+        return False
+    if job.status == JobStatus.HELD:
+        job.status = JobStatus.PENDING
+        job.finished_at = None
+    _clear_hold_fields(job)
+    job.updated_at = now
+    _add_job_event(
+        session,
+        job_id=job_id,
+        event_type=JobEventType.HOLD_RELEASED,
+        actor=actor,
+        now=now,
+    )
+    session.add(job)
+    return True
+
+
+def retry_job(
+    session: Session,
+    *,
+    job_id: int,
+    config: AppConfig,
+    actor: str,
+    now: datetime,
+) -> JobStage:
+    job = _require_job(session, job_id)
+    if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
+        raise JobControlError(f"Job {job_id} cannot be retried from {job.status}.")
+    next_stage = _resolve_retry_stage(session, job, config=config)
+    if next_stage is None:
+        raise JobControlError("Job already has a completed promotion.")
+    _reset_job_for_retry(job, next_stage=next_stage, now=now)
+    _add_job_event(
+        session,
+        job_id=job_id,
+        event_type=JobEventType.RETRY_REQUESTED,
+        actor=actor,
+        now=now,
+    )
+    session.add(job)
+    return next_stage
+
+
+def update_job_priority(
+    session: Session,
+    *,
+    job_id: int,
+    priority: int,
+    actor: str,
+    now: datetime,
+) -> None:
+    job = _require_job(session, job_id)
+    if job.status not in {JobStatus.PENDING, JobStatus.HELD}:
+        raise JobControlError(f"Job {job_id} priority cannot change from {job.status}.")
+    old_priority = job.priority
+    job.priority = priority
+    job.updated_at = now
+    _add_job_event(
+        session,
+        job_id=job_id,
+        event_type=JobEventType.PRIORITY_CHANGED,
+        actor=actor,
+        details_json=canonical_json({"old_priority": old_priority, "new_priority": priority}),
+        now=now,
+    )
+    session.add(job)
 
 
 def retry_failed_jobs(
@@ -863,39 +1319,24 @@ def retry_failed_jobs(
     reset_to_validate = 0
     requires_requeue = 0
     for job in jobs:
-        media_file = session.get(MediaFile, job.media_file_id)
-        if media_file is None or _status_value(media_file.status) == MediaFileStatus.MISSING.value:
-            requires_requeue += 1
-            continue
-        if media_file.fs_fingerprint != job.source_fs_fingerprint:
-            requires_requeue += 1
-            continue
         try:
-            _verify_job_profile(config, job)
-        except StaleJobProfileError:
+            next_stage = _resolve_retry_stage(session, job, config=config)
+        except JobControlError:
+            requires_requeue += 1
+            continue
+        if next_stage is None:
             requires_requeue += 1
             continue
         eligible += 1
-        canonical_probe = get_canonical_probe_result(session, media_file)
-        if canonical_probe is None or canonical_probe.probe_hash != job.probe_hash:
-            next_stage = JobStage.PROBE
+        if next_stage == JobStage.PROBE:
             reset_to_probe += 1
-        elif job.plan_path is None or job.plan_hash is None or not _plan_artifact_valid(job):
-            next_stage = JobStage.PLAN
+        elif next_stage == JobStage.PLAN:
             reset_to_plan += 1
-        elif job.stage == JobStage.VALIDATE:
-            next_stage = JobStage.VALIDATE
+        elif next_stage == JobStage.VALIDATE:
             reset_to_validate += 1
         else:
-            next_stage = JobStage.ENCODE
             reset_to_encode += 1
-        job.status = JobStatus.PENDING
-        job.stage = next_stage
-        job.last_error_type = None
-        job.last_error_message = None
-        job.claimed_by = None
-        job.finished_at = None
-        job.updated_at = now
+        _reset_job_for_retry(job, next_stage=next_stage, now=now)
         session.add(job)
     return RetrySummary(
         eligible=eligible,
@@ -904,6 +1345,140 @@ def retry_failed_jobs(
         reset_to_encode=reset_to_encode,
         reset_to_validate=reset_to_validate,
         requires_requeue=requires_requeue,
+    )
+
+
+def clear_queue(
+    session: Session,
+    *,
+    actor: str,
+    now: datetime,
+    job_ids: set[int] | None = None,
+    statuses: set[JobStatus] | None = None,
+    stages: set[JobStage] | None = None,
+    profile: str | None = None,
+    all_jobs: bool = False,
+    cancel_running: bool = False,
+    confirm: bool = False,
+) -> QueueClearSummary:
+    jobs = _select_jobs(
+        session,
+        job_ids=job_ids,
+        statuses=statuses,
+        stages=stages,
+        profile=profile,
+        all_jobs=all_jobs,
+    )
+    operation_id = uuid.uuid4().hex
+    immediate = 0
+    running = 0
+    promotion_excluded = 0
+    completed_excluded = 0
+    changed = 0
+    for job in jobs:
+        if job.status in {JobStatus.COMPLETED, JobStatus.SKIPPED, JobStatus.CANCELED}:
+            completed_excluded += 1
+            continue
+        if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+            promotion_excluded += 1
+            continue
+        if job.status == JobStatus.RUNNING and not cancel_running:
+            continue
+        if job.status == JobStatus.RUNNING:
+            running += 1
+        else:
+            immediate += 1
+        if confirm:
+            cancel_job(
+                session,
+                job_id=_require_id(job),
+                actor=actor,
+                now=now,
+                reason="queue clear",
+                event_type=JobEventType.QUEUE_CLEARED,
+                details_json=canonical_json({"operation_id": operation_id}),
+            )
+            changed += 1
+    return QueueClearSummary(
+        matched=len(jobs),
+        immediate_cancel=immediate,
+        running_requests=running,
+        promotion_excluded=promotion_excluded,
+        completed_excluded=completed_excluded,
+        changed=changed,
+        operation_id=operation_id,
+    )
+
+
+def retry_queue(
+    session: Session,
+    *,
+    config: AppConfig,
+    actor: str,
+    now: datetime,
+    job_ids: set[int] | None = None,
+    statuses: set[JobStatus] | None = None,
+    stages: set[JobStage] | None = None,
+    profile: str | None = None,
+    all_jobs: bool = False,
+    confirm: bool = False,
+) -> QueueRetrySummary:
+    jobs = _select_jobs(
+        session,
+        job_ids=job_ids,
+        statuses=statuses,
+        stages=stages,
+        profile=profile,
+        all_jobs=all_jobs,
+    )
+    retryable = 0
+    requires_requeue = 0
+    reset_to_probe = 0
+    reset_to_plan = 0
+    reset_to_encode = 0
+    reset_to_validate = 0
+    return_to_promote = 0
+    for job in jobs:
+        if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
+            continue
+        try:
+            next_stage = _resolve_retry_stage(session, job, config=config)
+        except JobControlError:
+            requires_requeue += 1
+            continue
+        if next_stage is None:
+            requires_requeue += 1
+            continue
+        retryable += 1
+        if next_stage == JobStage.PROBE:
+            reset_to_probe += 1
+        elif next_stage == JobStage.PLAN:
+            reset_to_plan += 1
+        elif next_stage == JobStage.ENCODE:
+            reset_to_encode += 1
+        elif next_stage == JobStage.VALIDATE:
+            reset_to_validate += 1
+        elif next_stage == JobStage.PROMOTE:
+            return_to_promote += 1
+        if confirm:
+            _reset_job_for_retry(job, next_stage=next_stage, now=now)
+            _add_job_event(
+                session,
+                job_id=_require_id(job),
+                event_type=JobEventType.RETRY_REQUESTED,
+                actor=actor,
+                now=now,
+            )
+            session.add(job)
+    return QueueRetrySummary(
+        matched=len(jobs),
+        retryable=retryable,
+        requires_requeue=requires_requeue,
+        reset_to_probe=reset_to_probe,
+        reset_to_plan=reset_to_plan,
+        reset_to_encode=reset_to_encode,
+        reset_to_validate=reset_to_validate,
+        return_to_promote=return_to_promote,
     )
 
 
@@ -1114,10 +1689,231 @@ def _has_resource_capacity(
 def _get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:
     state = session.get(SchedulerState, 1)
     if state is None:
-        state = SchedulerState(id=1, paused=False, updated_at=now)
+        state = SchedulerState(id=1, mode=SchedulerMode.RUNNING, updated_at=now)
         session.add(state)
         session.flush()
     return state
+
+
+def _request_scheduler_mode(
+    state: SchedulerState,
+    *,
+    mode: SchedulerMode,
+    now: datetime,
+    reason: str | None,
+    increment: bool = True,
+) -> None:
+    state.mode = mode
+    if increment:
+        state.control_generation += 1
+    state.control_requested_at = now
+    state.control_acknowledged_at = None
+    state.control_reason = reason
+    state.updated_at = now
+
+
+def _lease_active(state: SchedulerState, *, now: datetime) -> bool:
+    return (
+        state.runner_id is not None
+        and state.lease_expires_at is not None
+        and _datetime_after(state.lease_expires_at, now)
+    )
+
+
+def _datetime_after(left: datetime, right: datetime) -> bool:
+    return left.replace(tzinfo=None) > right.replace(tzinfo=None)
+
+
+def _add_job_event(
+    session: Session,
+    *,
+    job_id: int,
+    event_type: JobEventType,
+    actor: str,
+    now: datetime,
+    reason: str | None = None,
+    details_json: str | None = None,
+) -> None:
+    session.add(
+        JobEvent(
+            job_id=job_id,
+            event_type=event_type,
+            actor=actor,
+            reason=reason,
+            details_json=details_json,
+            created_at=now,
+        )
+    )
+
+
+def _cancel_claimed_job(
+    session: Session,
+    *,
+    job: Job,
+    attempt: JobAttempt,
+    now: datetime,
+) -> None:
+    job_id = _require_id(job)
+    attempt.status = AttemptStatus.CANCELED
+    attempt.finished_at = now
+    attempt.exit_code = 130
+    job.status = JobStatus.CANCELED
+    job.claimed_by = None
+    job.canceled_at = now
+    job.finished_at = now
+    job.updated_at = now
+    _clear_hold_fields(job)
+    _add_job_event(
+        session,
+        job_id=job_id,
+        event_type=JobEventType.CANCELED,
+        actor=job.cancel_requested_by or "scheduler",
+        reason=job.cancel_reason,
+        now=now,
+    )
+    session.add(job)
+    session.add(attempt)
+
+
+def _clear_hold_fields(job: Job) -> None:
+    job.hold_requested_at = None
+    job.hold_requested_by = None
+    job.hold_reason = None
+    job.held_at = None
+
+
+def _clear_cancel_fields(job: Job) -> None:
+    job.cancel_requested_at = None
+    job.cancel_requested_by = None
+    job.cancel_reason = None
+    job.canceled_at = None
+
+
+def _reset_job_for_retry(job: Job, *, next_stage: JobStage, now: datetime) -> None:
+    _clear_cancel_fields(job)
+    _clear_hold_fields(job)
+    job.status = JobStatus.VALIDATED if next_stage == JobStage.PROMOTE else JobStatus.PENDING
+    job.stage = next_stage
+    job.last_error_type = None
+    job.last_error_message = None
+    job.claimed_by = None
+    job.finished_at = None
+    job.updated_at = now
+
+
+def _resolve_retry_stage(
+    session: Session,
+    job: Job,
+    *,
+    config: AppConfig,
+) -> JobStage | None:
+    media_file = session.get(MediaFile, job.media_file_id)
+    if media_file is None or _status_value(media_file.status) == MediaFileStatus.MISSING.value:
+        raise JobControlError("Source file is missing; scan and enqueue new work.")
+    if media_file.fs_fingerprint != job.source_fs_fingerprint:
+        raise JobControlError("Source identity changed; scan and enqueue new work.")
+    try:
+        _verify_job_profile(config, job)
+    except StaleJobProfileError as exc:
+        raise JobControlError(str(exc)) from exc
+
+    canonical_probe = get_canonical_probe_result(session, media_file)
+    if canonical_probe is None or canonical_probe.probe_hash != job.probe_hash:
+        return JobStage.PROBE
+    if job.plan_path is None or job.plan_hash is None or not _plan_artifact_valid(job):
+        return JobStage.PLAN
+    validation = _latest_validation(session, job)
+    if _output_exists(job):
+        if validation is not None and validation.passed:
+            if _has_completed_promotion(session, job):
+                return None
+            return JobStage.PROMOTE
+        return JobStage.VALIDATE
+    return JobStage.ENCODE
+
+
+def _latest_validation(session: Session, job: Job) -> ValidationResult | None:
+    if job.latest_validation_id is None:
+        return None
+    result = session.get(ValidationResult, job.latest_validation_id)
+    if result is None or result.job_id != job.id:
+        return None
+    if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
+        return None
+    return result
+
+
+def _output_exists(job: Job) -> bool:
+    return job.output_path is not None and Path(job.output_path).is_file()
+
+
+def _has_completed_promotion(session: Session, job: Job) -> bool:
+    from avarch.models.db import PromotionRecord
+    from avarch.models.promotion import PromotionStatus
+
+    if job.id is None:
+        return False
+    return (
+        session.exec(
+            select(PromotionRecord).where(
+                PromotionRecord.job_id == job.id,
+                PromotionRecord.status == PromotionStatus.COMPLETED,
+            )
+        ).first()
+        is not None
+    )
+
+
+def _select_jobs(
+    session: Session,
+    *,
+    job_ids: set[int] | None,
+    statuses: set[JobStatus] | None,
+    stages: set[JobStage] | None,
+    profile: str | None,
+    all_jobs: bool,
+) -> list[Job]:
+    if not all_jobs and not job_ids and not statuses and not stages and profile is None:
+        raise JobControlError("At least one selector is required.")
+    statement = select(Job).order_by(
+        col(Job.priority).desc(),
+        col(Job.created_at).asc(),
+        col(Job.id).asc(),
+    )
+    if job_ids:
+        statement = statement.where(col(Job.id).in_(job_ids))
+    if statuses:
+        statement = statement.where(col(Job.status).in_(statuses))
+    if stages:
+        statement = statement.where(col(Job.stage).in_(stages))
+    if profile is not None:
+        statement = statement.where(Job.profile_name == profile)
+    if all_jobs:
+        statement = statement.where(
+            col(Job.status).not_in(
+                [JobStatus.COMPLETED, JobStatus.SKIPPED, JobStatus.CANCELED]
+            )
+        )
+    return list(session.exec(statement).all())
+
+
+def _interrupt_running_job(engine: Any, *, job_id: int) -> None:
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        if job is None or job.status != JobStatus.RUNNING:
+            return
+        attempt = session.exec(
+            select(JobAttempt)
+            .where(JobAttempt.job_id == job_id, JobAttempt.status == AttemptStatus.RUNNING)
+            .order_by(col(JobAttempt.attempt_number).desc())
+        ).first()
+        if attempt is None:
+            job.status = JobStatus.PENDING
+            job.claimed_by = None
+            job.updated_at = utc_now()
+            session.add(job)
+            return
+        interrupt_job_stage(session, job_id=job_id, attempt_id=_require_id(attempt), now=utc_now())
 
 
 def _scheduler_error(error: Exception) -> Exception:
@@ -1162,6 +1958,14 @@ def _snapshot_job(job: Job) -> Job:
         last_error_type=job.last_error_type,
         last_error_message=job.last_error_message,
         skip_reason=job.skip_reason,
+        cancel_requested_at=job.cancel_requested_at,
+        cancel_requested_by=job.cancel_requested_by,
+        cancel_reason=job.cancel_reason,
+        canceled_at=job.canceled_at,
+        hold_requested_at=job.hold_requested_at,
+        hold_requested_by=job.hold_requested_by,
+        hold_reason=job.hold_reason,
+        held_at=job.held_at,
         created_at=job.created_at,
         updated_at=job.updated_at,
         started_at=job.started_at,

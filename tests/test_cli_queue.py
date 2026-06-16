@@ -37,7 +37,7 @@ def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
     runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
     runner.invoke(app, ["enqueue", "--profile", "av1_1080p_sdr", "--config", str(config_path)])
 
-    result = runner.invoke(app, ["jobs", "--config", str(config_path)])
+    result = runner.invoke(app, ["jobs", "list", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "pending" in result.output
@@ -47,19 +47,19 @@ def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
 
-    result = runner.invoke(app, ["pause", "--config", str(config_path)])
+    result = runner.invoke(app, ["scheduler", "pause", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "Scheduler pause requested" in result.output
 
 
-def test_retry_requires_failed_flag(tmp_path: Path) -> None:
+def test_queue_retry_preview_runs_without_confirm(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
 
-    result = runner.invoke(app, ["retry", "--config", str(config_path)])
+    result = runner.invoke(app, ["queue", "retry", "--config", str(config_path)])
 
-    assert result.exit_code != 0
-    assert "Pass --failed" in result.output
+    assert result.exit_code == 0
+    assert "Queue retry preview" in result.output
 
 
 def test_run_command_invokes_scheduler(
@@ -75,7 +75,7 @@ def test_run_command_invokes_scheduler(
 
     monkeypatch.setattr("avarch.cli.run_scheduler", fake_run_scheduler)
 
-    result = runner.invoke(app, ["run", "--config", str(config_path)])
+    result = runner.invoke(app, ["scheduler", "run", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert calls == ["called"]
