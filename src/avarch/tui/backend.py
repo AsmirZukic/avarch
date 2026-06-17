@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
@@ -63,6 +64,7 @@ from avarch.tui.models.jobs import (
     PromotionSnapshot,
     ValidationSnapshot,
 )
+from avarch.tui.models.library import LibraryProbeState, LibraryRow, LibrarySnapshot
 from avarch.tui.models.profiles import (
     CopyProfileRequest,
     CopyProfileResult,
@@ -145,6 +147,9 @@ class TuiBackend(Protocol):
         ...
 
     async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
+        ...
+
+    async def list_library(self) -> LibrarySnapshot:
         ...
 
     async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
@@ -272,6 +277,9 @@ class LocalTuiBackend:
 
     async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
         return await asyncio.to_thread(self._analyze_media_sync, media_file_ids)
+
+    async def list_library(self) -> LibrarySnapshot:
+        return await asyncio.to_thread(self._list_library_sync)
 
     async def list_profiles(self) -> ProfileSnapshot:
         return await asyncio.to_thread(self._list_profiles_sync)
@@ -532,6 +540,15 @@ class LocalTuiBackend:
                 normalized_probe=normalized_probe,
                 created_at=_utc_now(),
             )
+
+    def _list_library_sync(self) -> LibrarySnapshot:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session:
+            media_files = list(
+                session.exec(select(MediaFile).order_by(col(MediaFile.path))).all()
+            )
+            rows = tuple(_library_row(session, media_file) for media_file in media_files)
+        return LibrarySnapshot(rows=rows)
 
     def _list_profiles_sync(self) -> ProfileSnapshot:
         registry = ProfileRegistry.from_config(self.config)
@@ -1220,6 +1237,73 @@ def _media_in_roots(media_file: MediaFile, roots: tuple[Path, ...]) -> bool:
             continue
         return True
     return False
+
+
+def _library_row(session: Session, media_file: MediaFile) -> LibraryRow:
+    media_file_id = _require_id(media_file.id, "media file")
+    probe = (
+        session.get(ProbeResult, media_file.latest_probe_id)
+        if media_file.latest_probe_id is not None
+        else None
+    )
+    probe_state = _library_probe_state(media_file, probe)
+    container: str | None = None
+    video_codec: str | None = None
+    resolution: str | None = None
+    duration_seconds: float | None = None
+    if probe is not None and probe_state == LibraryProbeState.CURRENT:
+        try:
+            normalized_probe = parse_normalized_probe_json(probe.normalized_json)
+        except ProbeError:
+            probe_state = LibraryProbeState.UNREADABLE
+        else:
+            duration_seconds = normalized_probe.duration_seconds
+            if normalized_probe.video_streams:
+                video = min(normalized_probe.video_streams, key=lambda stream: stream.index)
+                video_codec = video.codec
+                if video.width is not None and video.height is not None:
+                    resolution = f"{video.width}x{video.height}"
+            container = _probe_container(probe)
+
+    return LibraryRow(
+        media_file_id=media_file_id,
+        path=media_file.path,
+        inventory_status=_media_file_status_value(media_file.status),
+        probe_state=probe_state,
+        container=container,
+        video_codec=video_codec,
+        resolution=resolution,
+        duration_seconds=duration_seconds,
+        last_scanned_at=media_file.last_seen_at.isoformat(),
+        selectable=_media_file_status_value(media_file.status) != MediaFileStatus.MISSING.value,
+    )
+
+
+def _library_probe_state(
+    media_file: MediaFile,
+    probe: ProbeResult | None,
+) -> LibraryProbeState:
+    if probe is None:
+        return LibraryProbeState.MISSING
+    if probe.source_fs_fingerprint != media_file.fs_fingerprint:
+        return LibraryProbeState.STALE
+    return LibraryProbeState.CURRENT
+
+
+def _probe_container(probe: ProbeResult) -> str | None:
+    try:
+        raw_payload: object = json.loads(probe.ffprobe_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw_payload, dict):
+        return None
+    payload = cast(dict[str, object], raw_payload)
+    format_payload = payload.get("format")
+    if not isinstance(format_payload, dict):
+        return None
+    format_data = cast(dict[str, object], format_payload)
+    format_name = format_data.get("format_name")
+    return str(format_name) if format_name is not None else None
 
 
 def _candidate_row(session: Session, media_file: MediaFile) -> CandidateRow:
