@@ -106,11 +106,25 @@ class CandidateSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowPreviewRow:
+    media_file_id: int
+    path: str
+    result: str
+    video: str
+    audio: str
+    subtitles: str
+    reason: str
+    probe_hash: str | None = None
+    source_fs_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowPreview:
     media_file_ids: tuple[int, ...]
     profile_name: str
     profile_effective_hash: str
     summary: str
+    rows: tuple[WorkflowPreviewRow, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,9 +14,11 @@ from avarch.tui.models.workflow import (
     DirectoryListing,
     ScanSummary,
     WorkflowDraft,
+    WorkflowPreview,
 )
 from avarch.tui.widgets.candidate_table import CandidateTable
 from avarch.tui.widgets.file_browser import FileBrowser
+from avarch.tui.widgets.plan_summary import PlanSummary, plan_summary_text
 from avarch.tui.widgets.profile_card import ProfileCard, profile_card_text
 
 
@@ -44,6 +46,16 @@ class WorkflowProfileBackend(Protocol):
         ...
 
     async def get_profile_detail(self, profile_name: str) -> ProfileDetailSnapshot:
+        ...
+
+
+class WorkflowPreviewBackend(Protocol):
+    async def preview_workflow(
+        self,
+        *,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+    ) -> WorkflowPreview:
         ...
 
 
@@ -482,3 +494,120 @@ class WorkflowProfileSelectionView(Static):
             prefix = "[selected]\n" if row.name == self.draft.profile_name else ""
             rendered.append(prefix + profile_card_text(row))
         return "\n\n---\n\n".join(rendered)
+
+
+class WorkflowPreviewView(Static):
+    class PreviewReady(Message):
+        def __init__(self, preview: WorkflowPreview) -> None:
+            super().__init__()
+            self.preview = preview
+
+    DEFAULT_CSS = """
+    WorkflowPreviewView {
+        height: 1fr;
+        padding: 1;
+    }
+
+    WorkflowPreviewView Button {
+        margin-right: 1;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: WorkflowPreviewBackend,
+        draft: WorkflowDraft,
+        id: str | None = None,
+    ) -> None:
+        super().__init__(id=id)
+        self.backend = backend
+        self.draft = draft
+        self.phase = "Preview required"
+        self.error_message: str | None = None
+        self.content_text = ""
+        self.summary_widget: PlanSummary | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="workflow-preview-status")
+        yield Static("", id="workflow-preview-summary")
+        yield Button("Create preview", id="workflow-preview-create")
+
+    async def on_mount(self) -> None:
+        self.ensure_preview_current()
+        self._render_preview()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "workflow-preview-create":
+            self.run_worker(self.generate_preview(), exclusive=True)
+            event.stop()
+
+    async def generate_preview(self) -> None:
+        selected_ids = tuple(sorted(self.draft.selected_media_ids))
+        if not selected_ids:
+            self.phase = "Selection required"
+            self.error_message = "Select at least one candidate before preview."
+            self._render_preview()
+            return
+        if self.draft.profile_name is None:
+            self.phase = "Profile required"
+            self.error_message = "Select a profile before preview."
+            self._render_preview()
+            return
+
+        self.phase = "Creating preview"
+        self.error_message = None
+        self._render_preview()
+        preview = await self.backend.preview_workflow(
+            media_file_ids=selected_ids,
+            profile_name=self.draft.profile_name,
+        )
+        if (
+            self.draft.profile_effective_hash is not None
+            and preview.profile_effective_hash != self.draft.profile_effective_hash
+        ):
+            self.draft.preview = None
+            self.phase = "Preview stale"
+            self.error_message = "Profile behavior changed. Review the profile again."
+            self._render_preview()
+            return
+
+        self.draft.preview = preview
+        self.phase = "Preview ready"
+        self.error_message = None
+        self._render_preview()
+        self.post_message(self.PreviewReady(preview))
+
+    def ensure_preview_current(self) -> None:
+        preview = self.draft.preview
+        if preview is None or self.draft.profile_effective_hash is None:
+            return
+        if preview.profile_effective_hash != self.draft.profile_effective_hash:
+            self.draft.preview = None
+            self.phase = "Preview stale"
+            self.error_message = "Profile behavior changed. Create a new preview."
+
+    def _render_preview(self) -> None:
+        status = self._status_text()
+        preview_text = (
+            plan_summary_text(self.draft.preview)
+            if self.draft.preview is not None
+            else "No current preview."
+        )
+        self.content_text = "\n\n".join([status, preview_text])
+        if self.is_mounted:
+            self.query_one("#workflow-preview-status", Static).update(status)
+            self.query_one("#workflow-preview-summary", Static).update(preview_text)
+
+    def _status_text(self) -> str:
+        lines = [
+            "New Workflow - Preview plan",
+            "",
+            f"Phase: {self.phase}",
+            f"Selected files: {len(self.draft.selected_media_ids)}",
+            f"Profile: {self.draft.profile_name or 'none'}",
+        ]
+        if self.error_message is not None:
+            lines.extend(["", f"Error: {self.error_message}"])
+        return "\n".join(lines)

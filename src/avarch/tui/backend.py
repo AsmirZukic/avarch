@@ -25,10 +25,11 @@ from avarch.models.db import (
     PromotionRecord,
     ValidationResult,
 )
+from avarch.models.plan import TranscodePlan
 from avarch.models.probe import NormalizedProbe
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
-from avarch.planner import build_profile_hash
+from avarch.planner import PlanningError, build_plan, build_profile_hash, load_planning_context
 from avarch.probe import (
     ProbeError,
     normalize_probe,
@@ -91,6 +92,7 @@ from avarch.tui.models.workflow import (
     EnqueueResult,
     ScanSummary,
     WorkflowPreview,
+    WorkflowPreviewRow,
 )
 from avarch.vapoursynth import resolve_vapoursynth_template
 
@@ -276,6 +278,18 @@ class LocalTuiBackend:
 
     async def get_profile_detail(self, profile_name: str) -> ProfileDetailSnapshot:
         return await asyncio.to_thread(self._get_profile_detail_sync, profile_name)
+
+    async def preview_workflow(
+        self,
+        *,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+    ) -> WorkflowPreview:
+        return await asyncio.to_thread(
+            self._preview_workflow_sync,
+            media_file_ids,
+            profile_name,
+        )
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -523,6 +537,73 @@ class LocalTuiBackend:
             known_limitations=row.known_limitations,
         )
 
+    def _preview_workflow_sync(
+        self,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+    ) -> WorkflowPreview:
+        registry = ProfileRegistry.from_config(self.config)
+        resolved_profile = registry.get(profile_name)
+        profile_row = _profile_row(resolved_profile)
+        resolved_template = resolve_vapoursynth_template(resolved_profile.profile)
+        engine = create_db_engine(self.database_url)
+        rows: list[WorkflowPreviewRow] = []
+        with Session(engine) as session:
+            for media_file_id in media_file_ids:
+                media_file = session.get(MediaFile, media_file_id)
+                if media_file is None:
+                    rows.append(
+                        _blocked_preview_row(
+                            media_file_id,
+                            "<missing>",
+                            "Not in inventory.",
+                        )
+                    )
+                    continue
+                if media_file.latest_probe_id is None:
+                    rows.append(
+                        _needs_analysis_preview_row(
+                            media_file_id,
+                            media_file.path,
+                            "No current probe is available.",
+                        )
+                    )
+                    continue
+                try:
+                    context = load_planning_context(
+                        session,
+                        input_path=Path(media_file.path),
+                        resolved_profile=resolved_profile,
+                    )
+                    plan = build_plan(
+                        context,
+                        data_dir=self.data_dir,
+                        resolved_template=resolved_template,
+                    )
+                except PlanningError as exc:
+                    message = str(exc) or exc.__class__.__name__
+                    if "probe" in message.lower():
+                        rows.append(
+                            _needs_analysis_preview_row(
+                                media_file_id,
+                                media_file.path,
+                                message,
+                            )
+                        )
+                    else:
+                        rows.append(_blocked_preview_row(media_file_id, media_file.path, message))
+                    continue
+                rows.append(_planned_preview_row(plan))
+
+        preview_rows = tuple(rows)
+        return WorkflowPreview(
+            media_file_ids=media_file_ids,
+            profile_name=profile_name,
+            profile_effective_hash=profile_row.effective_hash,
+            summary=_workflow_preview_summary(profile_row, preview_rows),
+            rows=preview_rows,
+        )
+
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
         now = _utc_now()
@@ -748,6 +829,103 @@ def _profile_subtitle_summary(profile: ResolvedProfile) -> str:
     )
     forced = "keeps forced subtitles" if subtitles.keep_forced else "does not force-keep subtitles"
     return f"Subtitles: {languages}; {forced}."
+
+
+def _planned_preview_row(plan: TranscodePlan) -> WorkflowPreviewRow:
+    return WorkflowPreviewRow(
+        media_file_id=plan.media_file_id,
+        path=str(plan.input_path),
+        result="ENCODE",
+        video=_preview_video_summary(plan),
+        audio=_preview_audio_summary(plan),
+        subtitles=_preview_subtitle_summary(plan),
+        reason="Plan can be created with the selected profile.",
+        probe_hash=plan.probe_hash,
+        source_fs_fingerprint=plan.source_fs_fingerprint,
+    )
+
+
+def _needs_analysis_preview_row(
+    media_file_id: int,
+    path: str,
+    reason: str,
+) -> WorkflowPreviewRow:
+    return WorkflowPreviewRow(
+        media_file_id=media_file_id,
+        path=path,
+        result="NEEDS ANALYSIS",
+        video="Metadata required",
+        audio="Metadata required",
+        subtitles="Metadata required",
+        reason=reason,
+    )
+
+
+def _blocked_preview_row(media_file_id: int, path: str, reason: str) -> WorkflowPreviewRow:
+    return WorkflowPreviewRow(
+        media_file_id=media_file_id,
+        path=path,
+        result="BLOCKED",
+        video="No plan",
+        audio="No plan",
+        subtitles="No plan",
+        reason=reason,
+    )
+
+
+def _preview_video_summary(plan: TranscodePlan) -> str:
+    video = plan.video
+    dimensions = (
+        f"{video.source_width}x{video.source_height} -> "
+        f"{video.target_width}x{video.target_height}"
+        if video.resize_required
+        else f"{video.source_width}x{video.source_height}"
+    )
+    hdr = "; HDR to SDR" if video.hdr_to_sdr else ""
+    return f"{dimensions} {video.source_codec} -> AV1{hdr}"
+
+
+def _preview_audio_summary(plan: TranscodePlan) -> str:
+    audio = plan.audio
+    language = audio.source_language or "unknown language"
+    source = audio.source_codec or "unknown codec"
+    return (
+        f"{language} {source} -> {audio.target_codec} "
+        f"{audio.target_channels}ch {audio.target_bitrate}"
+    )
+
+
+def _preview_subtitle_summary(plan: TranscodePlan) -> str:
+    if not plan.subtitles.streams:
+        return "None selected"
+    labels: list[str] = []
+    for stream in plan.subtitles.streams:
+        language = stream.language or "unknown"
+        forced = " forced" if stream.forced else ""
+        labels.append(f"{language}{forced}")
+    return "Keep " + ", ".join(labels)
+
+
+def _workflow_preview_summary(
+    profile: ProfileRow,
+    rows: tuple[WorkflowPreviewRow, ...],
+) -> str:
+    encodable = sum(1 for row in rows if row.result == "ENCODE")
+    needs_analysis = sum(1 for row in rows if row.result == "NEEDS ANALYSIS")
+    blocked = sum(1 for row in rows if row.result == "BLOCKED")
+    return "\n".join(
+        [
+            "This workflow will:",
+            f"1. Review {len(rows)} selected file(s) with profile {profile.name}.",
+            f"2. Create in-memory encode plans for {encodable} file(s).",
+            "3. Encode video to 10-bit AV1 with the selected SVT-AV1 settings.",
+            "4. Apply the profile audio policy and mux selected subtitles.",
+            "5. Validate duration, streams, codec, resolution, and output size.",
+            "6. Wait for your manual approval before promotion.",
+            f"Needs analysis: {needs_analysis}",
+            f"Blocked: {blocked}",
+        ]
+    )
 
 
 def _sqlite_database_path(database_url: str) -> Path | None:
