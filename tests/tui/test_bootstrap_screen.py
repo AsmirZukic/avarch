@@ -6,7 +6,8 @@ from pathlib import Path
 
 from avarch.tui.app import AvarchTuiApp, RouteContent
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
-from avarch.tui.models.common import TuiError
+from avarch.tui.models.common import TuiError, UiRevision
+from avarch.tui.models.dashboard import DashboardSnapshot, QueueTotals, SchedulerSummary
 from avarch.tui.screens.bootstrap import BootstrapView
 from avarch.tui.state import TuiRoute
 
@@ -147,6 +148,32 @@ class FakeBootstrapBackend:
     async def initialize_local_state(self) -> None:
         self.initialize_calls += 1
         self.status = replace(self.status, state=BootstrapState.READY, error=None)
+
+    async def get_dashboard_snapshot(self) -> DashboardSnapshot:
+        return DashboardSnapshot(
+            revision=UiRevision(
+                scheduler_generation=0,
+                newest_job_updated_at=None,
+                newest_attempt_updated_at=None,
+                newest_validation_created_at=None,
+                newest_promotion_updated_at=None,
+            ),
+            scheduler=SchedulerSummary(
+                mode="running",
+                lease_state="inactive",
+                runner_id=None,
+                heartbeat_at=None,
+                lease_expires_at=None,
+                control_generation=0,
+                acknowledged_generation=0,
+                cancel_pending=0,
+                hold_pending=0,
+            ),
+            queue_totals=QueueTotals(),
+            active_jobs=(),
+            recent_failures=(),
+            promotion_ready=(),
+        )
 
 
 def _status(

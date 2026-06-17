@@ -498,6 +498,33 @@ class StaticBootstrapBackend:
             database_url=self.status.database_url,
         )
 
+    async def get_dashboard_snapshot(self) -> DashboardSnapshot:
+        revision = UiRevision(
+            scheduler_generation=0,
+            newest_job_updated_at=None,
+            newest_attempt_updated_at=None,
+            newest_validation_created_at=None,
+            newest_promotion_updated_at=None,
+        )
+        return DashboardSnapshot(
+            revision=revision,
+            scheduler=SchedulerSummary(
+                mode="unknown",
+                lease_state="inactive",
+                runner_id=None,
+                heartbeat_at=None,
+                lease_expires_at=None,
+                control_generation=0,
+                acknowledged_generation=0,
+                cancel_pending=0,
+                hold_pending=0,
+            ),
+            queue_totals=QueueTotals(),
+            active_jobs=(),
+            recent_failures=(),
+            promotion_ready=(),
+        )
+
 
 def _sqlite_database_path(database_url: str) -> Path | None:
     url = make_url(database_url)

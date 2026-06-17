@@ -10,7 +10,10 @@ from textual.widgets import Footer, Header, Static
 
 from avarch import __version__
 from avarch.tui.backend import StaticBootstrapBackend
+from avarch.tui.messages import RefreshCompleted, RefreshFailed, RefreshStarted
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
+from avarch.tui.models.common import TuiError, UiRevision
+from avarch.tui.models.dashboard import DashboardSnapshot
 from avarch.tui.screens.bootstrap import BootstrapView
 from avarch.tui.state import TuiRoute, TuiSessionState
 from avarch.tui.widgets import StatusPanel
@@ -22,6 +25,9 @@ class BootstrapBackend(Protocol):
         ...
 
     async def initialize_local_state(self) -> None:
+        ...
+
+    async def get_dashboard_snapshot(self) -> DashboardSnapshot:
         ...
 
 
@@ -85,6 +91,13 @@ class AvarchTuiApp(App[None]):
             )
         )
         self.bootstrap_status: BootstrapStatus | None = None
+        self.refresh_events: list[RefreshStarted | RefreshCompleted | RefreshFailed] = []
+        self.last_refresh_error: TuiError | None = None
+        self.snapshot_render_count = 0
+        self._latest_refresh_request = 0
+        self._refresh_running = False
+        self._refresh_pending = False
+        self._last_revision_by_route: dict[TuiRoute, UiRevision] = {}
 
     def compose(self) -> ComposeResult:
         status = "initialized" if self.initialized else "not initialized"
@@ -156,8 +169,8 @@ class AvarchTuiApp(App[None]):
     def action_open_diagnostics(self) -> None:
         self.open_route(TuiRoute.DIAGNOSTICS)
 
-    def action_refresh(self) -> None:
-        self._render_active_route()
+    async def action_refresh(self) -> None:
+        await self.refresh_active_screen()
 
     def action_request_quit(self) -> None:
         self.exit()
@@ -166,6 +179,67 @@ class AvarchTuiApp(App[None]):
         route = self.session_state.active_route
         active = self.query_one("#active-screen", RouteContent)
         active.set_content(f"{route.label}\n\n{_route_empty_state(route)}")
+
+    async def refresh_active_screen(self) -> None:
+        route = self.session_state.active_route
+        self._latest_refresh_request += 1
+        if self._refresh_running:
+            self._refresh_pending = True
+            return
+
+        self._refresh_running = True
+        try:
+            while True:
+                request_id = self._latest_refresh_request
+                self._refresh_pending = False
+                self.refresh_events.append(RefreshStarted(route=route, request_id=request_id))
+                try:
+                    snapshot = await self._load_snapshot(route)
+                except Exception as exc:
+                    error = TuiError(
+                        title="Refresh failed",
+                        summary=str(exc) or exc.__class__.__name__,
+                        details=None,
+                    )
+                    self.last_refresh_error = error
+                    self.refresh_events.append(
+                        RefreshFailed(route=route, request_id=request_id, error=error)
+                    )
+                    break
+
+                if request_id == self._latest_refresh_request:
+                    rendered = self._render_snapshot_if_changed(route, snapshot)
+                    self.refresh_events.append(
+                        RefreshCompleted(
+                            route=route,
+                            request_id=request_id,
+                            revision=snapshot.revision,
+                            rendered=rendered,
+                        )
+                    )
+                if not self._refresh_pending:
+                    break
+        finally:
+            self._refresh_running = False
+
+    async def _load_snapshot(self, route: TuiRoute) -> DashboardSnapshot:
+        if route == TuiRoute.DASHBOARD:
+            return await self.backend.get_dashboard_snapshot()
+        return await self.backend.get_dashboard_snapshot()
+
+    def _render_snapshot_if_changed(
+        self,
+        route: TuiRoute,
+        snapshot: DashboardSnapshot,
+    ) -> bool:
+        if self._last_revision_by_route.get(route) == snapshot.revision:
+            return False
+        self._last_revision_by_route[route] = snapshot.revision
+        active = self.query_one("#active-screen", RouteContent)
+        active.set_content(_dashboard_snapshot_text(snapshot))
+        self.snapshot_render_count += 1
+        self.last_refresh_error = None
+        return True
 
     async def _render_bootstrap(self, status: BootstrapStatus) -> None:
         container = self.query_one("#screen-container", Container)
@@ -191,3 +265,17 @@ def _route_empty_state(route: TuiRoute) -> str:
         TuiRoute.PROFILES: "Built-in and user profiles will appear here.",
         TuiRoute.DIAGNOSTICS: "Configuration, database, and tool health will appear here.",
     }[route]
+
+
+def _dashboard_snapshot_text(snapshot: DashboardSnapshot) -> str:
+    totals = snapshot.queue_totals
+    return (
+        "Dashboard\n\n"
+        f"Scheduler: {snapshot.scheduler.mode.upper()}\n"
+        f"Lease: {snapshot.scheduler.lease_state}\n"
+        f"Pending: {totals.pending}\n"
+        f"Running: {totals.running}\n"
+        f"Failed: {totals.failed}\n"
+        f"Validated: {totals.validated}\n"
+        f"Completed: {totals.completed}"
+    )
