@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from avarch.models.db import (
 from avarch.models.probe import NormalizedProbe
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
+from avarch.planner import build_profile_hash
 from avarch.probe import (
     ProbeError,
     normalize_probe,
@@ -34,9 +36,15 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
-from avarch.profiles.registry import ProfileRegistry, ProfileRegistryError
+from avarch.profiles.registry import (
+    ProfileOrigin,
+    ProfileRegistry,
+    ProfileRegistryError,
+    ResolvedProfile,
+)
 from avarch.scanner import scan_root, update_inventory
 from avarch.scheduler import scheduler_status
+from avarch.serialization import canonical_json
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
 from avarch.tui.models.common import TuiError, UiRevision
 from avarch.tui.models.dashboard import (
@@ -58,6 +66,7 @@ from avarch.tui.models.profiles import (
     CopyProfileRequest,
     CopyProfileResult,
     ProfileDetailSnapshot,
+    ProfileRow,
     ProfileSnapshot,
     ScaffoldVpyRequest,
     ScaffoldVpyResult,
@@ -83,6 +92,7 @@ from avarch.tui.models.workflow import (
     ScanSummary,
     WorkflowPreview,
 )
+from avarch.vapoursynth import resolve_vapoursynth_template
 
 ProbeRunner = Callable[[Path], Mapping[str, Any]]
 
@@ -260,6 +270,12 @@ class LocalTuiBackend:
 
     async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
         return await asyncio.to_thread(self._analyze_media_sync, media_file_ids)
+
+    async def list_profiles(self) -> ProfileSnapshot:
+        return await asyncio.to_thread(self._list_profiles_sync)
+
+    async def get_profile_detail(self, profile_name: str) -> ProfileDetailSnapshot:
+        return await asyncio.to_thread(self._get_profile_detail_sync, profile_name)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -489,6 +505,24 @@ class LocalTuiBackend:
                 created_at=_utc_now(),
             )
 
+    def _list_profiles_sync(self) -> ProfileSnapshot:
+        registry = ProfileRegistry.from_config(self.config)
+        return ProfileSnapshot(
+            profiles=tuple(_profile_row(profile) for profile in registry.list_profiles())
+        )
+
+    def _get_profile_detail_sync(self, profile_name: str) -> ProfileDetailSnapshot:
+        registry = ProfileRegistry.from_config(self.config)
+        profile = registry.get(profile_name)
+        row = _profile_row(profile)
+        return ProfileDetailSnapshot(
+            profile=row,
+            definition_hash=_profile_definition_hash(profile),
+            vapoursynth_mode=row.vapoursynth_mode,
+            explanation=_profile_explanation(profile),
+            known_limitations=row.known_limitations,
+        )
+
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
         now = _utc_now()
@@ -636,6 +670,84 @@ class StaticBootstrapBackend:
 
 def _bounded_error(error: str, *, limit: int = 1000) -> str:
     return error if len(error) <= limit else f"{error[:limit]}..."
+
+
+def _profile_row(profile: ResolvedProfile) -> ProfileRow:
+    template = resolve_vapoursynth_template(profile.profile)
+    template_hash = template.template_hash if template is not None else None
+    origin = profile.origin.value
+    return ProfileRow(
+        name=profile.name,
+        origin=origin,
+        description=profile.document.description or "",
+        source_path=_profile_source_path(profile),
+        effective_hash=build_profile_hash(profile.profile, template_hash=template_hash),
+        tags=tuple(profile.document.tags),
+        vapoursynth_mode="custom_template" if template is not None else "generated",
+        video_summary=_profile_video_summary(profile),
+        audio_summary=_profile_audio_summary(profile),
+        subtitle_summary=_profile_subtitle_summary(profile),
+        known_limitations=tuple(profile.document.known_limitations),
+        is_builtin_starting_point=profile.origin == ProfileOrigin.BUILTIN,
+    )
+
+
+def _profile_source_path(profile: ResolvedProfile) -> Path | None:
+    if profile.origin == ProfileOrigin.BUILTIN:
+        return None
+    return Path(profile.source)
+
+
+def _profile_definition_hash(profile: ResolvedProfile) -> str:
+    payload = canonical_json(profile.document.model_dump(mode="json"))
+    return hashlib.blake2b(
+        b"tui-profile-definition-v1\0" + payload.encode("utf-8"),
+        digest_size=32,
+    ).hexdigest()
+
+
+def _profile_explanation(profile: ResolvedProfile) -> str:
+    row = _profile_row(profile)
+    lines = [
+        (
+            f"{profile.name} uses the {profile.profile.backend} backend "
+            f"and writes {profile.profile.container} files."
+        ),
+        row.video_summary,
+        row.audio_summary,
+        row.subtitle_summary,
+    ]
+    if row.is_builtin_starting_point:
+        lines.append("This built-in profile is a reference starting point for customization.")
+    return "\n".join(line for line in lines if line)
+
+
+def _profile_video_summary(profile: ResolvedProfile) -> str:
+    video = profile.profile.video
+    av1an = profile.profile.av1an
+    hdr_policy = "HDR to SDR enabled" if video.hdr_to_sdr else "HDR is preserved"
+    return (
+        f"{av1an.encoder.upper()} {av1an.video_args}; "
+        f"maximum width {video.max_width}; {hdr_policy}; 10-bit 4:2:0 output."
+    )
+
+
+def _profile_audio_summary(profile: ResolvedProfile) -> str:
+    audio = profile.profile.audio
+    languages = ", ".join(audio.languages) if audio.languages else "all configured languages"
+    return (
+        f"Preferred {languages} audio; {audio.channels} channel "
+        f"{audio.codec} at {audio.bitrate}."
+    )
+
+
+def _profile_subtitle_summary(profile: ResolvedProfile) -> str:
+    subtitles = profile.profile.subtitles
+    languages = (
+        ", ".join(subtitles.languages) if subtitles.languages else "all configured languages"
+    )
+    forced = "keeps forced subtitles" if subtitles.keep_forced else "does not force-keep subtitles"
+    return f"Subtitles: {languages}; {forced}."
 
 
 def _sqlite_database_path(database_url: str) -> Path | None:

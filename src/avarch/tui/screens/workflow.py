@@ -7,6 +7,7 @@ from textual.app import ComposeResult
 from textual.message import Message
 from textual.widgets import Button, Static
 
+from avarch.tui.models.profiles import ProfileDetailSnapshot, ProfileRow, ProfileSnapshot
 from avarch.tui.models.workflow import (
     AnalysisSummary,
     CandidateSnapshot,
@@ -16,6 +17,7 @@ from avarch.tui.models.workflow import (
 )
 from avarch.tui.widgets.candidate_table import CandidateTable
 from avarch.tui.widgets.file_browser import FileBrowser
+from avarch.tui.widgets.profile_card import ProfileCard, profile_card_text
 
 
 class WorkflowScanBackend(Protocol):
@@ -34,6 +36,14 @@ class WorkflowCandidateBackend(Protocol):
         ...
 
     async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
+        ...
+
+
+class WorkflowProfileBackend(Protocol):
+    async def list_profiles(self) -> ProfileSnapshot:
+        ...
+
+    async def get_profile_detail(self, profile_name: str) -> ProfileDetailSnapshot:
         ...
 
 
@@ -306,3 +316,169 @@ class WorkflowCandidateReviewView(Static):
         self.content_text = text
         if self.is_mounted:
             self.query_one("#candidate-review-status", Static).update(text)
+
+
+class WorkflowProfileSelectionView(Static):
+    class ProfileSelected(Message):
+        def __init__(self, profile_name: str, effective_hash: str) -> None:
+            super().__init__()
+            self.profile_name = profile_name
+            self.effective_hash = effective_hash
+
+    class ProfileDetailOpened(Message):
+        def __init__(self, detail: ProfileDetailSnapshot) -> None:
+            super().__init__()
+            self.detail = detail
+
+    class OpenProfilesRequested(Message):
+        pass
+
+    DEFAULT_CSS = """
+    WorkflowProfileSelectionView {
+        height: 1fr;
+        padding: 1;
+    }
+
+    WorkflowProfileSelectionView Button {
+        margin-right: 1;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: WorkflowProfileBackend,
+        draft: WorkflowDraft | None = None,
+        id: str | None = None,
+    ) -> None:
+        super().__init__(id=id)
+        self.backend = backend
+        self.draft = draft or WorkflowDraft()
+        self.snapshot = ProfileSnapshot(profiles=())
+        self.detail: ProfileDetailSnapshot | None = None
+        self.phase = "Loading profiles"
+        self.error_message: str | None = None
+        self.content_text = ""
+        self.profile_list_text = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="profile-selection-status")
+        yield Static("", id="profile-selection-list")
+        yield Button("Open Profiles", id="profile-open-profiles")
+
+    async def on_mount(self) -> None:
+        await self.load_profiles()
+
+    async def load_profiles(self) -> None:
+        self.phase = "Loading profiles"
+        self.error_message = None
+        self._render_selection()
+        try:
+            self.snapshot = await self.backend.list_profiles()
+        except Exception as exc:
+            self.phase = "Profile load failed"
+            self.error_message = str(exc) or exc.__class__.__name__
+            self._render_selection()
+            return
+        self.phase = "Choose a profile"
+        self._render_selection()
+
+    async def on_profile_card_selected(self, event: ProfileCard.Selected) -> None:
+        await self.select_profile(event.profile_name)
+        event.stop()
+
+    async def on_profile_card_detail_requested(
+        self,
+        event: ProfileCard.DetailRequested,
+    ) -> None:
+        await self.open_profile_detail(event.profile_name)
+        event.stop()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "profile-open-profiles":
+            self.post_message(self.OpenProfilesRequested())
+            event.stop()
+
+    async def select_profile(self, profile_name: str) -> None:
+        row = self._profile_by_name(profile_name)
+        if row is None:
+            self.phase = "Profile unavailable"
+            self.error_message = f"Profile not found: {profile_name}"
+            self._render_selection()
+            return
+
+        changed = (
+            self.draft.profile_name != row.name
+            or self.draft.profile_effective_hash != row.effective_hash
+        )
+        self.draft.profile_name = row.name
+        self.draft.profile_effective_hash = row.effective_hash
+        if changed:
+            self.draft.preview = None
+        self.phase = "Profile selected"
+        self.error_message = None
+        self._render_selection()
+        self.post_message(self.ProfileSelected(row.name, row.effective_hash))
+
+    async def open_profile_detail(self, profile_name: str) -> None:
+        try:
+            self.detail = await self.backend.get_profile_detail(profile_name)
+        except Exception as exc:
+            self.phase = "Profile detail failed"
+            self.error_message = str(exc) or exc.__class__.__name__
+            self._render_selection()
+            return
+        self.phase = "Profile detail"
+        self.error_message = None
+        self._render_selection()
+        self.post_message(self.ProfileDetailOpened(self.detail))
+
+    def _profile_by_name(self, profile_name: str) -> ProfileRow | None:
+        for row in self.snapshot.profiles:
+            if row.name == profile_name:
+                return row
+        return None
+
+    def _render_selection(self) -> None:
+        status = self._status_text()
+        list_text = self._list_text()
+        self.content_text = "\n\n".join(part for part in (status, list_text) if part)
+        self.profile_list_text = list_text
+        if self.is_mounted:
+            self.query_one("#profile-selection-status", Static).update(status)
+            self.query_one("#profile-selection-list", Static).update(list_text)
+
+    def _status_text(self) -> str:
+        lines = [
+            "New Workflow - Select profile",
+            "",
+            f"Phase: {self.phase}",
+            f"Profiles: {len(self.snapshot.profiles)}",
+            f"Selected: {self.draft.profile_name or 'none'}",
+        ]
+        if self.error_message is not None:
+            lines.extend(["", f"Error: {self.error_message}"])
+        if self.detail is not None:
+            detail = self.detail
+            lines.extend(
+                [
+                    "",
+                    "Profile detail",
+                    f"  Name: {detail.profile.name}",
+                    f"  Definition hash: {detail.definition_hash}",
+                    f"  Effective hash: {detail.profile.effective_hash}",
+                    f"  VapourSynth: {detail.vapoursynth_mode}",
+                    f"  {detail.explanation}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _list_text(self) -> str:
+        if not self.snapshot.profiles:
+            return "No profiles are available."
+        rendered: list[str] = []
+        for row in self.snapshot.profiles:
+            prefix = "[selected]\n" if row.name == self.draft.profile_name else ""
+            rendered.append(prefix + profile_card_text(row))
+        return "\n\n---\n\n".join(rendered)

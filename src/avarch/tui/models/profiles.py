@@ -12,6 +12,12 @@ class ProfileRow:
     source_path: Path | None
     effective_hash: str
     tags: tuple[str, ...]
+    vapoursynth_mode: str = "generated"
+    video_summary: str = ""
+    audio_summary: str = ""
+    subtitle_summary: str = ""
+    known_limitations: tuple[str, ...] = ()
+    is_builtin_starting_point: bool = False
 
 
 @dataclass(frozen=True, slots=True)
