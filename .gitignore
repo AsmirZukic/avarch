@@ -6,8 +6,5 @@ __pycache__/
 avarch.toml
 .avarch/
 
-
-/profiles/
-
 .codex/
 .uv-cache/

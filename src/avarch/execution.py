@@ -280,6 +280,7 @@ def preflight_execution(plan: TranscodePlan) -> None:
     _preflight_tool(plan.mux.executable, required=True)
     _preflight_av1an_version(plan.av1an.executable)
     _preflight_ffmpeg_version(plan.mux.executable)
+    _preflight_ffmpeg_audio_codecs(plan)
 
 
 def _preflight_source_fingerprint(plan: TranscodePlan) -> None:
@@ -381,6 +382,46 @@ def _preflight_av1an_version(executable: str) -> None:
 
 def _preflight_ffmpeg_version(executable: str) -> None:
     _tool_version_output(executable, version_args=("-version",))
+
+
+def _preflight_ffmpeg_audio_codecs(plan: TranscodePlan) -> None:
+    source_codec = _normalize_codec_name(plan.audio.source_codec)
+    if source_codec is not None:
+        decoders = _ffmpeg_codec_names(plan.mux.executable, "-decoders")
+        if source_codec not in decoders:
+            raise ToolUnavailableError(
+                "Planned audio transcode requires an FFmpeg decoder that is not available: "
+                f"{source_codec}. Install an FFmpeg build with this decoder, or use a source "
+                "audio codec supported by the configured FFmpeg."
+            )
+
+    target_codec = _normalize_codec_name(plan.audio.target_codec)
+    encoders = _ffmpeg_codec_names(plan.mux.executable, "-encoders")
+    if target_codec not in encoders:
+        raise ToolUnavailableError(
+            "Planned audio transcode requires an FFmpeg encoder that is not available: "
+            f"{target_codec}. Install an FFmpeg build with this encoder, or choose a supported "
+            "profile audio codec."
+        )
+
+
+def _ffmpeg_codec_names(executable: str, argument: str) -> set[str]:
+    output = _tool_version_output(executable, version_args=(argument,))
+    names: set[str] = set()
+    for line in output.splitlines():
+        match = re.match(r"\s*[A-Z.]{6,7}\s+(\S+)\s+", line)
+        if match is not None:
+            names.add(match.group(1).strip().lower())
+    if not names:
+        raise ToolUnavailableError(f"{executable} {argument} produced no codec listing.")
+    return names
+
+
+def _normalize_codec_name(codec: str | None) -> str | None:
+    if codec is None:
+        return None
+    normalized = codec.strip().lower()
+    return normalized or None
 
 
 def _vapoursynth_diagnostic() -> str | None:

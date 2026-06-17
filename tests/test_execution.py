@@ -241,7 +241,38 @@ def test_preflight_rejects_panicking_av1an_version_output(
         preflight_execution(plan)
 
 
-def _install_fake_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_rejects_missing_ffmpeg_audio_decoder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, ffmpeg_decoders=["aac"])
+    plan = _sample_plan(tmp_path)
+    plan = plan.model_copy(
+        update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})}
+    )
+
+    with pytest.raises(ToolUnavailableError, match="decoder.*eac3"):
+        preflight_execution(plan)
+
+
+def test_preflight_rejects_missing_ffmpeg_audio_encoder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, ffmpeg_encoders=["aac"])
+    plan = _sample_plan(tmp_path)
+
+    with pytest.raises(ToolUnavailableError, match="encoder.*libopus"):
+        preflight_execution(plan)
+
+
+def _install_fake_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ffmpeg_decoders: list[str] | None = None,
+    ffmpeg_encoders: list[str] | None = None,
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     av1an = bin_dir / "av1an"
@@ -264,13 +295,32 @@ printf video > "$out"
         encoding="utf-8",
     )
     ffmpeg = bin_dir / "ffmpeg"
+    decoder_lines = "\n".join(
+        f" A....D {codec}                  fake decoder" for codec in (ffmpeg_decoders or ["aac"])
+    )
+    encoder_lines = "\n".join(
+        f" A..... {codec}                  fake encoder"
+        for codec in (ffmpeg_encoders or ["libopus"])
+    )
     ffmpeg.write_text(
-        """#!/usr/bin/env bash
-if [ "${1:-}" = "-version" ]; then
+        f"""#!/usr/bin/env bash
+if [ "${{1:-}}" = "-version" ]; then
   echo "ffmpeg version 6.1"
   exit 0
 fi
-out="${@: -1}"
+if [ "${{1:-}}" = "-decoders" ]; then
+  cat <<'EOF'
+{decoder_lines}
+EOF
+  exit 0
+fi
+if [ "${{1:-}}" = "-encoders" ]; then
+  cat <<'EOF'
+{encoder_lines}
+EOF
+  exit 0
+fi
+out="${{@: -1}}"
 printf final > "$out"
 """,
         encoding="utf-8",
