@@ -46,13 +46,19 @@ from avarch.profiles.registry import (
 )
 from avarch.scanner import scan_root, update_inventory
 from avarch.scheduler import (
+    JobControlError,
     SchedulerControlError,
+    cancel_job,
     drain_scheduler,
     enqueue_inventory,
+    hold_job,
     pause_scheduler,
+    release_job,
     resume_scheduler,
+    retry_job,
     scheduler_status,
     stop_scheduler,
+    update_job_priority,
 )
 from avarch.serialization import canonical_json
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
@@ -326,6 +332,9 @@ class LocalTuiBackend:
         request: SchedulerControlRequest,
     ) -> SchedulerControlResult:
         return await asyncio.to_thread(self._request_scheduler_control_sync, request)
+
+    async def perform_job_action(self, request: JobActionRequest) -> JobActionResult:
+        return await asyncio.to_thread(self._perform_job_action_sync, request)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -697,6 +706,64 @@ class LocalTuiBackend:
         except SchedulerControlError as exc:
             raise TuiBackendError(str(exc)) from exc
         return SchedulerControlResult(message=message)
+
+    def _perform_job_action_sync(self, request: JobActionRequest) -> JobActionResult:
+        if not request.job_ids:
+            raise TuiBackendError("No jobs selected.")
+        engine = create_db_engine(self.database_url)
+        now = _utc_now()
+        changed = 0
+        action = request.action
+        try:
+            with Session(engine) as session, session.begin():
+                for job_id in request.job_ids:
+                    if action == "cancel":
+                        cancel_job(
+                            session,
+                            job_id=job_id,
+                            actor="tui",
+                            reason=request.reason,
+                            now=now,
+                        )
+                    elif action == "hold":
+                        hold_job(
+                            session,
+                            job_id=job_id,
+                            actor="tui",
+                            reason=request.reason,
+                            now=now,
+                        )
+                    elif action == "release":
+                        if not release_job(session, job_id=job_id, actor="tui", now=now):
+                            continue
+                    elif action == "retry":
+                        retry_job(
+                            session,
+                            job_id=job_id,
+                            config=self.config,
+                            actor="tui",
+                            now=now,
+                        )
+                    elif action == "priority":
+                        if request.priority is None:
+                            raise TuiBackendError("Priority action requires a new priority.")
+                        update_job_priority(
+                            session,
+                            job_id=job_id,
+                            priority=request.priority,
+                            actor="tui",
+                            now=now,
+                        )
+                    else:
+                        raise TuiBackendError(f"Unsupported job action: {action}")
+                    changed += 1
+        except JobControlError as exc:
+            raise TuiBackendError(str(exc)) from exc
+
+        return JobActionResult(
+            message=_job_action_result_message(action, changed),
+            changed=changed,
+        )
 
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
@@ -1208,6 +1275,20 @@ def _job_control_label(job: Job) -> str | None:
     if JobStatus(job.status) == JobStatus.HELD:
         return "held"
     return None
+
+
+def _job_action_result_message(action: str, changed: int) -> str:
+    if action == "cancel":
+        return f"Cancel requested for {changed} job(s)."
+    if action == "hold":
+        return f"Hold requested for {changed} job(s)."
+    if action == "release":
+        return f"Released {changed} job(s)."
+    if action == "retry":
+        return f"Retry prepared for {changed} job(s)."
+    if action == "priority":
+        return f"Priority updated for {changed} job(s)."
+    return f"Updated {changed} job(s)."
 
 
 def _attempt_snapshot(attempt: JobAttempt) -> JobAttemptSnapshot:
