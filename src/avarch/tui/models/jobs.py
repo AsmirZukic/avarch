@@ -55,6 +55,29 @@ class PromotionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class JobPlanSnapshot:
+    plan_hash: str
+    plan_path: str
+    artifact_text: str
+    artifact_read_only: bool
+    video_stream_index: int
+    audio_stream_index: int
+    subtitle_stream_indexes: tuple[int, ...]
+    vapoursynth_mode: str
+    vapoursynth_identity_hash: str
+    vapoursynth_template_path: str | None
+    vapoursynth_template_hash: str | None
+    validation_policy_hash: str
+    validation_expected_video_codec: str
+    validation_expected_width: int
+    validation_expected_height: int
+    validation_expected_audio_codec: str
+    validation_expected_audio_channels: int
+    validation_expected_audio_language: str | None
+    validation_decode_sample: bool
+
+
+@dataclass(frozen=True, slots=True)
 class JobDetailSnapshot:
     revision: UiRevision
     job_id: int
@@ -75,6 +98,9 @@ class JobDetailSnapshot:
     output_path: str | None
     last_error_type: str | None
     last_error_message: str | None
+    control_request: str | None
+    control_reason: str | None
+    plan: JobPlanSnapshot | None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

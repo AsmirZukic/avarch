@@ -77,6 +77,7 @@ from avarch.tui.models.jobs import (
     JobDetailSnapshot,
     JobEventSnapshot,
     JobLogSnapshot,
+    JobPlanSnapshot,
     PromotionSnapshot,
     ValidationSnapshot,
 )
@@ -933,6 +934,8 @@ class LocalTuiBackend:
             )
             validation = _validation_snapshot(validation_result)
             promotion = _promotion_snapshot(promotion_record)
+            control_request, control_reason = _job_detail_control(job)
+            plan = _job_plan_snapshot(job)
 
             return JobDetailSnapshot(
                 revision=revision,
@@ -954,6 +957,9 @@ class LocalTuiBackend:
                 output_path=job.output_path,
                 last_error_type=job.last_error_type,
                 last_error_message=job.last_error_message,
+                control_request=control_request,
+                control_reason=control_reason,
+                plan=plan,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
                 started_at=job.started_at,
@@ -1375,6 +1381,56 @@ def _job_control_label(job: Job) -> str | None:
     if JobStatus(job.status) == JobStatus.HELD:
         return "held"
     return None
+
+
+def _job_detail_control(job: Job) -> tuple[str | None, str | None]:
+    if job.cancel_requested_at is not None and JobStatus(job.status) != JobStatus.CANCELED:
+        actor = job.cancel_requested_by or "unknown"
+        return f"Cancel requested by {actor}", job.cancel_reason
+    if job.hold_requested_at is not None and JobStatus(job.status) != JobStatus.HELD:
+        actor = job.hold_requested_by or "unknown"
+        return f"Hold requested by {actor}", job.hold_reason
+    if JobStatus(job.status) == JobStatus.HELD:
+        actor = job.hold_requested_by or "unknown"
+        return f"Held by {actor}", job.hold_reason
+    return None, None
+
+
+def _job_plan_snapshot(job: Job) -> JobPlanSnapshot | None:
+    if job.plan_path is None:
+        return None
+    try:
+        artifact_text = Path(job.plan_path).read_text(encoding="utf-8")
+        plan = TranscodePlan.model_validate_json(artifact_text)
+    except (OSError, ValueError):
+        return None
+    return JobPlanSnapshot(
+        plan_hash=plan.plan_hash,
+        plan_path=str(plan.artifacts.plan_json),
+        artifact_text=artifact_text,
+        artifact_read_only=True,
+        video_stream_index=plan.video.source_stream_index,
+        audio_stream_index=plan.audio.source_stream_index,
+        subtitle_stream_indexes=tuple(
+            stream.source_stream_index for stream in plan.subtitles.streams
+        ),
+        vapoursynth_mode=plan.vapoursynth.mode,
+        vapoursynth_identity_hash=plan.vapoursynth.identity_hash,
+        vapoursynth_template_path=(
+            str(plan.vapoursynth.template_path)
+            if plan.vapoursynth.template_path is not None
+            else None
+        ),
+        vapoursynth_template_hash=plan.vapoursynth.template_hash,
+        validation_policy_hash=plan.validation.policy_hash,
+        validation_expected_video_codec=plan.validation.expected_video_codec,
+        validation_expected_width=plan.validation.expected_width,
+        validation_expected_height=plan.validation.expected_height,
+        validation_expected_audio_codec=plan.validation.expected_audio_codec,
+        validation_expected_audio_channels=plan.validation.expected_audio_channels,
+        validation_expected_audio_language=plan.validation.expected_audio_language,
+        validation_decode_sample=plan.validation.decode_sample.enabled,
+    )
 
 
 def _job_action_result_message(action: str, changed: int) -> str:
