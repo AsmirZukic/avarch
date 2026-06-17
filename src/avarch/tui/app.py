@@ -14,6 +14,7 @@ from avarch.tui.messages import RefreshCompleted, RefreshFailed, RefreshStarted
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
 from avarch.tui.models.common import TuiError, UiRevision
 from avarch.tui.models.dashboard import DashboardSnapshot
+from avarch.tui.scheduler_host import scheduler_ownership_label
 from avarch.tui.screens.bootstrap import BootstrapView
 from avarch.tui.screens.dashboard import dashboard_snapshot_text
 from avarch.tui.state import TuiRoute, TuiSessionState
@@ -29,6 +30,21 @@ class BootstrapBackend(Protocol):
         ...
 
     async def get_dashboard_snapshot(self) -> DashboardSnapshot:
+        ...
+
+
+class AppSchedulerHost(Protocol):
+    @property
+    def owned(self) -> bool:
+        ...
+
+    async def request_drain(self) -> None:
+        ...
+
+    async def request_stop(self) -> None:
+        ...
+
+    async def wait_finished(self) -> object:
         ...
 
 
@@ -87,11 +103,14 @@ class AvarchTuiApp(App[None]):
         initialized: bool = False,
         database_url: str = "unknown",
         exit_after_mount: bool = False,
+        scheduler_host: AppSchedulerHost | None = None,
     ) -> None:
         super().__init__()
         self.initialized = initialized
         self.database_url = database_url
         self.exit_after_mount = exit_after_mount
+        self.scheduler_host = scheduler_host
+        self.exit_confirmation_text: str | None = None
         self.session_state = TuiSessionState()
         self.backend = backend or StaticBootstrapBackend(
             BootstrapStatus(
@@ -195,6 +214,27 @@ class AvarchTuiApp(App[None]):
         await self.refresh_active_screen()
 
     def action_request_quit(self) -> None:
+        if self.scheduler_host is not None and self.scheduler_host.owned:
+            self.exit_confirmation_text = (
+                "TUI-owned scheduler is running.\n\n"
+                "Choose drain and exit to let active work finish, or stop and exit "
+                "to interrupt active work safely."
+            )
+            active = self.query_one("#active-screen", RouteContent)
+            active.set_content(self.exit_confirmation_text)
+            return
+        self.exit()
+
+    async def drain_and_exit(self) -> None:
+        if self.scheduler_host is not None and self.scheduler_host.owned:
+            await self.scheduler_host.request_drain()
+            await self.scheduler_host.wait_finished()
+        self.exit()
+
+    async def stop_and_exit(self) -> None:
+        if self.scheduler_host is not None and self.scheduler_host.owned:
+            await self.scheduler_host.request_stop()
+            await self.scheduler_host.wait_finished()
         self.exit()
 
     def _render_active_route(self) -> None:
@@ -294,3 +334,16 @@ def _route_empty_state(route: TuiRoute) -> str:
         TuiRoute.PROFILES: "Built-in and user profiles will appear here.",
         TuiRoute.DIAGNOSTICS: "Configuration, database, and tool health will appear here.",
     }[route]
+
+
+def scheduler_status_line(
+    *,
+    host: AppSchedulerHost | None,
+    snapshot: DashboardSnapshot,
+) -> str:
+    return scheduler_ownership_label(
+        host=host,
+        mode=snapshot.scheduler.mode,
+        lease_state=snapshot.scheduler.lease_state,
+        runner_id=snapshot.scheduler.runner_id,
+    )
