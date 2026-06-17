@@ -8,6 +8,7 @@ from textual.message import Message
 from textual.widgets import Button, Static
 
 from avarch.tui.models.workflow import (
+    AnalysisSummary,
     CandidateSnapshot,
     DirectoryListing,
     ScanSummary,
@@ -25,6 +26,14 @@ class WorkflowScanBackend(Protocol):
         ...
 
     async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        ...
+
+
+class WorkflowCandidateBackend(Protocol):
+    async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        ...
+
+    async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
         ...
 
 
@@ -176,16 +185,23 @@ class WorkflowCandidateReviewView(Static):
         self,
         *,
         snapshot: CandidateSnapshot,
+        backend: WorkflowCandidateBackend | None = None,
         draft: WorkflowDraft | None = None,
+        roots: tuple[Path, ...] = (),
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
+        self.backend = backend
+        self.roots = roots
         self.draft = draft or WorkflowDraft()
         self.table = CandidateTable(
             snapshot,
             selected_media_ids=set(self.draft.selected_media_ids),
             id="candidate-table",
         )
+        self.analysis_summary: AnalysisSummary | None = None
+        self.analysis_phase = "Idle"
+        self.error_message: str | None = None
         self.content_text = ""
 
     def compose(self) -> ComposeResult:
@@ -193,6 +209,7 @@ class WorkflowCandidateReviewView(Static):
         yield self.table
         yield Button("Select all eligible", id="candidate-select-all")
         yield Button("Clear selection", id="candidate-clear-selection")
+        yield Button("Analyze selected", id="candidate-analyze")
         yield Button("Continue", id="candidate-continue")
 
     async def on_mount(self) -> None:
@@ -214,12 +231,46 @@ class WorkflowCandidateReviewView(Static):
         elif event.button.id == "candidate-clear-selection":
             self.table.clear_selection()
             event.stop()
+        elif event.button.id == "candidate-analyze":
+            self.run_worker(self.analyze_selected(), exclusive=True)
+            event.stop()
         elif event.button.id == "candidate-continue":
             self._sync_selection()
             self.post_message(
                 self.ContinueRequested(tuple(sorted(self.draft.selected_media_ids)))
             )
             event.stop()
+
+    async def analyze_selected(self) -> None:
+        self._sync_selection()
+        selected_ids = tuple(sorted(self.draft.selected_media_ids))
+        if not selected_ids:
+            self.error_message = "Select at least one candidate before analysis."
+            self.analysis_phase = "Selection required"
+            self._render_status()
+            return
+        if self.backend is None:
+            self.error_message = "Analysis backend is not available."
+            self.analysis_phase = "Analysis unavailable"
+            self._render_status()
+            return
+
+        self.error_message = None
+        self.analysis_summary = None
+        self.analysis_phase = f"Analyzing {len(selected_ids)} files"
+        self._render_status()
+        summary = await self.backend.analyze_media(selected_ids)
+        self.analysis_summary = summary
+        self.analysis_phase = (
+            f"{summary.completed} / {summary.requested} complete"
+            if summary.failed
+            else "Analysis complete"
+        )
+
+        refreshed = await self.backend.list_workflow_candidates(self.roots)
+        self.table.update_snapshot(refreshed)
+        self._sync_selection()
+        self._render_status()
 
     def _sync_selection(self) -> None:
         self.draft.selected_media_ids = set(self.table.selected_media_ids)
@@ -228,12 +279,30 @@ class WorkflowCandidateReviewView(Static):
         selected = len(self.draft.selected_media_ids)
         eligible = sum(1 for row in self.table.snapshot.rows if row.eligible)
         total = len(self.table.snapshot.rows)
-        text = (
-            "New Workflow - Review candidates\n\n"
-            f"Discovered media: {total}\n"
-            f"Eligible: {eligible}\n"
-            f"Selected: {selected}"
-        )
+        lines = [
+            "New Workflow - Review candidates",
+            "",
+            f"Discovered media: {total}",
+            f"Eligible: {eligible}",
+            f"Selected: {selected}",
+            f"Analysis: {self.analysis_phase}",
+        ]
+        if self.error_message is not None:
+            lines.extend(["", f"Error: {self.error_message}"])
+        if self.analysis_summary is not None:
+            summary = self.analysis_summary
+            lines.extend(
+                [
+                    "",
+                    "Analysis result",
+                    f"  Requested: {summary.requested}",
+                    f"  Completed: {summary.completed}",
+                    f"  Failed: {summary.failed}",
+                ]
+            )
+            for failure in summary.failures:
+                lines.append(f"  {failure.path}: {failure.error}")
+        text = "\n".join(lines)
         self.content_text = text
         if self.is_mounted:
             self.query_one("#candidate-review-status", Static).update(text)

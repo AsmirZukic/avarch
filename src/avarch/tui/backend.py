@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
@@ -24,9 +24,16 @@ from avarch.models.db import (
     PromotionRecord,
     ValidationResult,
 )
+from avarch.models.probe import NormalizedProbe
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
-from avarch.probe import ProbeError, parse_normalized_probe_json
+from avarch.probe import (
+    ProbeError,
+    normalize_probe,
+    parse_normalized_probe_json,
+    run_ffprobe,
+    store_probe_result,
+)
 from avarch.profiles.registry import ProfileRegistry, ProfileRegistryError
 from avarch.scanner import scan_root, update_inventory
 from avarch.scheduler import scheduler_status
@@ -65,6 +72,7 @@ from avarch.tui.models.queue import (
     QueueSnapshot,
 )
 from avarch.tui.models.workflow import (
+    AnalysisFailure,
     AnalysisSummary,
     CandidateRow,
     CandidateSnapshot,
@@ -75,6 +83,8 @@ from avarch.tui.models.workflow import (
     ScanSummary,
     WorkflowPreview,
 )
+
+ProbeRunner = Callable[[Path], Mapping[str, Any]]
 
 
 class TuiBackendError(RuntimeError):
@@ -211,11 +221,18 @@ class TuiBackend(Protocol):
 
 
 class LocalTuiBackend:
-    def __init__(self, *, config: AppConfig, config_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        config_path: Path,
+        probe_runner: ProbeRunner = run_ffprobe,
+    ) -> None:
         self.config = config
         self.config_path = config_path
         self.data_dir = resolve_data_dir(config, config_path)
         self.database_url = resolve_database_url(config, config_path)
+        self.probe_runner = probe_runner
 
     async def get_bootstrap_status(self) -> BootstrapStatus:
         return await asyncio.to_thread(self._get_bootstrap_status_sync)
@@ -240,6 +257,9 @@ class LocalTuiBackend:
 
     async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
         return await asyncio.to_thread(self._list_workflow_candidates_sync, roots)
+
+    async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
+        return await asyncio.to_thread(self._analyze_media_sync, media_file_ids)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -403,6 +423,72 @@ class LocalTuiBackend:
             )
         return CandidateSnapshot(rows=rows)
 
+    def _analyze_media_sync(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
+        completed = 0
+        failures: list[AnalysisFailure] = []
+        for media_file_id in media_file_ids:
+            media_file = self._load_media_file(media_file_id)
+            if media_file is None:
+                failures.append(
+                    AnalysisFailure(
+                        media_file_id=media_file_id,
+                        path="<missing>",
+                        error="Media file is no longer in the inventory.",
+                    )
+                )
+                continue
+
+            try:
+                raw_probe = self.probe_runner(Path(media_file.path))
+                normalized_probe = normalize_probe(raw_probe)
+                self._store_analysis_result(
+                    media_file_id=media_file_id,
+                    raw_probe=raw_probe,
+                    normalized_probe=normalized_probe,
+                )
+            except Exception as exc:
+                failures.append(
+                    AnalysisFailure(
+                        media_file_id=media_file_id,
+                        path=media_file.path,
+                        error=_bounded_error(str(exc) or exc.__class__.__name__),
+                    )
+                )
+                continue
+            completed += 1
+
+        return AnalysisSummary(
+            requested=len(media_file_ids),
+            completed=completed,
+            failed=len(failures),
+            failures=tuple(failures),
+        )
+
+    def _load_media_file(self, media_file_id: int) -> MediaFile | None:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session:
+            return session.get(MediaFile, media_file_id)
+
+    def _store_analysis_result(
+        self,
+        *,
+        media_file_id: int,
+        raw_probe: Mapping[str, Any],
+        normalized_probe: NormalizedProbe,
+    ) -> None:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session, session.begin():
+            media_file = session.get(MediaFile, media_file_id)
+            if media_file is None:
+                raise TuiBackendError("Media file is no longer in the inventory.")
+            store_probe_result(
+                session,
+                media_file=media_file,
+                raw_probe=raw_probe,
+                normalized_probe=normalized_probe,
+                created_at=_utc_now(),
+            )
+
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
         now = _utc_now()
@@ -546,6 +632,10 @@ class StaticBootstrapBackend:
             recent_failures=(),
             promotion_ready=(),
         )
+
+
+def _bounded_error(error: str, *, limit: int = 1000) -> str:
+    return error if len(error) <= limit else f"{error[:limit]}..."
 
 
 def _sqlite_database_path(database_url: str) -> Path | None:

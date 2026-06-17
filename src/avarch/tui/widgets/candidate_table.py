@@ -39,6 +39,12 @@ class CandidateTable(Static):
     async def on_mount(self) -> None:
         self.render_table()
 
+    def update_snapshot(self, snapshot: CandidateSnapshot) -> None:
+        self.snapshot = snapshot
+        available_ids = {row.media_file_id for row in snapshot.rows}
+        self.selected_media_ids.intersection_update(available_ids)
+        self.render_table()
+
     def set_filters(self, filters: CandidateFilters) -> None:
         self.filters = filters
         self.render_table()

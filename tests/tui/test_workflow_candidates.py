@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 
 from avarch.tui.models.workflow import (
+    AnalysisFailure,
+    AnalysisSummary,
     CandidateFilters,
     CandidateRow,
     CandidateSnapshot,
     CandidateState,
+    DirectoryListing,
+    ScanSummary,
     WorkflowDraft,
 )
 from avarch.tui.screens.workflow import WorkflowCandidateReviewView
@@ -117,6 +122,98 @@ def test_candidate_review_updates_workflow_draft_selection() -> None:
     asyncio.run(run())
 
 
+def test_analyze_runs_for_selected_unprobed_media() -> None:
+    async def run() -> None:
+        draft = WorkflowDraft()
+        backend = FakeAnalysisBackend(_snapshot(), _snapshot())
+        app = CandidateReviewTestApp(_snapshot(), draft=draft, backend=backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.view.table.toggle_candidate(2)
+            await pilot.pause()
+            await app.view.analyze_selected()
+            assert backend.analyze_calls == [(2,)]
+            assert "Analysis result" in app.view.content_text
+
+    asyncio.run(run())
+
+
+def test_analyze_shows_per_file_progress() -> None:
+    async def run() -> None:
+        backend = FakeAnalysisBackend(_snapshot(), _snapshot())
+        backend.block_analysis = True
+        app = CandidateReviewTestApp(_snapshot(), draft=WorkflowDraft(), backend=backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.view.table.toggle_candidate(1)
+            app.view.table.toggle_candidate(2)
+            await pilot.pause()
+            task = asyncio.create_task(app.view.analyze_selected())
+            await backend.analysis_started.wait()
+            assert "Analyzing 2 files" in app.view.content_text
+            backend.release_analysis.set()
+            await task
+
+    asyncio.run(run())
+
+
+def test_successful_analysis_refreshes_candidates() -> None:
+    refreshed = CandidateSnapshot(
+        rows=(
+            CandidateRow(
+                media_file_id=2,
+                path="/media/movies/Movie B.mkv",
+                state=CandidateState.READY,
+                reason="Video is HEVC",
+                eligible=True,
+            ),
+        )
+    )
+
+    async def run() -> None:
+        backend = FakeAnalysisBackend(_snapshot(), refreshed)
+        app = CandidateReviewTestApp(_snapshot(), draft=WorkflowDraft(), backend=backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.view.table.toggle_candidate(2)
+            await pilot.pause()
+            await app.view.analyze_selected()
+            assert "Video is HEVC" in app.view.table.content_text
+            assert "NEEDS ANALYSIS" not in app.view.table.content_text
+
+    asyncio.run(run())
+
+
+def test_partial_failure_keeps_successful_results() -> None:
+    summary = AnalysisSummary(
+        requested=2,
+        completed=1,
+        failed=1,
+        failures=(
+            AnalysisFailure(
+                media_file_id=2,
+                path="/media/movies/Movie B.mkv",
+                error="ffprobe failed",
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        backend = FakeAnalysisBackend(_snapshot(), _snapshot(), summary=summary)
+        app = CandidateReviewTestApp(_snapshot(), draft=WorkflowDraft(), backend=backend)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.view.table.toggle_candidate(1)
+            app.view.table.toggle_candidate(2)
+            await pilot.pause()
+            await app.view.analyze_selected()
+            assert "1 / 2 complete" in app.view.content_text
+            assert "ffprobe failed" in app.view.content_text
+            assert backend.refresh_calls == [()]
+
+    asyncio.run(run())
+
+
 class CandidateTableTestApp(App[None]):
     def __init__(self, snapshot: CandidateSnapshot) -> None:
         super().__init__()
@@ -127,12 +224,68 @@ class CandidateTableTestApp(App[None]):
 
 
 class CandidateReviewTestApp(App[None]):
-    def __init__(self, snapshot: CandidateSnapshot, *, draft: WorkflowDraft) -> None:
+    def __init__(
+        self,
+        snapshot: CandidateSnapshot,
+        *,
+        draft: WorkflowDraft,
+        backend: FakeAnalysisBackend | None = None,
+    ) -> None:
         super().__init__()
-        self.view = WorkflowCandidateReviewView(snapshot=snapshot, draft=draft)
+        self.view = WorkflowCandidateReviewView(
+            snapshot=snapshot,
+            draft=draft,
+            backend=backend,
+        )
 
     def compose(self) -> ComposeResult:
         yield self.view
+
+
+class FakeAnalysisBackend:
+    def __init__(
+        self,
+        initial: CandidateSnapshot,
+        refreshed: CandidateSnapshot,
+        *,
+        summary: AnalysisSummary | None = None,
+    ) -> None:
+        self.initial = initial
+        self.refreshed = refreshed
+        self.summary = summary
+        self.analyze_calls: list[tuple[int, ...]] = []
+        self.refresh_calls: list[tuple[Path, ...]] = []
+        self.block_analysis = False
+        self.analysis_started = asyncio.Event()
+        self.release_analysis = asyncio.Event()
+
+    async def browse_directory(
+        self,
+        path: Path,
+        *,
+        show_hidden: bool,
+    ) -> DirectoryListing:
+        del path, show_hidden
+        raise NotImplementedError
+
+    async def scan_roots(self, roots: tuple[Path, ...]) -> ScanSummary:
+        del roots
+        raise NotImplementedError
+
+    async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        self.refresh_calls.append(roots)
+        return self.refreshed
+
+    async def analyze_media(self, media_file_ids: tuple[int, ...]) -> AnalysisSummary:
+        self.analyze_calls.append(media_file_ids)
+        self.analysis_started.set()
+        if self.block_analysis:
+            await self.release_analysis.wait()
+        return self.summary or AnalysisSummary(
+            requested=len(media_file_ids),
+            completed=len(media_file_ids),
+            failed=0,
+        )
 
 
 def _snapshot() -> CandidateSnapshot:

@@ -69,10 +69,18 @@ class WorkflowDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalysisFailure:
+    media_file_id: int
+    path: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisSummary:
     requested: int
     completed: int
     failed: int
+    failures: tuple[AnalysisFailure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
