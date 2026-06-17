@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
 from sqlmodel import Session, col, select
 
@@ -23,6 +24,7 @@ from avarch.models.db import (
 )
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
+from avarch.profiles.registry import ProfileRegistry, ProfileRegistryError
 from avarch.scanner import scan_root, update_inventory
 from avarch.scheduler import scheduler_status
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
@@ -232,6 +234,21 @@ class LocalTuiBackend:
         return await asyncio.to_thread(self._get_job_detail_sync, job_id)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
+        try:
+            ProfileRegistry.from_config(self.config)
+        except ProfileRegistryError as exc:
+            return BootstrapStatus(
+                state=BootstrapState.PROFILE_REGISTRY_ERROR,
+                config_path=self.config_path,
+                data_dir=self.data_dir,
+                database_url=self.database_url,
+                error=TuiError(
+                    title="Profiles could not be loaded",
+                    summary=str(exc).splitlines()[0],
+                    details=str(exc),
+                ),
+            )
+
         database_path = _sqlite_database_path(self.database_url)
         if database_path is not None and not database_path.exists():
             return BootstrapStatus(
@@ -243,6 +260,14 @@ class LocalTuiBackend:
 
         try:
             engine = create_db_engine(self.database_url)
+            tables = set(inspect(engine).get_table_names())
+            if not tables:
+                return BootstrapStatus(
+                    state=BootstrapState.DATABASE_UNINITIALIZED,
+                    config_path=self.config_path,
+                    data_dir=self.data_dir,
+                    database_url=self.database_url,
+                )
             verify_database_revision(engine)
         except Exception as exc:
             return BootstrapStatus(
@@ -267,6 +292,7 @@ class LocalTuiBackend:
     def _initialize_local_state_sync(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         upgrade_database(self.database_url)
+
 
     def _get_dashboard_snapshot_sync(self) -> DashboardSnapshot:
         engine = create_db_engine(self.database_url)
@@ -455,10 +481,32 @@ class LocalTuiBackend:
             )
 
 
+class StaticBootstrapBackend:
+    def __init__(self, status: BootstrapStatus) -> None:
+        self.status = status
+        self.initialize_calls = 0
+
+    async def get_bootstrap_status(self) -> BootstrapStatus:
+        return self.status
+
+    async def initialize_local_state(self) -> None:
+        self.initialize_calls += 1
+        self.status = BootstrapStatus(
+            state=BootstrapState.READY,
+            config_path=self.status.config_path,
+            data_dir=self.status.data_dir,
+            database_url=self.status.database_url,
+        )
+
+
 def _sqlite_database_path(database_url: str) -> Path | None:
     url = make_url(database_url)
     database = url.database
-    if not url.drivername.startswith("sqlite") or database is None or database in {"", ":memory:"}:
+    if (
+        not url.drivername.startswith("sqlite")
+        or database is None
+        or database in {"", ":memory:"}
+    ):
         return None
     return Path(database)
 
@@ -498,7 +546,9 @@ def _build_revision(session: Session) -> UiRevision:
         newest_validation_created_at=_max_datetime(
             validation.created_at for validation in validations
         ),
-        newest_promotion_updated_at=_max_datetime(promotion.updated_at for promotion in promotions),
+        newest_promotion_updated_at=_max_datetime(
+            promotion.updated_at for promotion in promotions
+        ),
     )
 
 

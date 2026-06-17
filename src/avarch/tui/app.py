@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Protocol
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.widgets import Footer, Header, Static
 
 from avarch import __version__
+from avarch.tui.backend import StaticBootstrapBackend
+from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
+from avarch.tui.screens.bootstrap import BootstrapView
 from avarch.tui.state import TuiRoute, TuiSessionState
 from avarch.tui.widgets import StatusPanel
 from avarch.tui.widgets.navigation import PrimaryNavigation
+
+
+class BootstrapBackend(Protocol):
+    async def get_bootstrap_status(self) -> BootstrapStatus:
+        ...
+
+    async def initialize_local_state(self) -> None:
+        ...
 
 
 class RouteContent(Static):
@@ -52,6 +66,7 @@ class AvarchTuiApp(App[None]):
     def __init__(
         self,
         *,
+        backend: BootstrapBackend | None = None,
         initialized: bool = False,
         database_url: str = "unknown",
         exit_after_mount: bool = False,
@@ -61,6 +76,15 @@ class AvarchTuiApp(App[None]):
         self.database_url = database_url
         self.exit_after_mount = exit_after_mount
         self.session_state = TuiSessionState()
+        self.backend = backend or StaticBootstrapBackend(
+            BootstrapStatus(
+                state=BootstrapState.READY,
+                config_path=Path("avarch.toml"),
+                data_dir=Path(".avarch"),
+                database_url=database_url,
+            )
+        )
+        self.bootstrap_status: BootstrapStatus | None = None
 
     def compose(self) -> ComposeResult:
         status = "initialized" if self.initialized else "not initialized"
@@ -75,10 +99,26 @@ class AvarchTuiApp(App[None]):
                 yield RouteContent("", id="active-screen")
         yield Footer()
 
-    def on_mount(self) -> None:
-        self.open_route(TuiRoute.DASHBOARD)
+    async def on_mount(self) -> None:
+        await self.bootstrap()
         if self.exit_after_mount:
             self.exit()
+
+    async def bootstrap(self) -> None:
+        status = await self.backend.get_bootstrap_status()
+        self.bootstrap_status = status
+        if status.state == BootstrapState.READY:
+            await self._restore_route_content()
+            self.open_route(TuiRoute.DASHBOARD)
+            return
+        await self._render_bootstrap(status)
+
+    async def on_bootstrap_view_initialize_requested(
+        self,
+        _event: BootstrapView.InitializeRequested,
+    ) -> None:
+        await self.backend.initialize_local_state()
+        await self.bootstrap()
 
     def on_primary_navigation_route_selected(
         self,
@@ -87,6 +127,11 @@ class AvarchTuiApp(App[None]):
         self.open_route(event.route)
 
     def open_route(self, route: TuiRoute) -> None:
+        if (
+            self.bootstrap_status is not None
+            and self.bootstrap_status.state != BootstrapState.READY
+        ):
+            return
         if route == self.session_state.active_route:
             self._render_active_route()
             return
@@ -121,6 +166,18 @@ class AvarchTuiApp(App[None]):
         route = self.session_state.active_route
         active = self.query_one("#active-screen", RouteContent)
         active.set_content(f"{route.label}\n\n{_route_empty_state(route)}")
+
+    async def _render_bootstrap(self, status: BootstrapStatus) -> None:
+        container = self.query_one("#screen-container", Container)
+        container.remove_children()
+        await container.mount(BootstrapView(status, id="bootstrap-view"))
+
+    async def _restore_route_content(self) -> None:
+        if len(self.query("#active-screen")) > 0:
+            return
+        container = self.query_one("#screen-container", Container)
+        container.remove_children()
+        await container.mount(RouteContent("", id="active-screen"))
 
 
 def _route_empty_state(route: TuiRoute) -> str:

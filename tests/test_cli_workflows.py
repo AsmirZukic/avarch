@@ -199,12 +199,14 @@ def test_tui_workflow_can_be_opened_before_and_after_init(
         def __init__(
             self,
             *,
+            backend: object,
             initialized: bool,
             database_url: str,
             exit_after_mount: bool,
         ) -> None:
             calls.append(
                 {
+                    "backend": backend,
                     "initialized": initialized,
                     "database_url": database_url,
                     "exit_after_mount": exit_after_mount,
@@ -225,6 +227,7 @@ def test_tui_workflow_can_be_opened_before_and_after_init(
     assert init_result.exit_code == 0
     assert after_init.exit_code == 0
     assert len(calls) == 2
+    assert all(call["backend"] is not None for call in calls)
     assert all(call["initialized"] is True for call in calls)
     assert all(call["exit_after_mount"] is True for call in calls)
     assert all(call["headless"] is True for call in calls)

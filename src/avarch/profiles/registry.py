@@ -26,6 +26,10 @@ class DuplicateProfileNameError(ProfileRegistryError):
     pass
 
 
+class NoProfilesFoundError(ProfileRegistryError):
+    pass
+
+
 class UnknownProfileError(ProfileRegistryError):
     pass
 
@@ -72,7 +76,7 @@ class ProfileRegistry:
     def from_config(cls, config: AppConfig) -> ProfileRegistry:
         try:
             return cls.load(search_paths=config.profile_registry.search_paths)
-        except ProfileRegistryError:
+        except NoProfilesFoundError:
             return cls(_load_packaged_profiles())
 
     @classmethod
@@ -82,7 +86,7 @@ class ProfileRegistry:
             profiles.extend(_load_user_profiles(search_path))
         if not profiles:
             locations = ", ".join(str(path) for path in search_paths) or "(none configured)"
-            raise ProfileRegistryError(
+            raise NoProfilesFoundError(
                 "No profiles found in configured search paths.\n"
                 f"Check: {locations}"
             )
