@@ -6,7 +6,7 @@ from typing import Protocol
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Button, Footer, Header, Static
 
 from avarch import __version__
 from avarch.tui.backend import StaticBootstrapBackend
@@ -15,6 +15,7 @@ from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
 from avarch.tui.models.common import TuiError, UiRevision
 from avarch.tui.models.dashboard import DashboardSnapshot
 from avarch.tui.screens.bootstrap import BootstrapView
+from avarch.tui.screens.dashboard import dashboard_snapshot_text
 from avarch.tui.state import TuiRoute, TuiSessionState
 from avarch.tui.widgets import StatusPanel
 from avarch.tui.widgets.navigation import PrimaryNavigation
@@ -49,6 +50,16 @@ class AvarchTuiApp(App[None]):
     #active-screen {
         height: 1fr;
         padding: 1 2;
+    }
+
+    #dashboard-actions {
+        dock: bottom;
+        height: auto;
+        padding: 0 1;
+    }
+
+    #dashboard-actions Button {
+        margin-right: 1;
     }
 
     #status-panel {
@@ -110,6 +121,9 @@ class AvarchTuiApp(App[None]):
             yield PrimaryNavigation()
             with Container(id="screen-container"):
                 yield RouteContent("", id="active-screen")
+                with Horizontal(id="dashboard-actions"):
+                    yield Button("New Workflow", id="dashboard-new-workflow")
+                    yield Button("Open Queue", id="dashboard-open-queue")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -150,6 +164,14 @@ class AvarchTuiApp(App[None]):
             return
         self.session_state.active_route = route
         self._render_active_route()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dashboard-new-workflow":
+            self.open_route(TuiRoute.WORKFLOW)
+            event.stop()
+        elif event.button.id == "dashboard-open-queue":
+            self.open_route(TuiRoute.QUEUE)
+            event.stop()
 
     def action_open_dashboard(self) -> None:
         self.open_route(TuiRoute.DASHBOARD)
@@ -208,7 +230,7 @@ class AvarchTuiApp(App[None]):
                     break
 
                 if request_id == self._latest_refresh_request:
-                    rendered = self._render_snapshot_if_changed(route, snapshot)
+                    rendered = await self._render_snapshot_if_changed(route, snapshot)
                     self.refresh_events.append(
                         RefreshCompleted(
                             route=route,
@@ -227,7 +249,7 @@ class AvarchTuiApp(App[None]):
             return await self.backend.get_dashboard_snapshot()
         return await self.backend.get_dashboard_snapshot()
 
-    def _render_snapshot_if_changed(
+    async def _render_snapshot_if_changed(
         self,
         route: TuiRoute,
         snapshot: DashboardSnapshot,
@@ -236,7 +258,7 @@ class AvarchTuiApp(App[None]):
             return False
         self._last_revision_by_route[route] = snapshot.revision
         active = self.query_one("#active-screen", RouteContent)
-        active.set_content(_dashboard_snapshot_text(snapshot))
+        active.set_content(dashboard_snapshot_text(snapshot))
         self.snapshot_render_count += 1
         self.last_refresh_error = None
         return True
@@ -251,7 +273,14 @@ class AvarchTuiApp(App[None]):
             return
         container = self.query_one("#screen-container", Container)
         container.remove_children()
-        await container.mount(RouteContent("", id="active-screen"))
+        await container.mount(
+            RouteContent("", id="active-screen"),
+            Horizontal(
+                Button("New Workflow", id="dashboard-new-workflow"),
+                Button("Open Queue", id="dashboard-open-queue"),
+                id="dashboard-actions",
+            ),
+        )
 
 
 def _route_empty_state(route: TuiRoute) -> str:
@@ -265,17 +294,3 @@ def _route_empty_state(route: TuiRoute) -> str:
         TuiRoute.PROFILES: "Built-in and user profiles will appear here.",
         TuiRoute.DIAGNOSTICS: "Configuration, database, and tool health will appear here.",
     }[route]
-
-
-def _dashboard_snapshot_text(snapshot: DashboardSnapshot) -> str:
-    totals = snapshot.queue_totals
-    return (
-        "Dashboard\n\n"
-        f"Scheduler: {snapshot.scheduler.mode.upper()}\n"
-        f"Lease: {snapshot.scheduler.lease_state}\n"
-        f"Pending: {totals.pending}\n"
-        f"Running: {totals.running}\n"
-        f"Failed: {totals.failed}\n"
-        f"Validated: {totals.validated}\n"
-        f"Completed: {totals.completed}"
-    )

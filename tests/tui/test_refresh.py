@@ -41,7 +41,7 @@ def test_latest_refresh_result_wins() -> None:
             second = asyncio.create_task(app.refresh_active_screen())
             backend.release.set()
             await asyncio.gather(first, second)
-            text = app.query_one("#active-screen", RouteContent).content_text
+            text = _active_text(app)
             assert "Pending: 2" in text
             assert "Pending: 1" not in text
 
@@ -62,7 +62,7 @@ def test_unchanged_revision_skips_rerender() -> None:
             await app.refresh_active_screen()
             await app.refresh_active_screen()
             assert app.snapshot_render_count == 1
-            assert "Pending: 1" in app.query_one("#active-screen", RouteContent).content_text
+            assert "Pending: 1" in _active_text(app)
             completed = [
                 event for event in app.refresh_events if isinstance(event, RefreshCompleted)
             ]
@@ -79,7 +79,7 @@ def test_manual_refresh_runs_immediately() -> None:
             await pilot.press("r")
             await pilot.pause()
             assert backend.calls == 1
-            assert "Pending: 4" in app.query_one("#active-screen", RouteContent).content_text
+            assert "Pending: 4" in _active_text(app)
 
     asyncio.run(run())
 
@@ -90,9 +90,9 @@ def test_refresh_error_keeps_previous_snapshot() -> None:
         app = AvarchTuiApp(backend=backend)
         async with app.run_test(size=(100, 30)) as _pilot:
             await app.refresh_active_screen()
-            previous = app.query_one("#active-screen", RouteContent).content_text
+            previous = _active_text(app)
             await app.refresh_active_screen()
-            assert app.query_one("#active-screen", RouteContent).content_text == previous
+            assert _active_text(app) == previous
             assert app.last_refresh_error is not None
             assert app.last_refresh_error.summary == "database busy"
 
@@ -169,3 +169,8 @@ def _revision(generation: int) -> UiRevision:
         newest_validation_created_at=None,
         newest_promotion_updated_at=None,
     )
+
+
+def _active_text(app: AvarchTuiApp) -> str:
+    active = app.query_one("#active-screen", RouteContent)
+    return active.content_text
