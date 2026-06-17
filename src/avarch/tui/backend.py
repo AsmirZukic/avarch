@@ -45,7 +45,15 @@ from avarch.profiles.registry import (
     ResolvedProfile,
 )
 from avarch.scanner import scan_root, update_inventory
-from avarch.scheduler import enqueue_inventory, scheduler_status
+from avarch.scheduler import (
+    SchedulerControlError,
+    drain_scheduler,
+    enqueue_inventory,
+    pause_scheduler,
+    resume_scheduler,
+    scheduler_status,
+    stop_scheduler,
+)
 from avarch.serialization import canonical_json
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
 from avarch.tui.models.common import TuiError, UiRevision
@@ -312,6 +320,12 @@ class LocalTuiBackend:
             profile_name,
             priority,
         )
+
+    async def request_scheduler_control(
+        self,
+        request: SchedulerControlRequest,
+    ) -> SchedulerControlResult:
+        return await asyncio.to_thread(self._request_scheduler_control_sync, request)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -657,6 +671,32 @@ class LocalTuiBackend:
             already_completed=0,
             not_eligible=summary.missing_skipped,
         )
+
+    def _request_scheduler_control_sync(
+        self,
+        request: SchedulerControlRequest,
+    ) -> SchedulerControlResult:
+        engine = create_db_engine(self.database_url)
+        action = request.action
+        try:
+            with Session(engine) as session, session.begin():
+                if action == "pause":
+                    pause_scheduler(session, now=_utc_now(), reason=request.reason)
+                    message = "Scheduler pause requested."
+                elif action == "resume":
+                    resume_scheduler(session, now=_utc_now())
+                    message = "Scheduler resume requested."
+                elif action == "drain":
+                    drain_scheduler(session, now=_utc_now(), reason=request.reason)
+                    message = "Scheduler drain requested."
+                elif action == "stop":
+                    stop_scheduler(session, now=_utc_now(), reason=request.reason)
+                    message = "Scheduler stop requested."
+                else:
+                    raise TuiBackendError(f"Unsupported scheduler action: {action}")
+        except SchedulerControlError as exc:
+            raise TuiBackendError(str(exc)) from exc
+        return SchedulerControlResult(message=message)
 
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)

@@ -6,12 +6,21 @@ from textual.app import ComposeResult
 from textual.message import Message
 from textual.widgets import Button, Static
 
+from avarch.tui.backend import SchedulerControlRequest, SchedulerControlResult
+from avarch.tui.models.dashboard import SchedulerSummary
 from avarch.tui.models.queue import QueueFilters, QueueSnapshot
 from avarch.tui.widgets.queue_table import QueueTable
+from avarch.tui.widgets.scheduler_panel import SchedulerPanel
 
 
 class QueueBackend(Protocol):
     async def get_queue_snapshot(self, filters: QueueFilters) -> QueueSnapshot:
+        ...
+
+    async def request_scheduler_control(
+        self,
+        request: SchedulerControlRequest,
+    ) -> SchedulerControlResult:
         ...
 
 
@@ -44,6 +53,12 @@ class QueueView(Static):
         self.backend = backend
         self.snapshot = snapshot
         self.filters = snapshot.filters
+        self.scheduler_panel = SchedulerPanel(
+            snapshot.scheduler,
+            backend=backend,
+            refresh_status=self.refresh_scheduler_status,
+            id="queue-scheduler-panel",
+        )
         self.table = QueueTable(snapshot, id="queue-table")
         self.phase = "Queue"
         self.error_message: str | None = None
@@ -51,6 +66,7 @@ class QueueView(Static):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="queue-status")
+        yield self.scheduler_panel
         yield self.table
         yield Button("Open selected job", id="queue-open-selected")
 
@@ -73,8 +89,15 @@ class QueueView(Static):
             self._render_status()
             return
         self.phase = "Queue"
+        self.scheduler_panel.update_scheduler(self.snapshot.scheduler)
         self.table.update_snapshot(self.snapshot)
         self._render_status()
+
+    async def refresh_scheduler_status(self) -> SchedulerSummary:
+        self.snapshot = await self.backend.get_queue_snapshot(self.filters)
+        self.table.update_snapshot(self.snapshot)
+        self._render_status()
+        return self.snapshot.scheduler
 
     def on_queue_table_selection_changed(
         self,

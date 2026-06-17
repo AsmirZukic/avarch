@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from textual.app import App, ComposeResult
 
 from avarch.models.scheduler import JobStage, JobStatus
+from avarch.tui.backend import SchedulerControlRequest, SchedulerControlResult
 from avarch.tui.models.common import UiRevision
 from avarch.tui.models.dashboard import QueueTotals, SchedulerSummary
 from avarch.tui.models.queue import QueueFilters, QueueJobRow, QueueSnapshot
@@ -151,6 +152,12 @@ class FakeQueueBackend:
             filters=filters,
             rows=tuple(row for row in self.snapshot.rows if _matches(row, filters)),
         )
+
+    async def request_scheduler_control(
+        self,
+        request: SchedulerControlRequest,
+    ) -> SchedulerControlResult:
+        return SchedulerControlResult(message=f"{request.action} requested")
 
 
 def _matches(row: QueueJobRow, filters: QueueFilters) -> bool:
