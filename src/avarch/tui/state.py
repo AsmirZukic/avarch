@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from avarch.tui.models.queue import QueueFilters
+from avarch.tui.models.workflow import WorkflowDraft
 
 
 class TuiRoute(StrEnum):
@@ -39,7 +40,7 @@ PRIMARY_ROUTES: tuple[TuiRoute, ...] = (
 @dataclass(slots=True)
 class TuiSessionState:
     active_route: TuiRoute = TuiRoute.DASHBOARD
-    workflow_draft: object | None = None
+    workflow_draft: WorkflowDraft | None = None
     queue_filters: QueueFilters = field(default_factory=QueueFilters)
     focused_job_id: int | None = None
     focused_profile_name: str | None = None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -51,6 +51,21 @@ class ScanSummary:
     changed: int
     missing: int
     unchanged: int
+
+
+def _empty_media_id_set() -> set[int]:
+    return set()
+
+
+@dataclass(slots=True)
+class WorkflowDraft:
+    roots: tuple[Path, ...] = ()
+    scan_summary: ScanSummary | None = None
+    selected_media_ids: set[int] = field(default_factory=_empty_media_id_set)
+    profile_name: str | None = None
+    profile_effective_hash: str | None = None
+    preview: WorkflowPreview | None = None
+    priority: int = 0
 
 
 @dataclass(frozen=True, slots=True)
