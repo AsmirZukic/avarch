@@ -246,10 +246,14 @@ def enqueue_inventory(
     profile_name: str,
     priority: int,
     now: datetime,
+    media_file_ids: tuple[int, ...] | None = None,
 ) -> EnqueueSummary:
     resolved_profile = _require_profile(config, profile_name)
     identity = _planning_identity(resolved_profile)
-    media_files = list(session.exec(select(MediaFile).order_by(MediaFile.path)).all())
+    statement = select(MediaFile).order_by(MediaFile.path)
+    if media_file_ids is not None:
+        statement = statement.where(col(MediaFile.id).in_(media_file_ids))
+    media_files = list(session.exec(statement).all())
     selected = 0
     created = 0
     existing = 0

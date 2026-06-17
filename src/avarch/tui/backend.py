@@ -44,7 +44,7 @@ from avarch.profiles.registry import (
     ResolvedProfile,
 )
 from avarch.scanner import scan_root, update_inventory
-from avarch.scheduler import scheduler_status
+from avarch.scheduler import enqueue_inventory, scheduler_status
 from avarch.serialization import canonical_json
 from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
 from avarch.tui.models.common import TuiError, UiRevision
@@ -289,6 +289,20 @@ class LocalTuiBackend:
             self._preview_workflow_sync,
             media_file_ids,
             profile_name,
+        )
+
+    async def enqueue_workflow(
+        self,
+        *,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+        priority: int,
+    ) -> EnqueueResult:
+        return await asyncio.to_thread(
+            self._enqueue_workflow_sync,
+            media_file_ids,
+            profile_name,
+            priority,
         )
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
@@ -602,6 +616,29 @@ class LocalTuiBackend:
             profile_effective_hash=profile_row.effective_hash,
             summary=_workflow_preview_summary(profile_row, preview_rows),
             rows=preview_rows,
+        )
+
+    def _enqueue_workflow_sync(
+        self,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+        priority: int,
+    ) -> EnqueueResult:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session, session.begin():
+            summary = enqueue_inventory(
+                session,
+                config=self.config,
+                profile_name=profile_name,
+                priority=priority,
+                now=_utc_now(),
+                media_file_ids=media_file_ids,
+            )
+        return EnqueueResult(
+            created=summary.created,
+            already_queued=summary.existing,
+            already_completed=0,
+            not_eligible=summary.missing_skipped,
         )
 
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:

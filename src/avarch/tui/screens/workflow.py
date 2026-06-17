@@ -7,11 +7,13 @@ from textual.app import ComposeResult
 from textual.message import Message
 from textual.widgets import Button, Static
 
+from avarch.tui.modals.confirm_action import ConfirmAction
 from avarch.tui.models.profiles import ProfileDetailSnapshot, ProfileRow, ProfileSnapshot
 from avarch.tui.models.workflow import (
     AnalysisSummary,
     CandidateSnapshot,
     DirectoryListing,
+    EnqueueResult,
     ScanSummary,
     WorkflowDraft,
     WorkflowPreview,
@@ -56,6 +58,17 @@ class WorkflowPreviewBackend(Protocol):
         media_file_ids: tuple[int, ...],
         profile_name: str,
     ) -> WorkflowPreview:
+        ...
+
+
+class WorkflowEnqueueBackend(Protocol):
+    async def enqueue_workflow(
+        self,
+        *,
+        media_file_ids: tuple[int, ...],
+        profile_name: str,
+        priority: int,
+    ) -> EnqueueResult:
         ...
 
 
@@ -611,3 +624,170 @@ class WorkflowPreviewView(Static):
         if self.error_message is not None:
             lines.extend(["", f"Error: {self.error_message}"])
         return "\n".join(lines)
+
+
+class WorkflowEnqueueView(Static):
+    class EnqueueCompleted(Message):
+        def __init__(self, result: EnqueueResult) -> None:
+            super().__init__()
+            self.result = result
+
+    class OpenQueueRequested(Message):
+        pass
+
+    DEFAULT_CSS = """
+    WorkflowEnqueueView {
+        height: 1fr;
+        padding: 1;
+    }
+
+    WorkflowEnqueueView Button {
+        margin-right: 1;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: WorkflowEnqueueBackend,
+        draft: WorkflowDraft,
+        id: str | None = None,
+    ) -> None:
+        super().__init__(id=id)
+        self.backend = backend
+        self.draft = draft
+        self.phase = "Confirmation required"
+        self.error_message: str | None = None
+        self.result: EnqueueResult | None = None
+        self.confirmation_text = ""
+        self.content_text = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="workflow-enqueue-status")
+        yield Static("", id="workflow-enqueue-confirmation")
+        yield Button("Confirm enqueue", id="workflow-enqueue-confirm")
+        yield Button("Cancel", id="workflow-enqueue-cancel")
+        yield Button("Open Queue", id="workflow-enqueue-open-queue")
+
+    async def on_mount(self) -> None:
+        self.prepare_confirmation()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "workflow-enqueue-confirm":
+            self.run_worker(self.confirm_enqueue(), exclusive=True)
+            event.stop()
+        elif event.button.id == "workflow-enqueue-cancel":
+            self.cancel()
+            event.stop()
+        elif event.button.id == "workflow-enqueue-open-queue":
+            self.open_queue()
+            event.stop()
+
+    async def on_confirm_action_confirmed(self, event: ConfirmAction.Confirmed) -> None:
+        await self.confirm_enqueue()
+        event.stop()
+
+    def on_confirm_action_canceled(self, event: ConfirmAction.Canceled) -> None:
+        self.cancel()
+        event.stop()
+
+    def prepare_confirmation(self) -> None:
+        if not self._preview_is_current():
+            self.phase = "Preview required"
+            self.error_message = "Create a current workflow preview before enqueue."
+            self.confirmation_text = ""
+            self._render_enqueue()
+            return
+        preview = self.draft.preview
+        assert preview is not None
+        job_count = len(preview.media_file_ids)
+        self.phase = "Ready to enqueue"
+        self.error_message = None
+        self.confirmation_text = "\n".join(
+            [
+                "Confirm enqueue",
+                "",
+                f"Jobs to create: {job_count}",
+                f"Profile: {preview.profile_name}",
+                f"Priority: {self.draft.priority}",
+                "Promotion remains manual after validation.",
+            ]
+        )
+        self._render_enqueue()
+
+    async def confirm_enqueue(self) -> None:
+        if not self._preview_is_current():
+            self.phase = "Preview stale"
+            self.error_message = "Review the current preview before enqueue."
+            self._render_enqueue()
+            return
+        preview = self.draft.preview
+        assert preview is not None
+        self.phase = "Enqueueing"
+        self.error_message = None
+        self._render_enqueue()
+        result = await self.backend.enqueue_workflow(
+            media_file_ids=preview.media_file_ids,
+            profile_name=preview.profile_name,
+            priority=self.draft.priority,
+        )
+        self.result = result
+        self.draft.roots = ()
+        self.draft.scan_summary = None
+        self.draft.selected_media_ids.clear()
+        self.draft.profile_name = None
+        self.draft.profile_effective_hash = None
+        self.draft.preview = None
+        self.draft.priority = 0
+        self.phase = "Enqueue complete"
+        self.error_message = None
+        self._render_enqueue()
+        self.post_message(self.EnqueueCompleted(result))
+
+    def cancel(self) -> None:
+        self.phase = "Canceled"
+        self.error_message = None
+        self._render_enqueue()
+
+    def open_queue(self) -> None:
+        self.post_message(self.OpenQueueRequested())
+
+    def _preview_is_current(self) -> bool:
+        preview = self.draft.preview
+        return (
+            preview is not None
+            and self.draft.profile_effective_hash is not None
+            and preview.profile_effective_hash == self.draft.profile_effective_hash
+        )
+
+    def _render_enqueue(self) -> None:
+        status = self._status_text()
+        self.content_text = "\n\n".join(
+            part for part in (status, self.confirmation_text, self._result_text()) if part
+        )
+        if self.is_mounted:
+            self.query_one("#workflow-enqueue-status", Static).update(status)
+            self.query_one("#workflow-enqueue-confirmation", Static).update(
+                "\n\n".join(
+                    part for part in (self.confirmation_text, self._result_text()) if part
+                )
+            )
+
+    def _status_text(self) -> str:
+        lines = ["New Workflow - Confirm enqueue", "", f"Phase: {self.phase}"]
+        if self.error_message is not None:
+            lines.extend(["", f"Error: {self.error_message}"])
+        return "\n".join(lines)
+
+    def _result_text(self) -> str:
+        if self.result is None:
+            return ""
+        return "\n".join(
+            [
+                "Enqueue result",
+                f"  Created: {self.result.created}",
+                f"  Already queued: {self.result.already_queued}",
+                f"  Not eligible: {self.result.not_eligible}",
+            ]
+        )
