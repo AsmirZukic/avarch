@@ -5,7 +5,12 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 
-from avarch.tui.models.workflow import DirectoryEntry, DirectoryListing, ScanSummary
+from avarch.tui.models.workflow import (
+    CandidateSnapshot,
+    DirectoryEntry,
+    DirectoryListing,
+    ScanSummary,
+)
 from avarch.tui.screens.workflow import WorkflowScanView
 
 
@@ -199,3 +204,7 @@ class FakeWorkflowScanBackend:
             missing=0,
             unchanged=0,
         )
+
+    async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        del roots
+        return CandidateSnapshot(rows=())

@@ -19,11 +19,14 @@ from avarch.models.db import (
     JobAttempt,
     JobEvent,
     MediaFile,
+    MediaFileStatus,
+    ProbeResult,
     PromotionRecord,
     ValidationResult,
 )
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
+from avarch.probe import ProbeError, parse_normalized_probe_json
 from avarch.profiles.registry import ProfileRegistry, ProfileRegistryError
 from avarch.scanner import scan_root, update_inventory
 from avarch.scheduler import scheduler_status
@@ -63,7 +66,9 @@ from avarch.tui.models.queue import (
 )
 from avarch.tui.models.workflow import (
     AnalysisSummary,
+    CandidateRow,
     CandidateSnapshot,
+    CandidateState,
     DirectoryEntry,
     DirectoryListing,
     EnqueueResult,
@@ -233,6 +238,9 @@ class LocalTuiBackend:
     async def get_job_detail(self, job_id: int) -> JobDetailSnapshot:
         return await asyncio.to_thread(self._get_job_detail_sync, job_id)
 
+    async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        return await asyncio.to_thread(self._list_workflow_candidates_sync, roots)
+
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
             ProfileRegistry.from_config(self.config)
@@ -380,6 +388,20 @@ class LocalTuiBackend:
             missing=missing,
             unchanged=unchanged,
         )
+
+    def _list_workflow_candidates_sync(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
+        engine = create_db_engine(self.database_url)
+        normalized_roots = tuple(root.resolve() for root in roots)
+        with Session(engine) as session:
+            media_files = list(
+                session.exec(select(MediaFile).order_by(col(MediaFile.path))).all()
+            )
+            rows = tuple(
+                _candidate_row(session, media_file)
+                for media_file in media_files
+                if _media_in_roots(media_file, normalized_roots)
+            )
+        return CandidateSnapshot(rows=rows)
 
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
@@ -768,3 +790,93 @@ def _promotion_snapshot(record: PromotionRecord | None) -> PromotionSnapshot | N
         final_path=record.final_path,
         updated_at=record.updated_at,
     )
+
+
+def _media_in_roots(media_file: MediaFile, roots: tuple[Path, ...]) -> bool:
+    if not roots:
+        return True
+    path = Path(media_file.path).resolve()
+    for root in roots:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _candidate_row(session: Session, media_file: MediaFile) -> CandidateRow:
+    media_file_id = _require_id(media_file.id, "media file")
+    status = _media_file_status_value(media_file.status)
+    if status == MediaFileStatus.MISSING.value:
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.EXCLUDED,
+            reason="File is marked missing in the inventory.",
+            eligible=False,
+        )
+
+    if media_file.latest_probe_id is None:
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.NEEDS_ANALYSIS,
+            reason="No current probe is available.",
+            eligible=True,
+        )
+
+    probe = session.get(ProbeResult, media_file.latest_probe_id)
+    if probe is None or probe.source_fs_fingerprint != media_file.fs_fingerprint:
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.NEEDS_ANALYSIS,
+            reason="Probe metadata is missing or stale.",
+            eligible=True,
+        )
+
+    try:
+        normalized_probe = parse_normalized_probe_json(probe.normalized_json)
+    except ProbeError:
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.BLOCKED,
+            reason="Stored probe metadata could not be read.",
+            eligible=False,
+        )
+
+    if not normalized_probe.video_streams:
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.BLOCKED,
+            reason="No video stream was found.",
+            eligible=False,
+        )
+
+    primary_video = min(normalized_probe.video_streams, key=lambda stream: stream.index)
+    codec = primary_video.codec.strip().lower() if primary_video.codec is not None else None
+    if codec == "av1":
+        return CandidateRow(
+            media_file_id=media_file_id,
+            path=media_file.path,
+            state=CandidateState.ALREADY_SATISFIED,
+            reason="Primary video is already AV1.",
+            eligible=False,
+        )
+
+    return CandidateRow(
+        media_file_id=media_file_id,
+        path=media_file.path,
+        state=CandidateState.READY,
+        reason=f"Video is {codec.upper()}." if codec else "Video codec is available.",
+        eligible=True,
+    )
+
+
+def _media_file_status_value(status: MediaFileStatus | str) -> str:
+    if isinstance(status, MediaFileStatus):
+        return status.value
+    return status

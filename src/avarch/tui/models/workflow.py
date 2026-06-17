@@ -85,6 +85,14 @@ class CandidateRow:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateFilters:
+    selected_only: bool = False
+    states: frozenset[CandidateState] | None = None
+    folder: Path | None = None
+    search_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateSnapshot:
     rows: tuple[CandidateRow, ...]
 
