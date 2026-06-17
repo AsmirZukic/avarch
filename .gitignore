@@ -7,7 +7,7 @@ avarch.toml
 .avarch/
 
 
-profiles/
+/profiles/
 
 .codex/
 .uv-cache/
