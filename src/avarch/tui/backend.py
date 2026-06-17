@@ -305,6 +305,20 @@ class LocalTuiBackend:
     async def get_job_detail(self, job_id: int) -> JobDetailSnapshot:
         return await asyncio.to_thread(self._get_job_detail_sync, job_id)
 
+    async def get_job_log_tail(
+        self,
+        *,
+        job_id: int,
+        attempt_number: int | None,
+        tail_bytes: int,
+    ) -> JobLogSnapshot:
+        return await asyncio.to_thread(
+            self._get_job_log_tail_sync,
+            job_id,
+            attempt_number,
+            tail_bytes,
+        )
+
     async def list_workflow_candidates(self, roots: tuple[Path, ...]) -> CandidateSnapshot:
         return await asyncio.to_thread(self._list_workflow_candidates_sync, roots)
 
@@ -970,6 +984,39 @@ class LocalTuiBackend:
                 latest_promotion=promotion,
             )
 
+    def _get_job_log_tail_sync(
+        self,
+        job_id: int,
+        attempt_number: int | None,
+        tail_bytes: int,
+    ) -> JobLogSnapshot:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session:
+            statement = select(JobAttempt).where(JobAttempt.job_id == job_id)
+            if attempt_number is not None:
+                statement = statement.where(JobAttempt.attempt_number == attempt_number)
+            attempt = session.exec(
+                statement.order_by(col(JobAttempt.attempt_number).desc())
+            ).first()
+            if attempt is None:
+                raise TuiBackendError(f"Job attempt not found for job: {job_id}")
+            stdout_tail, stdout_truncated = _read_log_tail(
+                attempt.stdout_log,
+                tail_bytes=tail_bytes,
+            )
+            stderr_tail, stderr_truncated = _read_log_tail(
+                attempt.stderr_log,
+                tail_bytes=tail_bytes,
+            )
+            return JobLogSnapshot(
+                job_id=job_id,
+                attempt_number=attempt.attempt_number,
+                tail_bytes=tail_bytes,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+                truncated=stdout_truncated or stderr_truncated,
+            )
+
 
 class StaticBootstrapBackend:
     def __init__(self, status: BootstrapStatus) -> None:
@@ -1455,6 +1502,22 @@ def _queue_control_kwargs(filters: QueueClearFilters) -> QueueControlKwargs:
         "profile": filters.profile_name,
         "all_jobs": False,
     }
+
+
+def _read_log_tail(log_path: str | None, *, tail_bytes: int) -> tuple[str | None, bool]:
+    if log_path is None:
+        return None, False
+    path = Path(log_path)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return f"Log file missing: {path}", False
+    except OSError as exc:
+        return f"Log file unreadable: {path}: {exc}", False
+    truncated = len(data) > tail_bytes
+    if truncated:
+        data = data[-tail_bytes:]
+    return data.decode("utf-8", errors="replace"), truncated
 
 
 def _attempt_snapshot(attempt: JobAttempt) -> JobAttemptSnapshot:

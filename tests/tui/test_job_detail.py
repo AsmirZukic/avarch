@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from avarch.tui.models.common import UiRevision
-from avarch.tui.models.jobs import JobDetailSnapshot, JobPlanSnapshot
+from avarch.tui.models.jobs import JobAttemptSnapshot, JobDetailSnapshot, JobPlanSnapshot
 from avarch.tui.screens.job_detail import JobDetailView
 
 
@@ -93,6 +93,38 @@ def test_plan_artifact_view_is_read_only() -> None:
     asyncio.run(run())
 
 
+def test_attempts_are_ordered() -> None:
+    async def run() -> None:
+        view = JobDetailView(_snapshot(attempts=(_attempt(2), _attempt(1), _attempt(3))))
+        view.select_tab("attempts")
+
+        text = view.content_text
+        assert text.index("Attempt 1") < text.index("Attempt 2") < text.index("Attempt 3")
+
+    asyncio.run(run())
+
+
+def test_attempt_selection_updates_details() -> None:
+    async def run() -> None:
+        view = JobDetailView(
+            _snapshot(
+                attempts=(
+                    _attempt(1, stage="probe", status="completed"),
+                    _attempt(2, stage="encode", status="running", runner_id="runner-2"),
+                )
+            )
+        )
+
+        view.select_attempt(2)
+
+        assert view.selected_attempt_number == 2
+        assert "Selected attempt: 2" in view.content_text
+        assert "Stage: encode" in view.content_text
+        assert "Runner: runner-2" in view.content_text
+
+    asyncio.run(run())
+
+
 def _snapshot(
     *,
     status: str = "PENDING",
@@ -103,6 +135,7 @@ def _snapshot(
     control_request: str | None = None,
     control_reason: str | None = None,
     plan: JobPlanSnapshot | None = None,
+    attempts: tuple[JobAttemptSnapshot, ...] = (),
 ) -> JobDetailSnapshot:
     now = datetime.now(UTC)
     return JobDetailSnapshot(
@@ -122,7 +155,7 @@ def _snapshot(
         profile_name=profile_name,
         profile_hash=profile_hash,
         priority=priority,
-        attempts_count=2,
+        attempts_count=len(attempts),
         queue_key="queue-key",
         source_fs_fingerprint="source-fingerprint",
         probe_hash="probe-hash",
@@ -138,10 +171,35 @@ def _snapshot(
         updated_at=now,
         started_at=None,
         finished_at=None,
-        attempts=(),
+        attempts=attempts,
         events=(),
         latest_validation=None,
         latest_promotion=None,
+    )
+
+
+def _attempt(
+    attempt_number: int,
+    *,
+    stage: str = "encode",
+    status: str = "completed",
+    runner_id: str = "runner",
+) -> JobAttemptSnapshot:
+    now = datetime.now(UTC)
+    return JobAttemptSnapshot(
+        attempt_id=attempt_number,
+        attempt_number=attempt_number,
+        stage=stage,
+        resource_class="cheap",
+        status=status,
+        runner_id=runner_id,
+        started_at=now,
+        finished_at=None if status == "running" else now,
+        stdout_log=f"/logs/{attempt_number}.stdout.log",
+        stderr_log=f"/logs/{attempt_number}.stderr.log",
+        output_path=None,
+        error_type=None,
+        error_message=None,
     )
 
 
