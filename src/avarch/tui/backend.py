@@ -30,6 +30,7 @@ from avarch.models.plan import TranscodePlan
 from avarch.models.probe import NormalizedProbe
 from avarch.models.promotion import PromotionMode
 from avarch.models.scheduler import JobStage, JobStatus
+from avarch.models.validation import ValidationReport
 from avarch.planner import PlanningError, build_plan, build_profile_hash, load_planning_context
 from avarch.probe import (
     ProbeError,
@@ -79,6 +80,7 @@ from avarch.tui.models.jobs import (
     JobLogSnapshot,
     JobPlanSnapshot,
     PromotionSnapshot,
+    ValidationCheckSnapshot,
     ValidationSnapshot,
 )
 from avarch.tui.models.library import LibraryProbeState, LibraryRow, LibrarySnapshot
@@ -1552,6 +1554,7 @@ def _event_snapshot(event: JobEvent) -> JobEventSnapshot:
 def _validation_snapshot(result: ValidationResult | None) -> ValidationSnapshot | None:
     if result is None:
         return None
+    checks, warnings = _validation_report_details(result.details_json)
     return ValidationSnapshot(
         validation_id=_require_id(result.id, "validation"),
         passed=result.passed,
@@ -1559,7 +1562,44 @@ def _validation_snapshot(result: ValidationResult | None) -> ValidationSnapshot 
         plan_hash=result.plan_hash,
         policy_hash=result.policy_hash,
         created_at=result.created_at,
+        checks=checks,
+        warnings=warnings,
     )
+
+
+def _validation_report_details(
+    details_json: str,
+) -> tuple[tuple[ValidationCheckSnapshot, ...], tuple[str, ...]]:
+    try:
+        report = ValidationReport.model_validate_json(details_json)
+    except ValueError:
+        return (), ()
+    return (
+        tuple(
+            ValidationCheckSnapshot(
+                name=check.name,
+                status=_value(check.status),
+                required=check.required,
+                expected=_validation_value_text(check.expected),
+                observed=_validation_value_text(check.observed),
+                message=check.message,
+            )
+            for check in report.checks
+        ),
+        tuple(report.warnings),
+    )
+
+
+def _validation_value_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    return canonical_json(value)
 
 
 def _promotion_snapshot(record: PromotionRecord | None) -> PromotionSnapshot | None:

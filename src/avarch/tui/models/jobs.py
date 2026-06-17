@@ -34,6 +34,16 @@ class JobEventSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ValidationCheckSnapshot:
+    name: str
+    status: str
+    required: bool
+    expected: str | None
+    observed: str | None
+    message: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ValidationSnapshot:
     validation_id: int
     passed: bool
@@ -41,6 +51,8 @@ class ValidationSnapshot:
     plan_hash: str
     policy_hash: str
     created_at: datetime
+    checks: tuple[ValidationCheckSnapshot, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

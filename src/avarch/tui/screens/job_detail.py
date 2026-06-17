@@ -4,10 +4,11 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 
 from avarch.tui.models.jobs import JobAttemptSnapshot, JobDetailSnapshot, JobPlanSnapshot
+from avarch.tui.widgets.validation_checks import validation_review_text
 
 
 class JobDetailView(Static):
-    VALID_TABS = {"overview", "plan", "artifact", "attempts"}
+    VALID_TABS = {"overview", "plan", "artifact", "attempts", "validation"}
 
     def __init__(self, snapshot: JobDetailSnapshot, *, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -68,6 +69,8 @@ def job_detail_text(
             snapshot.attempts,
             selected_attempt_number=selected_attempt_number,
         )
+    if tab == "validation":
+        return job_validation_text(snapshot)
     return job_overview_text(snapshot)
 
 
@@ -187,6 +190,17 @@ def job_attempts_text(
         )
         if selected.error_message is not None:
             lines.append(f"Error: {selected.error_message}")
+    return "\n".join(lines)
+
+
+def job_validation_text(snapshot: JobDetailSnapshot) -> str:
+    lines = [validation_review_text(snapshot.latest_validation)]
+    if snapshot.latest_validation is None:
+        return lines[0]
+    if snapshot.latest_validation.passed:
+        lines.extend(["", "Next action: review promotion"])
+    else:
+        lines.extend(["", "Next action: retry workflow"])
     return "\n".join(lines)
 
 
