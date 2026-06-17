@@ -70,7 +70,10 @@ class ProfileRegistry:
 
     @classmethod
     def from_config(cls, config: AppConfig) -> ProfileRegistry:
-        return cls.load(search_paths=config.profile_registry.search_paths)
+        try:
+            return cls.load(search_paths=config.profile_registry.search_paths)
+        except ProfileRegistryError:
+            return cls(_load_packaged_profiles())
 
     @classmethod
     def load(cls, *, search_paths: list[Path]) -> ProfileRegistry:
@@ -124,7 +127,7 @@ def seed_packaged_profiles(search_path: Path, *, overwrite: bool = False) -> tup
 
 
 def packaged_profile_names() -> tuple[str, ...]:
-    return tuple(resource.stem for resource in _packaged_profile_resources())
+    return tuple(Path(resource.name).stem for resource in _packaged_profile_resources())
 
 
 def _load_user_profiles(search_path: Path) -> list[ResolvedProfile]:
@@ -145,6 +148,21 @@ def _load_user_profiles(search_path: Path) -> list[ResolvedProfile]:
             )
         )
     return profiles
+
+
+def _load_packaged_profiles() -> tuple[ResolvedProfile, ...]:
+    profiles: list[ResolvedProfile] = []
+    for resource in _packaged_profile_resources():
+        data = tomllib.loads(resource.read_text(encoding="utf-8"))
+        profiles.append(
+            _resolved_profile(
+                data,
+                origin=ProfileOrigin.BUILTIN,
+                source=f"packaged:{resource.name}",
+                base_dir=None,
+            )
+        )
+    return tuple(profiles)
 
 
 def _packaged_profile_resources() -> tuple[Traversable, ...]:

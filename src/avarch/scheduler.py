@@ -1978,7 +1978,7 @@ def _require_profile(config: AppConfig, profile_name: str) -> ResolvedProfile:
     try:
         return ProfileRegistry.from_config(config).get(profile_name)
     except UnknownProfileError as exc:
-        raise JobPreparationError(f"Unknown profile: {profile_name}")
+        raise JobPreparationError(f"Unknown profile: {profile_name}") from exc
     except Exception as exc:
         raise JobPreparationError(str(exc)) from exc
 

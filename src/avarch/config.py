@@ -102,25 +102,6 @@ def _iterable_values(value: object) -> list[object]:
     return list(cast(Iterable[object], value))
 
 
-def _normalized_text_list(value: object) -> list[str]:
-    if value is None:
-        return []
-
-    values = [value] if isinstance(value, str) else _iterable_values(value)
-    return [str(item).strip().lower() for item in values]
-
-
-def _dedupe_preserving_order(values: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -1826,7 +1826,7 @@ def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None
 
 
 def _echo_attempt_log_status(attempt: JobAttempt, *, indent: str) -> None:
-    statuses = []
+    statuses: list[str] = []
     for label, log_path in (("stdout", attempt.stdout_log), ("stderr", attempt.stderr_log)):
         if log_path is None:
             statuses.append(f"{label}: -")
