@@ -13,6 +13,15 @@ class CandidateState(StrEnum):
     EXCLUDED = "excluded"
 
 
+class ScanRootState(StrEnum):
+    VALID = "valid root"
+    DUPLICATE = "duplicate root"
+    NESTED_DUPLICATE = "nested duplicate"
+    MISSING = "missing path"
+    UNREADABLE = "unreadable path"
+    UNSUPPORTED = "unsupported path"
+
+
 @dataclass(frozen=True, slots=True)
 class DirectoryEntry:
     path: Path
@@ -26,6 +35,13 @@ class DirectoryListing:
     path: Path
     parent: Path | None
     entries: tuple[DirectoryEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScanRootValidation:
+    path: Path
+    state: ScanRootState
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
