@@ -12,7 +12,16 @@ from avarch.tui.backend import (
 from avarch.tui.modals.priority import PriorityPrompt
 from avarch.tui.models.common import UiRevision
 from avarch.tui.models.dashboard import QueueTotals, SchedulerSummary
-from avarch.tui.models.queue import QueueFilters, QueueJobRow, QueueSnapshot
+from avarch.tui.models.queue import (
+    QueueClearFilters,
+    QueueClearPreview,
+    QueueClearResult,
+    QueueFilters,
+    QueueJobRow,
+    QueueRetryPreview,
+    QueueRetryResult,
+    QueueSnapshot,
+)
 from avarch.tui.screens.queue import QueueView
 
 
@@ -156,6 +165,35 @@ class FakeJobActionBackend:
         if self.action_error is not None:
             raise self.action_error
         return JobActionResult(message=f"{request.action} applied", changed=len(request.job_ids))
+
+    async def preview_queue_clear(self, filters: QueueClearFilters) -> QueueClearPreview:
+        return QueueClearPreview(
+            filters=filters,
+            matched=0,
+            cancel_immediately=0,
+            request_interruption=0,
+            active_promotions_excluded=0,
+            completed_excluded=0,
+        )
+
+    async def confirm_queue_clear(self, preview: QueueClearPreview) -> QueueClearResult:
+        return QueueClearResult(changed=0, operation_id="test")
+
+    async def preview_queue_retry(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        return QueueRetryPreview(
+            filters=filters,
+            matched=0,
+            retryable=0,
+            requires_requeue=0,
+            reset_to_probe=0,
+            reset_to_plan=0,
+            reset_to_encode=0,
+            reset_to_validate=0,
+            return_to_promote=0,
+        )
+
+    async def confirm_queue_retry(self, preview: QueueRetryPreview) -> QueueRetryResult:
+        return QueueRetryResult(changed=0)
 
 
 def _view_with_row(row: QueueJobRow) -> QueueView:

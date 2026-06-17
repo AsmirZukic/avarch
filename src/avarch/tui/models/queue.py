@@ -55,14 +55,56 @@ class QueueClearFilters:
 
 @dataclass(frozen=True, slots=True)
 class QueueClearPreview:
+    filters: QueueClearFilters
     matched: int
     cancel_immediately: int
     request_interruption: int
     active_promotions_excluded: int
     completed_excluded: int
 
+    def with_filters(self, filters: QueueClearFilters) -> QueueClearPreview:
+        return QueueClearPreview(
+            filters=filters,
+            matched=self.matched,
+            cancel_immediately=self.cancel_immediately,
+            request_interruption=self.request_interruption,
+            active_promotions_excluded=self.active_promotions_excluded,
+            completed_excluded=self.completed_excluded,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class QueueClearResult:
     changed: int
     operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRetryPreview:
+    filters: QueueClearFilters
+    matched: int
+    retryable: int
+    requires_requeue: int
+    reset_to_probe: int
+    reset_to_plan: int
+    reset_to_encode: int
+    reset_to_validate: int
+    return_to_promote: int
+
+    def with_filters(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        return QueueRetryPreview(
+            filters=filters,
+            matched=self.matched,
+            retryable=self.retryable,
+            requires_requeue=self.requires_requeue,
+            reset_to_probe=self.reset_to_probe,
+            reset_to_plan=self.reset_to_plan,
+            reset_to_encode=self.reset_to_encode,
+            reset_to_validate=self.reset_to_validate,
+            return_to_promote=self.return_to_promote,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRetryResult:
+    changed: int

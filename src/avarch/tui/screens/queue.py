@@ -13,9 +13,19 @@ from avarch.tui.backend import (
     SchedulerControlResult,
 )
 from avarch.tui.modals.priority import PriorityPrompt
+from avarch.tui.modals.queue_clear import QueueBulkActionPrompt
 from avarch.tui.modals.reason import ReasonPrompt
 from avarch.tui.models.dashboard import SchedulerSummary
-from avarch.tui.models.queue import QueueFilters, QueueJobRow, QueueSnapshot
+from avarch.tui.models.queue import (
+    QueueClearFilters,
+    QueueClearPreview,
+    QueueClearResult,
+    QueueFilters,
+    QueueJobRow,
+    QueueRetryPreview,
+    QueueRetryResult,
+    QueueSnapshot,
+)
 from avarch.tui.widgets.queue_table import QueueTable
 from avarch.tui.widgets.scheduler_panel import SchedulerPanel
 
@@ -39,6 +49,18 @@ class QueueBackend(Protocol):
         ...
 
     async def perform_job_action(self, request: JobActionRequest) -> JobActionResult:
+        ...
+
+    async def preview_queue_clear(self, filters: QueueClearFilters) -> QueueClearPreview:
+        ...
+
+    async def confirm_queue_clear(self, preview: QueueClearPreview) -> QueueClearResult:
+        ...
+
+    async def preview_queue_retry(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        ...
+
+    async def confirm_queue_retry(self, preview: QueueRetryPreview) -> QueueRetryResult:
         ...
 
 
@@ -81,6 +103,7 @@ class QueueView(Static):
         self.phase = "Queue"
         self.error_message: str | None = None
         self.action_prompt: ReasonPrompt | PriorityPrompt | None = None
+        self.bulk_prompt: QueueBulkActionPrompt | None = None
         self.content_text = ""
 
     def compose(self) -> ComposeResult:
@@ -93,6 +116,8 @@ class QueueView(Static):
         yield Button("Cancel", id="queue-cancel-selected")
         yield Button("Retry", id="queue-retry-selected")
         yield Button("Priority", id="queue-priority-selected")
+        yield Button("Bulk cancel", id="queue-bulk-cancel")
+        yield Button("Bulk retry", id="queue-bulk-retry")
 
     async def on_mount(self) -> None:
         self._render_status()
@@ -146,6 +171,12 @@ class QueueView(Static):
         elif event.button.id == "queue-priority-selected":
             self.prepare_job_action("priority")
             event.stop()
+        elif event.button.id == "queue-bulk-cancel":
+            await self.prepare_bulk_clear()
+            event.stop()
+        elif event.button.id == "queue-bulk-retry":
+            await self.prepare_bulk_retry()
+            event.stop()
         elif event.button.id == "queue-release-selected":
             await self.perform_selected_job_action("release")
             event.stop()
@@ -161,6 +192,18 @@ class QueueView(Static):
         await self.perform_selected_job_action("priority", priority=event.priority)
         event.stop()
 
+    async def on_queue_bulk_action_prompt_confirmed(
+        self,
+        event: QueueBulkActionPrompt.Confirmed,
+    ) -> None:
+        if self.bulk_prompt is None:
+            return
+        if self.bulk_prompt.action == "cancel":
+            await self.confirm_bulk_clear(confirmed=event.confirmed)
+        elif self.bulk_prompt.action == "retry":
+            await self.confirm_bulk_retry(confirmed=event.confirmed)
+        event.stop()
+
     def open_selected_job(self) -> None:
         job_id = self.table.first_selected_job_id()
         if job_id is None:
@@ -169,6 +212,94 @@ class QueueView(Static):
             self._render_status()
             return
         self.post_message(self.JobOpenRequested(job_id))
+
+    async def prepare_bulk_clear(
+        self,
+        *,
+        include_running_scheduler_jobs: bool = False,
+    ) -> QueueBulkActionPrompt | None:
+        filters = self._bulk_filters(
+            include_running_scheduler_jobs=include_running_scheduler_jobs
+        )
+        if filters is None:
+            self._render_status()
+            return None
+        try:
+            preview = await self.backend.preview_queue_clear(filters)
+        except Exception as exc:
+            await self._refresh_after_action_failure(str(exc) or exc.__class__.__name__)
+            return None
+        self.phase = "Bulk cancel preview"
+        self.error_message = None
+        self.bulk_prompt = QueueBulkActionPrompt(action="cancel", preview=preview)
+        self._render_status()
+        return self.bulk_prompt
+
+    async def confirm_bulk_clear(
+        self,
+        *,
+        confirmed: bool = False,
+    ) -> QueueClearResult | None:
+        preview = self._bulk_preview("cancel")
+        if not isinstance(preview, QueueClearPreview):
+            self.phase = "Bulk cancel preview required"
+            self.error_message = "Preview the bulk cancellation before confirming."
+            self._render_status()
+            return None
+        if not confirmed:
+            self.phase = "Second confirmation required"
+            if self.bulk_prompt is not None:
+                self.bulk_prompt.require_second_confirmation()
+            self._render_status()
+            return None
+        result = await self.backend.confirm_queue_clear(preview)
+        await self._reload_queue_snapshot()
+        self.phase = f"Bulk cancel changed {result.changed} job(s)."
+        self.error_message = None
+        self.bulk_prompt = None
+        self._render_status()
+        return result
+
+    async def prepare_bulk_retry(self) -> QueueBulkActionPrompt | None:
+        filters = self._bulk_filters(include_running_scheduler_jobs=False)
+        if filters is None:
+            self._render_status()
+            return None
+        try:
+            preview = await self.backend.preview_queue_retry(filters)
+        except Exception as exc:
+            await self._refresh_after_action_failure(str(exc) or exc.__class__.__name__)
+            return None
+        self.phase = "Bulk retry preview"
+        self.error_message = None
+        self.bulk_prompt = QueueBulkActionPrompt(action="retry", preview=preview)
+        self._render_status()
+        return self.bulk_prompt
+
+    async def confirm_bulk_retry(
+        self,
+        *,
+        confirmed: bool = False,
+    ) -> QueueRetryResult | None:
+        preview = self._bulk_preview("retry")
+        if not isinstance(preview, QueueRetryPreview):
+            self.phase = "Bulk retry preview required"
+            self.error_message = "Preview the bulk retry before confirming."
+            self._render_status()
+            return None
+        if not confirmed:
+            self.phase = "Second confirmation required"
+            if self.bulk_prompt is not None:
+                self.bulk_prompt.require_second_confirmation()
+            self._render_status()
+            return None
+        result = await self.backend.confirm_queue_retry(preview)
+        await self._reload_queue_snapshot()
+        self.phase = f"Bulk retry changed {result.changed} job(s)."
+        self.error_message = None
+        self.bulk_prompt = None
+        self._render_status()
+        return result
 
     def selected_job_row(self) -> QueueJobRow | None:
         job_id = self.table.first_selected_job_id()
@@ -258,6 +389,7 @@ class QueueView(Static):
         self.phase = result.message
         self.error_message = None
         self.action_prompt = None
+        self.bulk_prompt = None
         self._render_status()
         return result
 
@@ -279,6 +411,7 @@ class QueueView(Static):
             self.phase = "Job action failed"
             self.error_message = message
             self.action_prompt = None
+            self.bulk_prompt = None
             self._render_status()
 
     def _selection_supports_action(self, action: str) -> bool:
@@ -291,6 +424,31 @@ class QueueView(Static):
             if row.job_id == job_id:
                 return row
         return None
+
+    def _bulk_filters(
+        self,
+        *,
+        include_running_scheduler_jobs: bool,
+    ) -> QueueClearFilters | None:
+        selected_ids = frozenset(self.selected_job_ids())
+        filters = queue_clear_filters_from_selection(
+            self.filters,
+            selected_job_ids=selected_ids,
+            include_running_scheduler_jobs=include_running_scheduler_jobs,
+        )
+        if not queue_clear_filters_has_scope(filters):
+            self.phase = "Bulk scope required"
+            self.error_message = (
+                "Select jobs or apply a status, stage, or profile filter first."
+            )
+            self.bulk_prompt = None
+            return None
+        return filters
+
+    def _bulk_preview(self, action: str) -> QueueClearPreview | QueueRetryPreview | None:
+        if self.bulk_prompt is None or self.bulk_prompt.action != action:
+            return None
+        return self.bulk_prompt.preview
 
     def _status_text(self) -> str:
         actions = available_job_actions_text(self.selected_job_row())
@@ -308,6 +466,8 @@ class QueueView(Static):
             lines.extend(["", help_text])
         if self.action_prompt is not None:
             lines.extend(["", self.action_prompt.content_text])
+        if self.bulk_prompt is not None:
+            lines.extend(["", self.bulk_prompt.content_text])
         filter_text = _filters_text(self.filters)
         if filter_text:
             lines.extend(["", filter_text])
@@ -384,3 +544,27 @@ def job_action_help(row: QueueJobRow | None, action: str) -> str:
 
 def unavailable_action_message(action: str) -> str:
     return f"{JOB_ACTION_LABELS.get(action, action)} is not available for the selection."
+
+
+def queue_clear_filters_from_selection(
+    filters: QueueFilters,
+    *,
+    selected_job_ids: frozenset[int],
+    include_running_scheduler_jobs: bool,
+) -> QueueClearFilters:
+    return QueueClearFilters(
+        statuses=filters.statuses,
+        stages=filters.stages,
+        profile_name=filters.profile_name,
+        selected_job_ids=selected_job_ids,
+        include_running_scheduler_jobs=include_running_scheduler_jobs,
+    )
+
+
+def queue_clear_filters_has_scope(filters: QueueClearFilters) -> bool:
+    return bool(
+        filters.selected_job_ids
+        or filters.statuses is not None
+        or filters.stages is not None
+        or filters.profile_name is not None
+    )

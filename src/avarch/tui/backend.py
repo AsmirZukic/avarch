@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypedDict, cast
 
 from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
@@ -49,6 +49,7 @@ from avarch.scheduler import (
     JobControlError,
     SchedulerControlError,
     cancel_job,
+    clear_queue,
     drain_scheduler,
     enqueue_inventory,
     hold_job,
@@ -56,6 +57,7 @@ from avarch.scheduler import (
     release_job,
     resume_scheduler,
     retry_job,
+    retry_queue,
     scheduler_status,
     stop_scheduler,
     update_job_priority,
@@ -95,6 +97,8 @@ from avarch.tui.models.queue import (
     QueueClearResult,
     QueueFilters,
     QueueJobRow,
+    QueueRetryPreview,
+    QueueRetryResult,
     QueueSnapshot,
 )
 from avarch.tui.models.workflow import (
@@ -117,6 +121,14 @@ ProbeRunner = Callable[[Path], Mapping[str, Any]]
 
 class TuiBackendError(RuntimeError):
     pass
+
+
+class QueueControlKwargs(TypedDict):
+    job_ids: set[int] | None
+    statuses: set[JobStatus] | None
+    stages: set[JobStage] | None
+    profile: str | None
+    all_jobs: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +226,12 @@ class TuiBackend(Protocol):
         ...
 
     async def confirm_queue_clear(self, preview: QueueClearPreview) -> QueueClearResult:
+        ...
+
+    async def preview_queue_retry(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        ...
+
+    async def confirm_queue_retry(self, preview: QueueRetryPreview) -> QueueRetryResult:
         ...
 
     async def list_profiles(self) -> ProfileSnapshot:
@@ -335,6 +353,18 @@ class LocalTuiBackend:
 
     async def perform_job_action(self, request: JobActionRequest) -> JobActionResult:
         return await asyncio.to_thread(self._perform_job_action_sync, request)
+
+    async def preview_queue_clear(self, filters: QueueClearFilters) -> QueueClearPreview:
+        return await asyncio.to_thread(self._preview_queue_clear_sync, filters)
+
+    async def confirm_queue_clear(self, preview: QueueClearPreview) -> QueueClearResult:
+        return await asyncio.to_thread(self._confirm_queue_clear_sync, preview)
+
+    async def preview_queue_retry(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        return await asyncio.to_thread(self._preview_queue_retry_sync, filters)
+
+    async def confirm_queue_retry(self, preview: QueueRetryPreview) -> QueueRetryResult:
+        return await asyncio.to_thread(self._confirm_queue_retry_sync, preview)
 
     def _get_bootstrap_status_sync(self) -> BootstrapStatus:
         try:
@@ -764,6 +794,76 @@ class LocalTuiBackend:
             message=_job_action_result_message(action, changed),
             changed=changed,
         )
+
+    def _preview_queue_clear_sync(self, filters: QueueClearFilters) -> QueueClearPreview:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session:
+            summary = clear_queue(
+                session,
+                actor="tui",
+                now=_utc_now(),
+                **_queue_control_kwargs(filters),
+                cancel_running=filters.include_running_scheduler_jobs,
+                confirm=False,
+            )
+        return QueueClearPreview(
+            filters=filters,
+            matched=summary.matched,
+            cancel_immediately=summary.immediate_cancel,
+            request_interruption=summary.running_requests,
+            active_promotions_excluded=summary.promotion_excluded,
+            completed_excluded=summary.completed_excluded,
+        )
+
+    def _confirm_queue_clear_sync(self, preview: QueueClearPreview) -> QueueClearResult:
+        filters = preview.filters
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session, session.begin():
+            summary = clear_queue(
+                session,
+                actor="tui",
+                now=_utc_now(),
+                **_queue_control_kwargs(filters),
+                cancel_running=filters.include_running_scheduler_jobs,
+                confirm=True,
+            )
+        return QueueClearResult(changed=summary.changed, operation_id=summary.operation_id)
+
+    def _preview_queue_retry_sync(self, filters: QueueClearFilters) -> QueueRetryPreview:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session:
+            summary = retry_queue(
+                session,
+                config=self.config,
+                actor="tui",
+                now=_utc_now(),
+                **_queue_control_kwargs(filters),
+                confirm=False,
+            )
+        return QueueRetryPreview(
+            filters=filters,
+            matched=summary.matched,
+            retryable=summary.retryable,
+            requires_requeue=summary.requires_requeue,
+            reset_to_probe=summary.reset_to_probe,
+            reset_to_plan=summary.reset_to_plan,
+            reset_to_encode=summary.reset_to_encode,
+            reset_to_validate=summary.reset_to_validate,
+            return_to_promote=summary.return_to_promote,
+        )
+
+    def _confirm_queue_retry_sync(self, preview: QueueRetryPreview) -> QueueRetryResult:
+        engine = create_db_engine(self.database_url)
+        with Session(engine) as session, session.begin():
+            summary = retry_queue(
+                session,
+                config=self.config,
+                actor="tui",
+                now=_utc_now(),
+                **_queue_control_kwargs(preview.filters),
+                confirm=True,
+            )
+        return QueueRetryResult(changed=summary.retryable)
 
     def _get_queue_snapshot_sync(self, filters: QueueFilters) -> QueueSnapshot:
         engine = create_db_engine(self.database_url)
@@ -1289,6 +1389,16 @@ def _job_action_result_message(action: str, changed: int) -> str:
     if action == "priority":
         return f"Priority updated for {changed} job(s)."
     return f"Updated {changed} job(s)."
+
+
+def _queue_control_kwargs(filters: QueueClearFilters) -> QueueControlKwargs:
+    return {
+        "job_ids": set(filters.selected_job_ids) or None,
+        "statuses": set(filters.statuses) if filters.statuses is not None else None,
+        "stages": set(filters.stages) if filters.stages is not None else None,
+        "profile": filters.profile_name,
+        "all_jobs": False,
+    }
 
 
 def _attempt_snapshot(attempt: JobAttempt) -> JobAttemptSnapshot:
