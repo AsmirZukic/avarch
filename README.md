@@ -48,8 +48,8 @@ uv run avarch scan --config ./avarch.toml
 
 ```sh
 make bootstrap      # full local setup/check
-make run            # open the TUI
 make doctor         # verify config and database
+make scan           # scan configured media roots
 make test           # run tests
 make check          # lint, typecheck, and test
 ```
@@ -57,7 +57,6 @@ make check          # lint, typecheck, and test
 Equivalent direct commands:
 
 ```sh
-uv run avarch tui
 uv run avarch doctor
 uv run avarch scan /path/to/media
 uv run avarch files

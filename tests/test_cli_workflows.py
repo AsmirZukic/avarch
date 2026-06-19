@@ -189,50 +189,6 @@ def test_probe_inspect_and_plan_workflow_reports_user_errors(
     assert "Run avarch probe for this file again." in stale_plan.output
 
 
-def test_tui_workflow_can_be_opened_before_and_after_init(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[dict[str, object]] = []
-
-    class FakeTuiApp:
-        def __init__(
-            self,
-            *,
-            backend: object,
-            initialized: bool,
-            database_url: str,
-            exit_after_mount: bool,
-        ) -> None:
-            calls.append(
-                {
-                    "backend": backend,
-                    "initialized": initialized,
-                    "database_url": database_url,
-                    "exit_after_mount": exit_after_mount,
-                }
-            )
-
-        def run(self, *, headless: bool) -> None:
-            calls[-1]["headless"] = headless
-
-    monkeypatch.setattr("avarch.cli.AvarchTuiApp", FakeTuiApp)
-    config_path = tmp_path / "avarch.toml"
-
-    before_init = runner.invoke(app, ["tui", "--config", str(config_path)])
-    init_result = runner.invoke(app, ["init", "--config", str(config_path), "--force"])
-    after_init = runner.invoke(app, ["tui", "--config", str(config_path)])
-
-    assert before_init.exit_code == 0
-    assert init_result.exit_code == 0
-    assert after_init.exit_code == 0
-    assert len(calls) == 2
-    assert all(call["backend"] is not None for call in calls)
-    assert all(call["initialized"] is True for call in calls)
-    assert all(call["exit_after_mount"] is True for call in calls)
-    assert all(call["headless"] is True for call in calls)
-
-
 def _fake_ffprobe(_path: Path) -> dict[str, Any]:
     return sdr_probe_payload()
 

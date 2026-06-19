@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,10 +103,6 @@ from avarch.scheduler import (
     stop_scheduler,
     update_job_priority,
 )
-from avarch.tui.app import AvarchTuiApp
-from avarch.tui.backend import LocalTuiBackend, StaticBootstrapBackend
-from avarch.tui.models.bootstrap import BootstrapState, BootstrapStatus
-from avarch.tui.models.common import TuiError
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
@@ -1342,30 +1337,6 @@ def plan_file(
     _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
 
 
-@app.command()
-def tui(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
-    try:
-        app_config = _load_and_configure(config)
-    except Exception as exc:
-        configure_logging()
-        database_url = "unknown"
-        backend = StaticBootstrapBackend(_configuration_bootstrap_status(config, exc))
-        initialized = False
-    else:
-        database_url = resolve_database_url(app_config, config)
-        data_dir = resolve_data_dir(app_config, config)
-        backend = LocalTuiBackend(config=app_config, config_path=config)
-        initialized = data_dir.exists()
-    log.info("tui_started")
-    AvarchTuiApp(
-        backend=backend,
-        initialized=initialized,
-        database_url=database_url,
-        exit_after_mount=not sys.stdin.isatty(),
-    ).run(headless=not sys.stdin.isatty())
-
-
 def _doctor_pass(check: str) -> None:
     log.info("doctor_check_passed", check=check)
 
@@ -1381,40 +1352,6 @@ def _upgrade_database_or_exit(database_url: str) -> None:
         log.debug("database_schema_unsupported", exc_info=exc)
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
-
-
-def _configuration_bootstrap_status(config: Path, exc: Exception) -> BootstrapStatus:
-    return BootstrapStatus(
-        state=BootstrapState.CONFIGURATION_ERROR,
-        config_path=config,
-        data_dir=config.parent / ".avarch",
-        database_url="unknown",
-        error=TuiError(
-            title="Configuration error",
-            summary=_configuration_error_summary(exc),
-            details=f"{config}\n{_configuration_error_details(exc)}",
-        ),
-    )
-
-
-def _configuration_error_summary(exc: Exception) -> str:
-    if isinstance(exc, ValidationError) and exc.errors():
-        first = exc.errors()[0]
-        field_path = ".".join(str(part) for part in first.get("loc", ())) or "<root>"
-        message = str(first.get("msg", "invalid value"))
-        return f"{field_path}: {message}"
-    return str(exc) or exc.__class__.__name__
-
-
-def _configuration_error_details(exc: Exception) -> str:
-    if isinstance(exc, ValidationError):
-        lines: list[str] = []
-        for error in exc.errors():
-            field_path = ".".join(str(part) for part in error.get("loc", ())) or "<root>"
-            message = str(error.get("msg", "invalid value"))
-            lines.append(f"{field_path}: {message}")
-        return "\n".join(lines)
-    return str(exc) or exc.__class__.__name__
 
 
 def _load_and_configure(config: Path) -> AppConfig:

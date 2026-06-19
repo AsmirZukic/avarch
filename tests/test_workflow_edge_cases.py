@@ -76,7 +76,6 @@ runner = CliRunner()
         ["queue", "clear"],
         ["queue", "retry"],
         ["validate"],
-        ["tui"],
     ],
 )
 def test_every_user_facing_command_has_help(command: list[str]) -> None:

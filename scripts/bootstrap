@@ -485,7 +485,6 @@ fi
 cat <<EOF
 
 Ready.
-  Run the TUI:     uv run avarch tui --config "$CONFIG_PATH"
   Scan media:      uv run avarch scan /path/to/media --config "$CONFIG_PATH"
   List inventory:  uv run avarch files --config "$CONFIG_PATH"
 EOF
