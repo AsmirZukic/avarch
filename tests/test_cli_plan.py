@@ -69,7 +69,7 @@ def test_plan_command_does_not_run_vspipe_by_default(
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_probe(config_path, media_file)
 
-    def fail_check(_path: Path) -> object:
+    def fail_check(_path: Path, **_kwargs: object) -> object:
         raise AssertionError("plan must not run vspipe unless --check-vpy is requested")
 
     monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)
@@ -91,7 +91,7 @@ def test_plan_command_check_vpy_validates_bestsource_script(
     _store_probe(config_path, media_file)
     calls: list[Path] = []
 
-    def fake_check(script_path: Path) -> object:
+    def fake_check(script_path: Path, **_kwargs: object) -> object:
         calls.append(script_path)
         return object()
 

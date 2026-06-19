@@ -59,7 +59,8 @@ def _set_sqlite_pragmas(
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=5000")
     if file_backed:
-        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA journal_mode=DELETE")
+        cursor.execute("PRAGMA synchronous=FULL")
     cursor.close()
 
 

@@ -122,7 +122,7 @@ def test_plan_check_vpy_workflow_runs_runtime_validation_when_requested(
     _probe(config_path, movie)
     calls: list[Path] = []
 
-    def fake_check(script_path: Path) -> object:
+    def fake_check(script_path: Path, **_kwargs: object) -> object:
         calls.append(script_path)
         return object()
 
@@ -154,7 +154,7 @@ def test_runtime_validation_failure_keeps_generated_bundle(
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
     _probe(config_path, movie)
 
-    def fail_check(_script_path: Path) -> object:
+    def fail_check(_script_path: Path, **_kwargs: object) -> object:
         raise VspipeProcessError("bounded stdout/stderr excerpt")
 
     monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)

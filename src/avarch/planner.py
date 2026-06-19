@@ -32,6 +32,7 @@ from avarch.models.plan import (
     SubtitlePlan,
     SubtitleStreamPlan,
     TranscodePlan,
+    VapourSynthMode,
     VapourSynthPlan,
     VideoPlan,
 )
@@ -48,10 +49,14 @@ from avarch.profiles.registry import ResolvedProfile
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import (
     GENERATOR_VERSION,
+    ResolvedVapourSynthFilter,
     ResolvedVapourSynthTemplate,
     build_vapoursynth_identity_hash,
+    resolve_vapoursynth_filter,
     validate_script_syntax,
 )
+from avarch.vpy_env import VpyRequirements, build_runtime_identity, load_requirements
+from avarch.workspace import WorkspaceContext, WorkspaceError
 
 
 class PlanningError(RuntimeError):
@@ -101,12 +106,17 @@ def build_profile_hash(
     profile: EncodingProfile,
     *,
     template_hash: str | None = None,
+    script_hash: str | None = None,
 ) -> str:
     profile_payload = profile.model_dump(
         mode="json",
         exclude={"vapoursynth_template"},
     )
+    if isinstance(profile_payload.get("vapoursynth"), dict):
+        profile_payload["vapoursynth"].pop("script", None)
+        profile_payload["vapoursynth"].pop("template", None)
     profile_payload["vapoursynth_template_hash"] = template_hash
+    profile_payload["vapoursynth_script_hash"] = script_hash
     payload = f"{PROFILE_HASH_CONTRACT}\0".encode() + canonical_json(profile_payload).encode(
         "utf-8"
     )
@@ -224,9 +234,7 @@ def load_planning_context(
     input_path: Path,
     resolved_profile: ResolvedProfile,
 ) -> PlanningContext:
-    media_file = session.exec(
-        select(MediaFile).where(MediaFile.path == str(input_path.resolve()))
-    ).first()
+    media_file = _get_media_file_for_input(session, input_path)
     if media_file is None:
         raise PlanningError("File is not present in the media inventory.")
     if _status_value(media_file.status) == MediaFileStatus.MISSING.value:
@@ -259,6 +267,33 @@ def load_planning_context(
         profile_name=resolved_profile.name,
         profile=resolved_profile.profile,
     )
+
+
+def _get_media_file_for_input(session: Session, input_path: Path) -> MediaFile | None:
+    resolved = input_path.resolve()
+    candidates = [str(resolved)]
+    try:
+        workspace = WorkspaceContext.discover(resolved.parent)
+        candidates.append(str(resolved.relative_to(workspace.root)))
+    except (WorkspaceError, ValueError):
+        pass
+
+    for candidate in dict.fromkeys(candidates):
+        media_file = session.exec(select(MediaFile).where(MediaFile.path == candidate)).first()
+        if media_file is not None:
+            return media_file
+    return None
+
+
+def _absolute_stored_media_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    try:
+        workspace = WorkspaceContext.discover(Path.cwd())
+    except WorkspaceError:
+        return path.resolve()
+    return (workspace.root / path).resolve()
 
 
 def _status_value(status: MediaFileStatus | str) -> str:
@@ -474,6 +509,7 @@ def build_plan(
     *,
     data_dir: Path,
     resolved_template: ResolvedVapourSynthTemplate | None = None,
+    resolved_filter: ResolvedVapourSynthFilter | None = None,
     generator_version: int = GENERATOR_VERSION,
 ) -> TranscodePlan:
     match = match_profile(context.profile, context.normalized_probe)
@@ -484,30 +520,45 @@ def build_plan(
     if context.media_file.id is None:
         raise PlanningError("Media file must be persisted before planning.")
 
-    if context.profile.vapoursynth_template is None and resolved_template is not None:
+    profile_template = _profile_template_path(context.profile)
+    if context.profile.vapoursynth.mode == "custom_filter" and resolved_filter is None:
+        resolved_filter = resolve_vapoursynth_filter(context.profile)
+    if context.profile.vapoursynth.mode != "custom_filter" and resolved_filter is not None:
+        raise PlanningError("Resolved filter was provided for a profile without a custom filter.")
+    if context.profile.vapoursynth.mode == "custom_filter" and resolved_template is not None:
+        raise PlanningError("custom_filter VapourSynth mode does not use a template.")
+    if profile_template is None and resolved_template is not None:
         raise PlanningError("Resolved template was provided for a profile without a template.")
-    if context.profile.vapoursynth_template is not None and resolved_template is None:
+    if profile_template is not None and resolved_template is None:
         raise PlanningError("Profile requires a resolved VapourSynth template.")
     if (
-        context.profile.vapoursynth_template is not None
+        profile_template is not None
         and resolved_template is not None
-        and context.profile.vapoursynth_template != resolved_template.path
+        and profile_template != resolved_template.path
     ):
         raise PlanningError("Resolved template path does not match the selected profile.")
 
-    mode = "custom_template" if resolved_template is not None else "generated"
+    mode = _vapoursynth_mode(context.profile, resolved_template, resolved_filter)
     template_hash = resolved_template.template_hash if resolved_template is not None else None
+    script_hash = resolved_filter.script_hash if resolved_filter is not None else None
     vapoursynth_identity_hash = build_vapoursynth_identity_hash(
         generator_version=generator_version,
         mode=mode,
         output_format="YUV420P10",
         resize_filter="spline36",
         template_hash=template_hash,
+        script_hash=script_hash,
+        filter_entrypoint=resolved_filter.entrypoint if resolved_filter is not None else None,
+        filter_api_version=resolved_filter.api_version if resolved_filter is not None else None,
     )
-    profile_hash = build_profile_hash(context.profile, template_hash=template_hash)
+    profile_hash = build_profile_hash(
+        context.profile,
+        template_hash=template_hash,
+        script_hash=script_hash,
+    )
     execution_identity = build_execution_identity()
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
-    input_path = Path(context.media_file.path).resolve()
+    input_path = _absolute_stored_media_path(context.media_file.path)
     source_fs_fingerprint = context.media_file.fs_fingerprint
     work_key = build_work_key(
         input_path=input_path,
@@ -522,6 +573,8 @@ def build_plan(
     video = select_video(context.normalized_probe, context.profile)
     audio = select_audio(context.normalized_probe, context.profile)
     subtitles = select_subtitles(context.normalized_probe, context.profile)
+    vpy_requirements = _vpy_requirements_for_data_dir(data_dir)
+    runtime_identity = build_runtime_identity(vpy_requirements)
 
     plan = TranscodePlan(
         plan_hash="",
@@ -556,6 +609,26 @@ def build_plan(
             hdr_to_sdr=video.hdr_to_sdr,
             template_path=resolved_template.path if resolved_template is not None else None,
             template_hash=template_hash,
+            filter_path=(
+                paths.artifacts.artifact_dir / "vpy" / "user_filter.py"
+                if resolved_filter is not None
+                else None
+            ),
+            filter_hash=script_hash,
+            filter_entrypoint=resolved_filter.entrypoint if resolved_filter is not None else None,
+            filter_api_version=resolved_filter.api_version if resolved_filter is not None else None,
+            environment_id=runtime_identity.environment_id,
+            environment_manifest_hash=runtime_identity.manifest_hash,
+            avarch_image_digest=runtime_identity.avarch_image_digest,
+            python_version=runtime_identity.python_version,
+            python_abi=runtime_identity.python_abi,
+            runtime_platform=runtime_identity.platform,
+            vapoursynth_version=runtime_identity.vapoursynth_version,
+            template_api_version=(
+                context.profile.vapoursynth.api_version
+                if context.profile.vapoursynth.mode == "custom_template"
+                else None
+            ),
             identity_hash=vapoursynth_identity_hash,
         ),
         av1an=Av1anCommandSpec(
@@ -647,18 +720,48 @@ def build_plan_paths(
     )
 
 
+def _vpy_requirements_for_data_dir(data_dir: Path) -> VpyRequirements:
+    workspace = _workspace_for_data_dir(data_dir)
+    if workspace is None or not workspace.vpy_requirements_toml.exists():
+        return VpyRequirements()
+    return load_requirements(workspace)
+
+
+def _workspace_for_data_dir(data_dir: Path) -> WorkspaceContext | None:
+    resolved = data_dir.resolve()
+    if resolved.name == "data" and resolved.parent.name == ".avarch":
+        return WorkspaceContext(resolved.parent.parent)
+    if resolved.name == ".avarch":
+        return WorkspaceContext(resolved.parent)
+    try:
+        return WorkspaceContext.discover(resolved)
+    except WorkspaceError:
+        return None
+
+
 def write_plan_artifacts(
     *,
     plan: TranscodePlan,
     vapoursynth_script: str,
+    user_filter: ResolvedVapourSynthFilter | None = None,
+    template: ResolvedVapourSynthTemplate | None = None,
 ) -> PlanArtifactPaths:
+    if plan.vapoursynth.mode == "custom_template" and template is None:
+        raise PlanningError("custom template plans must snapshot the resolved template")
+    if plan.vapoursynth.mode != "custom_template" and template is not None:
+        raise PlanningError("template snapshot was provided for a non-template plan")
     validate_script_syntax(vapoursynth_script)
     paths = plan.artifacts
     artifact_dir = paths.artifact_dir
     parent = artifact_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
 
-    artifact_payloads = _artifact_payloads(plan, vapoursynth_script=vapoursynth_script)
+    artifact_payloads = _artifact_payloads(
+        plan,
+        vapoursynth_script=vapoursynth_script,
+        user_filter=user_filter,
+        template=template,
+    )
     if artifact_dir.exists():
         if _artifact_dir_matches(artifact_payloads, artifact_dir):
             return paths
@@ -673,6 +776,7 @@ def write_plan_artifacts(
     try:
         for relative_path, content in artifact_payloads.items():
             path = temp_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8", newline="\n") as output_file:
                 output_file.write(content)
                 output_file.flush()
@@ -689,19 +793,84 @@ def _artifact_payloads(
     plan: TranscodePlan,
     *,
     vapoursynth_script: str,
+    user_filter: ResolvedVapourSynthFilter | None = None,
+    template: ResolvedVapourSynthTemplate | None = None,
 ) -> dict[str, str]:
-    return {
+    payloads = {
         "plan.json": canonical_json(plan) + "\n",
         plan.artifacts.vapoursynth_script.name: vapoursynth_script,
         "av1an.command.json": canonical_json(plan.av1an) + "\n",
         "validation-policy.json": canonical_json(plan.validation) + "\n",
+        "vpy/environment-lock.toml": _environment_lock_payload(plan),
+        "vpy/snapshot.json": _vpy_snapshot_payload(plan),
     }
+    if user_filter is not None:
+        payloads["vpy/user_filter.py"] = user_filter.text
+    if template is not None:
+        payloads["vpy/custom_template.vpy"] = template.text
+    return payloads
+
+
+def _environment_lock_payload(plan: TranscodePlan) -> str:
+    manifest_hash = plan.vapoursynth.environment_manifest_hash or "unknown"
+    vapoursynth_version = plan.vapoursynth.vapoursynth_version or "unknown"
+    lines = [
+        "schema_version = 1",
+        f'environment_id = "{_toml_escape(plan.vapoursynth.environment_id or "unknown")}"',
+        f'avarch_image_digest = "{_toml_escape(plan.vapoursynth.avarch_image_digest)}"',
+        f'manifest_hash = "{_toml_escape(manifest_hash)}"',
+        f'python_version = "{_toml_escape(plan.vapoursynth.python_version or "unknown")}"',
+        f'python_abi = "{_toml_escape(plan.vapoursynth.python_abi or "unknown")}"',
+        f'platform = "{_toml_escape(plan.vapoursynth.runtime_platform or "unknown")}"',
+        f'vapoursynth_version = "{_toml_escape(vapoursynth_version)}"',
+        "",
+    ]
+    for namespace, digest in sorted(plan.vapoursynth.native_plugin_hashes.items()):
+        lines.extend(
+            (
+                "[[plugins]]",
+                f'namespace = "{_toml_escape(namespace)}"',
+                f'sha256 = "{_toml_escape(digest)}"',
+                "",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _vpy_snapshot_payload(plan: TranscodePlan) -> str:
+    payload = {
+        "avarch_image_digest": plan.vapoursynth.avarch_image_digest,
+        "environment_id": plan.vapoursynth.environment_id,
+        "environment_manifest_hash": plan.vapoursynth.environment_manifest_hash,
+        "filter_api_version": plan.vapoursynth.filter_api_version,
+        "filter_entrypoint": plan.vapoursynth.filter_entrypoint,
+        "filter_hash": plan.vapoursynth.filter_hash,
+        "generator_version": plan.vapoursynth.generator_version,
+        "mode": plan.vapoursynth.mode,
+        "native_plugin_hashes": plan.vapoursynth.native_plugin_hashes,
+        "plan_hash": plan.plan_hash,
+        "profile_hash": plan.profile_hash,
+        "template_api_version": plan.vapoursynth.template_api_version,
+        "template_hash": plan.vapoursynth.template_hash,
+        "vapoursynth_identity_hash": plan.vapoursynth.identity_hash,
+        "vapoursynth_version": plan.vapoursynth.vapoursynth_version,
+    }
+    return canonical_json(payload) + "\n"
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _artifact_dir_matches(payloads: dict[str, str], artifact_dir: Path) -> bool:
     if not artifact_dir.is_dir():
         return False
-    if {path.name for path in artifact_dir.iterdir()} != set(payloads):
+    existing = {
+        str(path.relative_to(artifact_dir))
+        for path in artifact_dir.rglob("*")
+        if path.is_file()
+    }
+    if existing != set(payloads):
         return False
     for relative_path, expected_content in payloads.items():
         path = artifact_dir / relative_path
@@ -743,3 +912,25 @@ def _normalized_languages(languages: list[str]) -> list[str]:
 
 def _normalize_language(language: str) -> str:
     return language.strip().lower()
+
+
+def _profile_template_path(profile: EncodingProfile) -> Path | None:
+    if profile.vapoursynth_template is not None:
+        return profile.vapoursynth_template
+    if profile.vapoursynth.mode == "custom_template":
+        return profile.vapoursynth.template
+    return None
+
+
+def _vapoursynth_mode(
+    profile: EncodingProfile,
+    resolved_template: ResolvedVapourSynthTemplate | None,
+    resolved_filter: ResolvedVapourSynthFilter | None,
+) -> VapourSynthMode:
+    if resolved_filter is not None:
+        return "custom_filter"
+    if resolved_template is not None:
+        return "custom_template"
+    if profile.vapoursynth.mode == "custom_filter":
+        return "custom_filter"
+    return "generated"

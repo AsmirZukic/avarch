@@ -82,7 +82,26 @@ def test_work_key_uses_promotion_policy_hash(tmp_path: Path) -> None:
     assert first != second
 
 
-def _context(tmp_path: Path) -> PlanningContext:
+def test_build_plan_supports_custom_filter_profile(tmp_path: Path) -> None:
+    scripts_dir = tmp_path / ".avarch" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    filter_path = scripts_dir / "my_filter.py"
+    filter_path.write_text("def apply(video, context):\n    return video\n", encoding="utf-8")
+    context = _context(tmp_path, resolved_profile=_resolved_filter_profile(filter_path))
+
+    plan = build_plan(context, data_dir=tmp_path / ".avarch")
+
+    assert plan.vapoursynth.mode == "custom_filter"
+    assert plan.vapoursynth.filter_path == plan.artifacts.artifact_dir / "vpy" / "user_filter.py"
+    assert plan.vapoursynth.filter_hash
+    assert plan.vapoursynth.filter_entrypoint == "apply"
+
+
+def _context(
+    tmp_path: Path,
+    *,
+    resolved_profile: ResolvedProfile | None = None,
+) -> PlanningContext:
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"media")
     normalized = normalize_probe(sdr_probe_payload())
@@ -110,7 +129,7 @@ def _context(tmp_path: Path) -> PlanningContext:
         source_fs_fingerprint="fs",
         created_at=now,
     )
-    resolved_profile = _resolved_profile()
+    resolved_profile = resolved_profile or _resolved_profile()
     return PlanningContext(
         media_file=media_file,
         probe_result=probe_result,
@@ -127,6 +146,51 @@ def _resolved_profile() -> ResolvedProfile:
             "name": "av1_1080p_sdr",
             "backend": "av1an",
             "container": "mkv",
+            "match": {"video_codec_not": ["av1"]},
+            "video": {
+                "max_width": 1920,
+                "hdr_to_sdr": True,
+                "source": "vapoursynth",
+            },
+            "av1an": {
+                "encoder": "svt-av1",
+                "workers": 2,
+                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+            },
+            "audio": {
+                "codec": "libopus",
+                "bitrate": "128k",
+                "channels": 2,
+                "languages": ["eng"],
+            },
+            "subtitles": {
+                "languages": ["eng"],
+                "keep_forced": True,
+            },
+        }
+    )
+    return ResolvedProfile(
+        name=document.name,
+        document=document,
+        profile=document.encoding_profile(),
+        origin=ProfileOrigin.USER,
+        source="test",
+    )
+
+
+def _resolved_filter_profile(filter_path: Path) -> ResolvedProfile:
+    document = ProfileDocument.model_validate(
+        {
+            "schema_version": 1,
+            "name": "filtered",
+            "backend": "av1an",
+            "container": "mkv",
+            "vapoursynth": {
+                "mode": "custom_filter",
+                "script": filter_path,
+                "entrypoint": "apply",
+                "api_version": 1,
+            },
             "match": {"video_codec_not": ["av1"]},
             "video": {
                 "max_width": 1920,

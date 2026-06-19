@@ -7,27 +7,27 @@ Av1an-first archival transcoding orchestration.
 From a checked-out copy of this repo:
 
 ```sh
-docker build -t avarch .
+docker build -t avarch:latest .
 ```
 
-Initialize local state in the mounted working directory:
+Install or invoke the host wrapper from `bin/avarch`. The wrapper discovers the
+nearest `.avarch` workspace, mounts it at `/workspace`, runs the container as the
+invoking UID/GID, preserves Docker exit codes, and uses the fixed
+`avarch-encoder` container name for `scheduler run`.
 
 ```sh
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch init --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch doctor --config /work/avarch.toml
+export PATH="$PWD/bin:$PATH"
 ```
 
-Mount media at a stable container path, then use that path in avarch commands.
-Keeping the container path stable keeps paths stored in SQLite portable between
-runs.
+Initialize local workspace state:
 
 ```sh
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD:/work" \
-  -v /host/media:/media:ro \
-  avarch scan /media --config /work/avarch.toml
+avarch init
+avarch doctor
 ```
+
+Set `AVARCH_IMAGE` to use a non-default tag. Set `AVARCH_GPU=nvidia` or
+`AVARCH_GPU=dri` to pass GPU devices to the encoder container.
 
 ## Development Schema Reset
 
@@ -40,31 +40,21 @@ local state. The source media library is not modified by this reset.
 ```sh
 rm -rf .avarch
 
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch init --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch db upgrade --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch scan /media --config /work/avarch.toml
+avarch init
+avarch db upgrade
+avarch scan .
 ```
 
 ## Day-to-Day Commands
 
 ```sh
 make docker-build   # build the runtime image
-make docker-init    # create avarch.toml and .avarch/ through Docker
-make docker-doctor  # verify mounted config and database through Docker
+make wrapper-init   # create .avarch/ through the Docker wrapper
+make wrapper-doctor # verify workspace config and database through the wrapper
 make doctor         # verify config and database
 make scan           # scan configured media roots
 make test           # run tests
 make check          # lint, typecheck, and test
-```
-
-Equivalent direct commands:
-
-```sh
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch doctor --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch scan /media --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch files --config /work/avarch.toml
 ```
 
 ## Media Toolchain
@@ -82,29 +72,19 @@ The current execution contract expects Av1an `0.5.x`.
 ## Basic Workflow
 
 ```sh
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch scan /media --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch probe /media/movie.mkv --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch inspect /media/movie.mkv --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch plan /media/movie.mkv --profile av1_1080p_sdr --config /work/avarch.toml
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
-  avarch encode /media/movie.mkv --profile av1_1080p_sdr --dry-run \
-  --config /work/avarch.toml
+avarch scan .
+avarch probe Movies/Test.mkv
+avarch profiles copy default --name my_filtered_profile
+avarch vpy scaffold filter --name my_filter
+avarch vpy sync
+avarch vpy check --profile my_filtered_profile Movies/Test.mkv
+avarch workflow preview --profile my_filtered_profile
+avarch workflow enqueue --profile my_filtered_profile
+avarch scheduler run
 ```
-
-Remove `--dry-run` from `encode` when the generated command and artifacts look
-right.
 
 ## Configuration
 
-The default config lives at `avarch.toml`. If it does not exist, normal `avarch`
-commands create it automatically with defaults.
-
-To use a different config path:
-
-```sh
-docker run --rm --user "$(id -u):$(id -g)" -v /path/to/state:/work avarch doctor --config /work/avarch.toml
-```
+Workspace configuration lives at `.avarch/config.toml`. Media paths persisted in
+the database are relative to the workspace so the workspace can be moved without
+rewriting inventory records.

@@ -48,6 +48,8 @@ COPY src ./src
 
 RUN uv sync --locked --no-dev
 
+RUN uv pip install "git+https://github.com/vapoursynth/vsrepo.git"
+
 RUN mkdir -p "${AVARCH_LIB_DIR}" \
     && python - <<'PY'
 from __future__ import annotations
@@ -110,7 +112,7 @@ config_path.write_text(
 )
 PY
 
-RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     cargo install av1an --version "${AVARCH_AV1AN_VERSION_REQ}" --locked \
     && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 

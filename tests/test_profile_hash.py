@@ -129,6 +129,24 @@ def test_changed_template_content_changes_profile_hash() -> None:
     )
 
 
+def test_changed_filter_content_changes_profile_hash() -> None:
+    profile = _profile(
+        {
+            "vapoursynth": {
+                "mode": "custom_filter",
+                "script": "/scripts/filter.py",
+                "entrypoint": "apply",
+                "api_version": 1,
+            }
+        }
+    )
+
+    assert build_profile_hash(profile, script_hash="first") != build_profile_hash(
+        profile,
+        script_hash="second",
+    )
+
+
 def _profile(overrides: dict[str, object] | None = None) -> EncodingProfile:
     profile = _profile_data()
     if overrides:

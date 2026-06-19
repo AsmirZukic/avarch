@@ -23,6 +23,7 @@ FFMPEG_MUX_CONTRACT_VERSION = 1
 
 type VapourSynthMode = Literal[
     "generated",
+    "custom_filter",
     "custom_template",
 ]
 
@@ -236,6 +237,20 @@ class VapourSynthPlan(BaseModel):
 
     template_path: Path | None = None
     template_hash: str | None = None
+    filter_path: Path | None = None
+    filter_hash: str | None = None
+    filter_entrypoint: str | None = None
+    filter_api_version: int | None = None
+
+    environment_id: str | None = None
+    environment_manifest_hash: str | None = None
+    avarch_image_digest: str = "unknown"
+    python_version: str | None = None
+    python_abi: str | None = None
+    runtime_platform: str | None = None
+    vapoursynth_version: str | None = None
+    template_api_version: int | None = None
+    native_plugin_hashes: dict[str, str] = Field(default_factory=dict)
 
     identity_hash: str
 

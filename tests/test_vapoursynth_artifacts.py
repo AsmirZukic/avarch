@@ -4,7 +4,11 @@ import pytest
 
 from avarch.models.plan import TranscodePlan
 from avarch.planner import PlanArtifactConflictError, write_plan_artifacts
-from avarch.vapoursynth import generate_builtin_script
+from avarch.vapoursynth import (
+    ResolvedVapourSynthFilter,
+    ResolvedVapourSynthTemplate,
+    generate_builtin_script,
+)
 from tests.test_plan_models import sample_plan
 
 
@@ -19,6 +23,8 @@ def test_bundle_contains_all_four_artifacts(tmp_path: Path) -> None:
     assert (artifact_dir / "movie.vpy").is_file()
     assert (artifact_dir / "av1an.command.json").is_file()
     assert (artifact_dir / "validation-policy.json").is_file()
+    assert (artifact_dir / "vpy" / "environment-lock.toml").is_file()
+    assert (artifact_dir / "vpy" / "snapshot.json").is_file()
     assert (artifact_dir / "movie.vpy").read_text(encoding="utf-8") == script
 
 
@@ -52,6 +58,71 @@ def test_unexpected_existing_file_causes_conflict(tmp_path: Path) -> None:
 
     with pytest.raises(PlanArtifactConflictError):
         write_plan_artifacts(plan=plan, vapoursynth_script=script)
+
+
+def test_custom_filter_bundle_snapshots_user_filter(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "bundle"
+    plan = _plan_for_dir(artifact_dir).model_copy(
+        update={
+            "vapoursynth": _plan_for_dir(artifact_dir).vapoursynth.model_copy(
+                update={
+                    "mode": "custom_filter",
+                    "filter_path": artifact_dir / "vpy" / "user_filter.py",
+                    "filter_hash": "hash",
+                    "filter_entrypoint": "apply",
+                    "filter_api_version": 1,
+                }
+            )
+        }
+    )
+    user_filter = ResolvedVapourSynthFilter(
+        path=tmp_path / "my_filter.py",
+        text="def apply(video, context):\n    return video\n",
+        script_hash="hash",
+        entrypoint="apply",
+        api_version=1,
+    )
+
+    write_plan_artifacts(
+        plan=plan,
+        vapoursynth_script="# wrapper\n",
+        user_filter=user_filter,
+    )
+
+    assert (artifact_dir / "vpy" / "user_filter.py").read_text(encoding="utf-8") == (
+        "def apply(video, context):\n    return video\n"
+    )
+
+
+def test_custom_template_bundle_snapshots_user_template(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "bundle"
+    base = _plan_for_dir(artifact_dir)
+    template = ResolvedVapourSynthTemplate(
+        path=tmp_path / "my_pipeline.vpy",
+        text="clip.set_output(index=0)\n",
+        template_hash="template-hash",
+    )
+    plan = base.model_copy(
+        update={
+            "vapoursynth": base.vapoursynth.model_copy(
+                update={
+                    "mode": "custom_template",
+                    "template_path": template.path,
+                    "template_hash": template.template_hash,
+                }
+            )
+        }
+    )
+
+    write_plan_artifacts(
+        plan=plan,
+        vapoursynth_script="clip.set_output(index=0)\n",
+        template=template,
+    )
+
+    assert (artifact_dir / "vpy" / "custom_template.vpy").read_text(encoding="utf-8") == (
+        "clip.set_output(index=0)\n"
+    )
 
 
 def _plan_for_dir(artifact_dir: Path) -> TranscodePlan:

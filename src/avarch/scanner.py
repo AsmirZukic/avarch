@@ -123,14 +123,16 @@ def update_inventory(
     root: Path,
     snapshots: Sequence[FileSnapshot],
     scanned_at: datetime,
+    workspace_root: Path | None = None,
 ) -> ScanResult:
     root = root.resolve()
+    workspace_root = workspace_root.resolve() if workspace_root is not None else None
     snapshot_by_path = {snapshot.path: snapshot for snapshot in snapshots}
     known_files = session.exec(select(MediaFile)).all()
     known_by_path = {
-        Path(media_file.path): media_file
+        _absolute_media_path(media_file.path, workspace_root): media_file
         for media_file in known_files
-        if _is_relative_to(Path(media_file.path), root)
+        if _is_relative_to(_absolute_media_path(media_file.path, workspace_root), root)
     }
 
     added = 0
@@ -142,7 +144,7 @@ def update_inventory(
         if media_file is None:
             session.add(
                 MediaFile(
-                    path=str(path),
+                    path=_stored_media_path(path, workspace_root),
                     size_bytes=snapshot.size_bytes,
                     mtime_ns=snapshot.mtime_ns,
                     device_id=snapshot.device_id,
@@ -204,3 +206,19 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _absolute_media_path(value: str, workspace_root: Path | None) -> Path:
+    path = Path(value)
+    if path.is_absolute() or workspace_root is None:
+        return path
+    return workspace_root / path
+
+
+def _stored_media_path(path: Path, workspace_root: Path | None) -> str:
+    if workspace_root is None:
+        return str(path)
+    try:
+        return str(path.resolve().relative_to(workspace_root))
+    except ValueError:
+        return str(path)

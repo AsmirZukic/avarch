@@ -43,6 +43,25 @@ def test_successful_check_returns_bounded_output(monkeypatch: pytest.MonkeyPatch
     assert calls[0]["timeout"] == DEFAULT_VSPIPE_TIMEOUT_SECONDS
 
 
+def test_check_passes_environment_to_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command: list[str], **kwargs: object) -> Result:
+        calls.append({"command": command, **kwargs})
+        return Result()
+
+    monkeypatch.setattr("avarch.vapoursynth.subprocess.run", fake_run)
+
+    check_vapoursynth_script(Path("/tmp/movie.vpy"), env={"PYTHONPATH": "/workspace/scripts"})
+
+    assert calls[0]["env"] == {"PYTHONPATH": "/workspace/scripts"}
+
+
 def test_nonzero_exit_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     class Result:
         returncode = 1

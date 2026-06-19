@@ -139,6 +139,30 @@ exclude_directories = [".avarch", ".avarch-work", ".avarch-output"]
 search_paths = ["./profiles"]
 """
 
+WORKSPACE_CONFIG_TEXT = """[app]
+data_dir = "data"
+
+[database]
+url = "sqlite:///data/avarch.db"
+
+[logging]
+level = "INFO"
+format = "console"
+
+[resources]
+cheap_workers = 4
+av1an_jobs = 1
+file_ops = 1
+
+[scanner]
+roots = []
+extensions = [".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"]
+exclude_directories = [".avarch"]
+
+[profile_registry]
+search_paths = ["profiles"]
+"""
+
 
 def load_config(path: Path) -> AppConfig:
     with path.open("rb") as config_file:

@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from avarch.config import AppConfig
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 
+RESERVED_BUILTIN_PROFILE_NAMES = frozenset({"default", "anime", "web_archive"})
+
 
 class ProfileOrigin(StrEnum):
     BUILTIN = "builtin"
@@ -23,6 +25,10 @@ class ProfileRegistryError(RuntimeError):
 
 
 class DuplicateProfileNameError(ProfileRegistryError):
+    pass
+
+
+class ReservedProfileNameError(ProfileRegistryError):
     pass
 
 
@@ -74,16 +80,24 @@ class ProfileRegistry:
 
     @classmethod
     def from_config(cls, config: AppConfig) -> ProfileRegistry:
-        try:
-            return cls.load(search_paths=config.profile_registry.search_paths)
-        except NoProfilesFoundError:
-            return cls(_load_packaged_profiles())
+        builtins = _load_packaged_profiles()
+        user_profiles = _load_user_profile_search_paths(config.profile_registry.search_paths)
+        user_names = {profile.name for profile in user_profiles}
+        for profile in user_profiles:
+            if profile.name in RESERVED_BUILTIN_PROFILE_NAMES:
+                raise ReservedProfileNameError(
+                    f"User profile uses reserved built-in name: {profile.name} ({profile.source})"
+                )
+        visible_builtins = tuple(
+            profile
+            for profile in builtins
+            if profile.name not in user_names or profile.name in RESERVED_BUILTIN_PROFILE_NAMES
+        )
+        return cls((*visible_builtins, *user_profiles))
 
     @classmethod
     def load(cls, *, search_paths: list[Path]) -> ProfileRegistry:
-        profiles: list[ResolvedProfile] = []
-        for search_path in search_paths:
-            profiles.extend(_load_user_profiles(search_path))
+        profiles = _load_user_profile_search_paths(search_paths)
         if not profiles:
             locations = ", ".join(str(path) for path in search_paths) or "(none configured)"
             raise NoProfilesFoundError(
@@ -117,6 +131,8 @@ def seed_packaged_profiles(search_path: Path, *, overwrite: bool = False) -> tup
     search_path.mkdir(parents=True, exist_ok=True)
     seeded: list[Path] = []
     for resource in _packaged_profile_resources():
+        if resource.name == "default.toml":
+            continue
         destination = search_path / resource.name
         if destination.exists() and not overwrite:
             continue
@@ -134,13 +150,20 @@ def packaged_profile_names() -> tuple[str, ...]:
     return tuple(Path(resource.name).stem for resource in _packaged_profile_resources())
 
 
+def _load_user_profile_search_paths(search_paths: list[Path]) -> list[ResolvedProfile]:
+    profiles: list[ResolvedProfile] = []
+    for search_path in search_paths:
+        profiles.extend(_load_user_profiles(search_path))
+    return profiles
+
+
 def _load_user_profiles(search_path: Path) -> list[ResolvedProfile]:
     if not search_path.exists():
         return []
     if not search_path.is_dir():
         raise ProfileRegistryError(f"Profile search path is not a directory: {search_path}")
     profiles: list[ResolvedProfile] = []
-    for path in sorted(search_path.glob("*.toml")):
+    for path in sorted(search_path.glob("**/*.toml")):
         with path.open("rb") as profile_file:
             data = tomllib.load(profile_file)
         profiles.append(
@@ -149,6 +172,7 @@ def _load_user_profiles(search_path: Path) -> list[ResolvedProfile]:
                 origin=ProfileOrigin.USER,
                 source=str(path),
                 base_dir=path.parent,
+                scripts_dir=_scripts_dir_for_profile(path),
             )
         )
     return profiles
@@ -164,6 +188,7 @@ def _load_packaged_profiles() -> tuple[ResolvedProfile, ...]:
                 origin=ProfileOrigin.BUILTIN,
                 source=f"packaged:{resource.name}",
                 base_dir=None,
+                scripts_dir=None,
             )
         )
     return tuple(profiles)
@@ -185,6 +210,7 @@ def _resolved_profile(
     origin: ProfileOrigin,
     source: str,
     base_dir: Path | None,
+    scripts_dir: Path | None,
 ) -> ResolvedProfile:
     try:
         document = ProfileDocument.model_validate(data)
@@ -194,6 +220,17 @@ def _resolved_profile(
         template = document.vapoursynth_template
         if not template.is_absolute():
             document = document.model_copy(update={"vapoursynth_template": base_dir / template})
+    if scripts_dir is not None:
+        vapoursynth = document.vapoursynth
+        updates: dict[str, Path] = {}
+        if vapoursynth.script is not None and not vapoursynth.script.is_absolute():
+            updates["script"] = scripts_dir / vapoursynth.script
+        if vapoursynth.template is not None and not vapoursynth.template.is_absolute():
+            updates["template"] = scripts_dir / vapoursynth.template
+        if updates:
+            document = document.model_copy(
+                update={"vapoursynth": vapoursynth.model_copy(update=updates)}
+            )
     return ResolvedProfile(
         name=document.name,
         document=document,
@@ -201,3 +238,13 @@ def _resolved_profile(
         origin=origin,
         source=source,
     )
+
+
+def _scripts_dir_for_profile(path: Path) -> Path | None:
+    parts = path.parts
+    try:
+        avarch_index = len(parts) - 1 - parts[::-1].index(".avarch")
+    except ValueError:
+        return path.parent
+    avarch_dir = Path(*parts[: avarch_index + 1])
+    return avarch_dir / "scripts"

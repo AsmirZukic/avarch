@@ -60,6 +60,31 @@ def test_identity_hash_changes_with_template_hash() -> None:
     assert first != second
 
 
+def test_identity_hash_changes_with_custom_filter_script_hash() -> None:
+    first = build_vapoursynth_identity_hash(
+        generator_version=1,
+        mode="custom_filter",
+        output_format="YUV420P10",
+        resize_filter="spline36",
+        template_hash=None,
+        script_hash="first",
+        filter_entrypoint="apply",
+        filter_api_version=1,
+    )
+    second = build_vapoursynth_identity_hash(
+        generator_version=1,
+        mode="custom_filter",
+        output_format="YUV420P10",
+        resize_filter="spline36",
+        template_hash=None,
+        script_hash="second",
+        filter_entrypoint="apply",
+        filter_api_version=1,
+    )
+
+    assert first != second
+
+
 def test_identity_hash_rejects_template_hash_for_generated_mode() -> None:
     with pytest.raises(ValueError):
         build_vapoursynth_identity_hash(
@@ -76,6 +101,17 @@ def test_identity_hash_requires_template_hash_for_custom_mode() -> None:
         build_vapoursynth_identity_hash(
             generator_version=1,
             mode="custom_template",
+            output_format="YUV420P10",
+            resize_filter="spline36",
+            template_hash=None,
+        )
+
+
+def test_identity_hash_requires_script_hash_for_custom_filter_mode() -> None:
+    with pytest.raises(ValueError):
+        build_vapoursynth_identity_hash(
+            generator_version=1,
+            mode="custom_filter",
             output_format="YUV420P10",
             resize_filter="spline36",
             template_hash=None,

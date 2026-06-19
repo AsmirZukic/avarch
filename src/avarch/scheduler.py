@@ -72,6 +72,7 @@ from avarch.vapoursynth import (
     VapourSynthGenerationError,
     build_vapoursynth_identity_hash,
     generate_vapoursynth_script,
+    resolve_vapoursynth_filter,
     resolve_vapoursynth_template,
     validate_script_syntax,
 )
@@ -564,11 +565,26 @@ async def execute_plan_job(
                 )
                 return
             resolved_template = resolve_vapoursynth_template(context.profile)
+            resolved_filter = resolve_vapoursynth_filter(context.profile)
             data_dir = _config_data_dir(config)
-            plan = build_plan(context, data_dir=data_dir, resolved_template=resolved_template)
-        vapoursynth_script = generate_vapoursynth_script(plan, template=resolved_template)
+            plan = build_plan(
+                context,
+                data_dir=data_dir,
+                resolved_template=resolved_template,
+                resolved_filter=resolved_filter,
+            )
+        vapoursynth_script = generate_vapoursynth_script(
+            plan,
+            template=resolved_template,
+            user_filter=resolved_filter,
+        )
         validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(plan=plan, vapoursynth_script=vapoursynth_script)
+        write_plan_artifacts(
+            plan=plan,
+            vapoursynth_script=vapoursynth_script,
+            user_filter=resolved_filter,
+            template=resolved_template,
+        )
     except PlanArtifactConflictError as exc:
         _fail_after_external(engine, job_id=job_id, attempt_id=attempt_id, error=exc)
         return
@@ -1511,18 +1527,33 @@ class _PlanningIdentity:
 def _planning_identity(resolved_profile: ResolvedProfile) -> _PlanningIdentity:
     profile = resolved_profile.profile
     resolved_template = resolve_vapoursynth_template(profile)
-    mode = "custom_template" if resolved_template is not None else "generated"
+    resolved_filter = resolve_vapoursynth_filter(profile)
+    mode = (
+        "custom_filter"
+        if resolved_filter is not None
+        else "custom_template"
+        if resolved_template is not None
+        else "generated"
+    )
     template_hash = resolved_template.template_hash if resolved_template is not None else None
+    script_hash = resolved_filter.script_hash if resolved_filter is not None else None
     vapoursynth_identity_hash = build_vapoursynth_identity_hash(
         generator_version=GENERATOR_VERSION,
         mode=mode,
         output_format="YUV420P10",
         resize_filter="spline36",
         template_hash=template_hash,
+        script_hash=script_hash,
+        filter_entrypoint=resolved_filter.entrypoint if resolved_filter is not None else None,
+        filter_api_version=resolved_filter.api_version if resolved_filter is not None else None,
     )
     execution_identity = build_execution_identity()
     return _PlanningIdentity(
-        profile_hash=build_profile_hash(profile, template_hash=template_hash),
+        profile_hash=build_profile_hash(
+            profile,
+            template_hash=template_hash,
+            script_hash=script_hash,
+        ),
         vapoursynth_identity_hash=vapoursynth_identity_hash,
         execution_identity_hash=execution_identity.identity_hash,
     )

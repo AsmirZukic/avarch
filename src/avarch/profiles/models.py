@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ProfileMatchSettings(BaseModel):
@@ -86,18 +86,54 @@ class ProfileValidationSettings(BaseModel):
     minimum_size_reduction_percent: float | None = Field(default=None, ge=0, lt=100)
 
 
+class ProfileVapourSynthSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["generated", "custom_filter", "custom_template"] = "generated"
+    script: Path | None = None
+    entrypoint: str = "apply"
+    template: Path | None = None
+    api_version: Literal[1] = 1
+
+    @model_validator(mode="after")
+    def mode_fields_must_match(self) -> ProfileVapourSynthSettings:
+        if self.mode == "generated":
+            if self.script is not None or self.template is not None:
+                raise ValueError("generated VapourSynth mode does not accept script or template")
+        elif self.mode == "custom_filter":
+            if self.script is None:
+                raise ValueError("custom_filter VapourSynth mode requires script")
+            if self.template is not None:
+                raise ValueError("custom_filter VapourSynth mode does not accept template")
+            if not self.entrypoint:
+                raise ValueError("custom_filter VapourSynth mode requires entrypoint")
+        elif self.mode == "custom_template":
+            if self.template is None:
+                raise ValueError("custom_template VapourSynth mode requires template")
+            if self.script is not None:
+                raise ValueError("custom_template VapourSynth mode does not accept script")
+        return self
+
+
 class EncodingProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["av1an"]
     container: Literal["mkv"]
     vapoursynth_template: Path | None = None
+    vapoursynth: ProfileVapourSynthSettings = Field(default_factory=ProfileVapourSynthSettings)
     match: ProfileMatchSettings
     video: ProfileVideoSettings
     av1an: ProfileAv1anSettings
     audio: ProfileAudioSettings
     subtitles: ProfileSubtitleSettings
     validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
+
+    @model_validator(mode="after")
+    def legacy_template_must_not_conflict(self) -> EncodingProfile:
+        if self.vapoursynth_template is not None and self.vapoursynth.mode != "generated":
+            raise ValueError("vapoursynth_template cannot be combined with [vapoursynth] mode")
+        return self
 
 
 class ProfileDocument(EncodingProfile):

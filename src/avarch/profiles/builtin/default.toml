@@ -1,0 +1,42 @@
+schema_version = 1
+name = "default"
+description = "General-purpose 1080p SDR AV1 archival profile."
+tags = ["sdr", "1080p", "av1"]
+
+known_limitations = [
+  "Does not deinterlace.",
+  "HDR handling is limited to the generated VapourSynth policy.",
+]
+
+backend = "av1an"
+container = "mkv"
+
+[match]
+video_codec_not = ["av1"]
+
+[video]
+max_width = 1920
+hdr_to_sdr = true
+source = "vapoursynth"
+
+[av1an]
+encoder = "svt-av1"
+workers = 2
+video_args = "--preset 6 --crf 28 --keyint 240 --lp 2"
+
+[audio]
+codec = "libopus"
+bitrate = "128k"
+channels = 2
+languages = ["eng"]
+
+[subtitles]
+languages = ["eng"]
+keep_forced = true
+
+[validation]
+duration_tolerance_seconds = 2.0
+minimum_output_bytes = 1024
+minimum_output_source_ratio = 0.01
+decode_sample = false
+decode_sample_seconds = 5.0

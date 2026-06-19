@@ -43,13 +43,22 @@ def test_sqlite_busy_timeout_is_configured(tmp_path: Path) -> None:
     assert timeout == 5000
 
 
-def test_file_database_uses_wal_mode(tmp_path: Path) -> None:
+def test_file_database_uses_delete_journal_mode(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
 
     with engine.connect() as connection:
         journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
 
-    assert journal_mode == "wal"
+    assert journal_mode == "delete"
+
+
+def test_file_database_uses_full_synchronous_mode(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+
+    with engine.connect() as connection:
+        synchronous = connection.exec_driver_sql("PRAGMA synchronous").scalar_one()
+
+    assert synchronous == 2
 
 
 def test_in_memory_database_does_not_require_wal() -> None:

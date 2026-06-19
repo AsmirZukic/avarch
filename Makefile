@@ -1,4 +1,4 @@
-.PHONY: doctor scan test lint format typecheck check docker-build docker-init docker-doctor
+.PHONY: doctor scan test lint format typecheck check docker-build wrapper-init wrapper-doctor
 
 DOCKER_USER := $(shell id -u):$(shell id -g)
 
@@ -26,10 +26,10 @@ check:
 	uv run pytest
 
 docker-build:
-	docker build -t avarch .
+	docker build -t avarch:latest .
 
-docker-init:
-	docker run --rm --user "$(DOCKER_USER)" -v "$(PWD):/work" avarch init --config /work/avarch.toml
+wrapper-init:
+	./bin/avarch init
 
-docker-doctor:
-	docker run --rm --user "$(DOCKER_USER)" -v "$(PWD):/work" avarch doctor --config /work/avarch.toml
+wrapper-doctor:
+	./bin/avarch doctor

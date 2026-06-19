@@ -4,12 +4,14 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from avarch.config import AppConfig
 from avarch.profiles.models import ProfileDocument
 from avarch.profiles.registry import (
     DuplicateProfileNameError,
     ProfileOrigin,
     ProfileRegistry,
     ProfileRegistryError,
+    ReservedProfileNameError,
     seed_packaged_profiles,
 )
 
@@ -39,6 +41,20 @@ def test_user_profiles_load_through_registry(tmp_path: Path) -> None:
     assert profile.profile.vapoursynth_template == tmp_path / "custom.vpy"
 
 
+def test_user_profiles_load_recursively(tmp_path: Path) -> None:
+    nested = tmp_path / "series" / "animation"
+    nested.mkdir(parents=True)
+    profile_path = nested / "my_anime.toml"
+    profile_path.write_text(
+        _profile_text(name="my_anime"),
+        encoding="utf-8",
+    )
+
+    registry = ProfileRegistry.load(search_paths=[tmp_path])
+
+    assert registry.get("my_anime").source == str(profile_path)
+
+
 def test_duplicate_profile_names_fail(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -55,6 +71,18 @@ def test_duplicate_profile_names_fail(tmp_path: Path) -> None:
 
     with pytest.raises(DuplicateProfileNameError):
         ProfileRegistry.load(search_paths=[first, second])
+
+
+def test_user_profile_cannot_use_reserved_builtin_name(tmp_path: Path) -> None:
+    (tmp_path / "default.toml").write_text(
+        _profile_text(name="default"),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.model_validate({"profile_registry": {"search_paths": [tmp_path]}})
+
+    with pytest.raises(ReservedProfileNameError):
+        ProfileRegistry.from_config(config)
 
 
 def test_validate_all_reports_loaded_profiles(tmp_path: Path) -> None:

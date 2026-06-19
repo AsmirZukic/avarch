@@ -11,6 +11,7 @@ from avarch.contracts import (
     QUEUE_CONTRACT,
     VALIDATION_POLICY_HASH_CONTRACT,
     VAPOURSYNTH_IDENTITY_HASH_CONTRACT,
+    VAPOURSYNTH_SCRIPT_HASH_CONTRACT,
     VAPOURSYNTH_TEMPLATE_HASH_CONTRACT,
     WORK_KEY_CONTRACT,
 )
@@ -20,6 +21,7 @@ def test_current_hash_contracts_are_single_baseline() -> None:
     assert QUEUE_CONTRACT == "queue-job-v1"
     assert WORK_KEY_CONTRACT == "work-v5"
     assert VAPOURSYNTH_TEMPLATE_HASH_CONTRACT == "vpy-template-v1"
+    assert VAPOURSYNTH_SCRIPT_HASH_CONTRACT == "vpy-script-v1"
     assert VAPOURSYNTH_IDENTITY_HASH_CONTRACT == "vpy-identity-v1"
     assert EXECUTION_IDENTITY_HASH_CONTRACT == "execution-identity-v1"
     assert PLAN_HASH_CONTRACT == "plan-v2"

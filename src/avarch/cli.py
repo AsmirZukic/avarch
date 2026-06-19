@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
+import shutil
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +20,7 @@ from sqlmodel import Session, col, select
 from avarch import __version__
 from avarch.config import (
     DEFAULT_CONFIG_TEXT,
+    WORKSPACE_CONFIG_TEXT,
     AppConfig,
     load_config,
     resolve_data_dir,
@@ -65,7 +69,9 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
+from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import (
+    ProfileOrigin,
     ProfileRegistry,
     ProfileRegistryError,
     UnknownProfileError,
@@ -106,11 +112,34 @@ from avarch.scheduler import (
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
+    VapourSynthScriptPathError,
     VspipeError,
     check_vapoursynth_script,
     generate_vapoursynth_script,
+    resolve_vapoursynth_filter,
     resolve_vapoursynth_template,
+    resolve_workspace_script_path,
     validate_script_syntax,
+)
+from avarch.vpy_env import (
+    VpyEnvironmentError,
+    VpyRequirements,
+    add_python_package,
+    add_vsrepo_package,
+    build_runtime_identity,
+    load_requirements,
+    remove_python_package,
+    remove_vsrepo_package,
+    runtime_environment_variables,
+    sync_environment,
+)
+from avarch.vpy_plugins import VpyPluginInventoryError, list_vapoursynth_plugins
+from avarch.workspace import (
+    WorkspaceAlreadyExistsError,
+    WorkspaceContext,
+    WorkspaceError,
+    create_workspace,
+    ensure_workspace_layout,
 )
 
 log = structlog.get_logger(__name__)
@@ -124,6 +153,14 @@ db_app = typer.Typer(help="Database commands.")
 scheduler_app = typer.Typer(help="Scheduler commands.")
 jobs_app = typer.Typer(help="Job commands.")
 queue_app = typer.Typer(help="Queue commands.")
+workspace_app = typer.Typer(help="Workspace commands.")
+config_app = typer.Typer(help="Configuration commands.")
+workflow_app = typer.Typer(help="Workflow commands.")
+profiles_app = typer.Typer(help="Profile commands.")
+vpy_app = typer.Typer(help="VapourSynth commands.")
+vpy_scaffold_app = typer.Typer(help="VapourSynth scaffolding commands.")
+vpy_env_app = typer.Typer(help="VapourSynth environment commands.")
+vpy_packages_app = typer.Typer(help="VapourSynth package commands.")
 
 
 def version_callback(value: bool) -> None:
@@ -159,7 +196,16 @@ def main(version: VersionOption = False) -> None:
 
 
 @app.command()
+def version() -> None:
+    typer.echo(__version__)
+
+
+@app.command()
 def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False) -> None:
+    if _uses_default_config_path(config) and not _resolve_cli_path(config).exists():
+        _init_workspace(force=force)
+        return
+
     config = _resolve_cli_path(config)
     if config.exists() and not force:
         typer.echo(f"Config already exists: {config}")
@@ -173,7 +219,11 @@ def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False)
 
     data_dir = resolve_data_dir(app_config, config)
     data_dir.mkdir(parents=True, exist_ok=True)
-    seeded_profiles = _ensure_visible_profiles(app_config)
+    if config.name == "config.toml" and config.parent.name == ".avarch":
+        ensure_workspace_layout(WorkspaceContext(config.parent.parent.resolve()))
+        seeded_profiles = ()
+    else:
+        seeded_profiles = _ensure_visible_profiles(app_config)
 
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -191,6 +241,32 @@ def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False)
     typer.echo(f"Profiles: {profiles}")
     if seeded_profiles:
         typer.echo("Starter profiles were copied into the profiles directory.")
+
+
+def _init_workspace(*, force: bool) -> None:
+    workspace_root = _resolve_cli_path(Path(".")).resolve()
+    try:
+        workspace = create_workspace(workspace_root, force=force)
+    except WorkspaceAlreadyExistsError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    workspace.config_toml.write_text(WORKSPACE_CONFIG_TEXT, encoding="utf-8")
+    app_config = load_config(workspace.config_toml)
+    configure_logging(app_config.logging.level, app_config.logging.format)
+
+    database_url = resolve_database_url(app_config, workspace.config_toml)
+    _upgrade_database_or_exit(database_url)
+
+    profiles = ", ".join(
+        profile.name for profile in ProfileRegistry.from_config(app_config).list_profiles()
+    )
+
+    typer.echo(f"Workspace: {workspace.root}")
+    typer.echo(f"Config: {workspace.config_toml}")
+    typer.echo(f"Data dir: {workspace.data_dir}")
+    typer.echo(f"Profiles dir: {workspace.profiles_dir}")
+    typer.echo(f"Profiles: {profiles}")
 
 
 @db_app.command("upgrade")
@@ -290,6 +366,12 @@ def doctor(
         raise typer.Exit(1)
     _doctor_pass("app_version")
     typer.echo("PASS app_version")
+    requirements = _doctor_vpy_requirements(config)
+    runtime_identity = build_runtime_identity(requirements)
+    typer.echo(f"Image digest: {runtime_identity.avarch_image_digest}")
+    typer.echo(f"Architecture: {runtime_identity.platform}")
+    typer.echo(f"Python: {runtime_identity.python_version}")
+    typer.echo(f"VapourSynth: {runtime_identity.vapoursynth_version}")
 
 
 @app.command()
@@ -301,6 +383,7 @@ def scan(
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
+    workspace_root = _workspace_root_for_storage(config)
 
     roots_to_scan = list(roots or app_config.scanner.roots)
     if not roots_to_scan:
@@ -324,6 +407,7 @@ def scan(
                     root=root,
                     snapshots=snapshots,
                     scanned_at=_utc_now(),
+                    workspace_root=workspace_root,
                 )
             results.append(result)
         except ScanError as exc:
@@ -1301,17 +1385,25 @@ def plan_file(
                 resolved_profile=resolved_profile,
             )
             resolved_template = resolve_vapoursynth_template(context.profile)
+            resolved_filter = resolve_vapoursynth_filter(context.profile)
             plan = build_plan(
                 context,
                 data_dir=data_dir,
                 resolved_template=resolved_template,
+                resolved_filter=resolved_filter,
             )
         vapoursynth_script = generate_vapoursynth_script(
             plan,
             template=resolved_template,
+            user_filter=resolved_filter,
         )
         validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(plan=plan, vapoursynth_script=vapoursynth_script)
+        write_plan_artifacts(
+            plan=plan,
+            vapoursynth_script=vapoursynth_script,
+            user_filter=resolved_filter,
+            template=resolved_template,
+        )
     except PlanArtifactConflictError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
@@ -1327,7 +1419,10 @@ def plan_file(
 
     if check_vpy:
         try:
-            check_vapoursynth_script(plan.vapoursynth.script_path)
+            check_vapoursynth_script(
+                plan.vapoursynth.script_path,
+                env=runtime_environment_variables(_workspace_for_config(config)),
+            )
             runtime_checked = True
         except VspipeError as exc:
             typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
@@ -1421,14 +1516,130 @@ def _primary_profile_search_path(config: AppConfig) -> Path | None:
 
 
 def _resolve_cli_path(path: Path) -> Path:
+    if _uses_default_config_path(path):
+        invocation_cwd = _invocation_cwd()
+        candidate = invocation_cwd / ".avarch" / "config.toml"
+        legacy_candidate = invocation_cwd / "avarch.toml"
+        if candidate.exists() and not legacy_candidate.exists():
+            return candidate
+
     if path.is_absolute():
         return path
 
-    original_pwd = os.environ.get("PWD")
-    if original_pwd and Path(original_pwd) != Path.cwd():
-        return Path(original_pwd) / path
+    invocation_cwd = _invocation_cwd()
+    if invocation_cwd != Path.cwd():
+        return invocation_cwd / path
 
     return path
+
+
+def _invocation_cwd() -> Path:
+    original_pwd = os.environ.get("PWD")
+    if original_pwd:
+        return Path(original_pwd)
+    return Path.cwd()
+
+
+def _uses_default_config_path(path: Path) -> bool:
+    return path == Path("avarch.toml")
+
+
+def _resolve_effective_config_path(path: Path) -> Path:
+    resolved = _resolve_cli_path(path)
+    if not _uses_default_config_path(path) or resolved.exists():
+        return resolved
+    try:
+        return WorkspaceContext.discover(_resolve_cli_path(Path("."))).config_toml
+    except WorkspaceError:
+        return resolved
+
+
+def _doctor_vpy_requirements(config: Path) -> VpyRequirements:
+    if config.name == "config.toml" and config.parent.name == ".avarch":
+        workspace = WorkspaceContext(config.parent.parent.resolve())
+        if workspace.vpy_requirements_toml.exists():
+            return load_requirements(workspace)
+    try:
+        workspace = WorkspaceContext.discover(config.parent)
+    except WorkspaceError:
+        return VpyRequirements()
+    if workspace.vpy_requirements_toml.exists():
+        return load_requirements(workspace)
+    return VpyRequirements()
+
+
+def _workspace_for_config(config: Path) -> WorkspaceContext:
+    config = _resolve_effective_config_path(config)
+    if config.name == "config.toml" and config.parent.name == ".avarch":
+        return WorkspaceContext(config.parent.parent.resolve())
+    try:
+        return WorkspaceContext.discover(config.parent)
+    except WorkspaceError:
+        return WorkspaceContext(config.parent.resolve())
+
+
+def _workspace_root_for_storage(config: Path) -> Path | None:
+    config = _resolve_effective_config_path(config)
+    if config.name == "config.toml" and config.parent.name == ".avarch":
+        return config.parent.parent.resolve()
+    return None
+
+
+def _scripts_dir_for_config(config: Path) -> Path:
+    workspace = _workspace_for_config(config)
+    if workspace.config_toml.exists():
+        return workspace.scripts_dir
+    return config.parent / "scripts"
+
+
+def _validate_vapoursynth_profile_scripts(
+    profile: EncodingProfile,
+    *,
+    workspace: WorkspaceContext,
+) -> None:
+    settings = profile.vapoursynth
+    if settings.mode == "generated":
+        resolved_template = resolve_vapoursynth_template(profile)
+        if resolved_template is not None:
+            validate_script_syntax(resolved_template.text)
+        return
+
+    if settings.mode == "custom_filter":
+        if settings.script is None:
+            raise VapourSynthScriptPathError("custom_filter profile is missing script")
+        script_path = resolve_workspace_script_path(workspace, settings.script)
+        script_text = _read_required_script(script_path)
+        validate_script_syntax(script_text)
+        _validate_filter_entrypoint(script_text, settings.entrypoint)
+        return
+
+    if settings.template is None:
+        raise VapourSynthScriptPathError("custom_template profile is missing template")
+    template_path = resolve_workspace_script_path(workspace, settings.template)
+    template_text = _read_required_script(template_path)
+    validate_script_syntax(template_text)
+
+
+def _read_required_script(path: Path) -> str:
+    if not path.exists():
+        raise VapourSynthScriptPathError(f"VapourSynth script does not exist: {path}")
+    if not path.is_file():
+        raise VapourSynthScriptPathError(f"VapourSynth script is not a regular file: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _validate_filter_entrypoint(script: str, entrypoint: str) -> None:
+    tree = ast.parse(script, filename="<vapoursynth-filter>")
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == entrypoint:
+            if isinstance(node, ast.AsyncFunctionDef):
+                raise VapourSynthScriptPathError(
+                    f"VapourSynth filter entrypoint must be synchronous: {entrypoint}"
+                )
+            return
+    raise VapourSynthScriptPathError(
+        f"VapourSynth filter entrypoint was not found: {entrypoint}"
+    )
 
 
 def _resolve_media_path(path: Path) -> Path:
@@ -1437,6 +1648,18 @@ def _resolve_media_path(path: Path) -> Path:
 
 def _get_media_file(session: Session, path: Path) -> MediaFile | None:
     statement = select(MediaFile).where(MediaFile.path == str(path))
+    media_file = session.exec(statement).first()
+    if media_file is not None:
+        return media_file
+    try:
+        workspace = WorkspaceContext.discover(path.parent)
+    except WorkspaceError:
+        return None
+    try:
+        relative_path = str(path.resolve().relative_to(workspace.root))
+    except ValueError:
+        return None
+    statement = select(MediaFile).where(MediaFile.path == relative_path)
     return session.exec(statement).first()
 
 
@@ -1501,6 +1724,413 @@ def _echo_plan_summary(
     typer.echo("Dry run only. No encoding was started.")
 
 
+@workspace_app.command("info")
+def workspace_info() -> None:
+    try:
+        workspace = WorkspaceContext.discover(_resolve_cli_path(Path(".")))
+    except WorkspaceError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Workspace: {workspace.root}")
+    typer.echo(f"Config: {workspace.config_toml}")
+    typer.echo(f"Database: {workspace.database_path}")
+    typer.echo(f"Profiles: {workspace.profiles_dir}")
+    typer.echo(f"Scripts: {workspace.scripts_dir}")
+    typer.echo(f"Work: {workspace.work_dir}")
+
+
+@config_app.command("show")
+def config_show(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    typer.echo(f"Config: {config}")
+    typer.echo(f"Data dir: {resolve_data_dir(app_config, config)}")
+    typer.echo(f"Database: {resolve_database_url(app_config, config)}")
+    typer.echo("Profile search paths:")
+    for search_path in app_config.profile_registry.search_paths:
+        typer.echo(f"  {search_path}")
+
+
+@profiles_app.command("list")
+def profiles_list(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    try:
+        profiles = ProfileRegistry.from_config(app_config).list_profiles()
+    except ProfileRegistryError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo("NAME                 ORIGIN    SOURCE")
+    for profile in profiles:
+        typer.echo(f"{profile.name:<20} {profile.origin.value:<8} {profile.source}")
+
+
+@profiles_app.command("copy")
+def profiles_copy(
+    source_name: Annotated[str, typer.Argument(help="Built-in profile to copy.")],
+    name: Annotated[str, typer.Option("--name", help="New user profile name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    try:
+        registry = ProfileRegistry.from_config(app_config)
+        source = registry.get(source_name)
+    except (ProfileRegistryError, UnknownProfileError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    if source.origin != ProfileOrigin.BUILTIN:
+        typer.echo(f"Can only copy built-in profiles: {source_name}")
+        raise typer.Exit(1)
+    if name in {profile.name for profile in registry.list_profiles()}:
+        typer.echo(f"Profile name is already in use or reserved: {name}")
+        raise typer.Exit(1)
+
+    destination_dir = _primary_profile_search_path(app_config)
+    if destination_dir is None:
+        typer.echo("No profile search path is configured.")
+        raise typer.Exit(1)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / f"{name}.toml"
+    if destination.exists():
+        typer.echo(f"Profile already exists: {destination}")
+        raise typer.Exit(1)
+
+    document = source.document.model_copy(update={"name": name})
+    destination.write_text(_profile_document_to_toml(document), encoding="utf-8")
+    typer.echo(f"Profile created: {destination}")
+
+
+@profiles_app.command("scaffold")
+def profiles_scaffold(
+    from_profile: Annotated[str, typer.Option("--from", help="Built-in profile to copy.")],
+    name: Annotated[str, typer.Option("--name", help="New user profile name.")],
+    filter_script: Annotated[
+        str | None,
+        typer.Option("--filter", help="Optional filter script filename."),
+    ] = None,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    profiles_copy(source_name=from_profile, name=name, config=config)
+    if filter_script is not None:
+        vpy_scaffold_filter(name=Path(filter_script).stem, config=config)
+
+
+@vpy_scaffold_app.command("filter")
+def vpy_scaffold_filter(
+    name: Annotated[str, typer.Option("--name", help="Filter module name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    scripts_dir = _scripts_dir_for_config(config)
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    destination = scripts_dir / f"{name}.py"
+    if destination.exists():
+        typer.echo(f"Script already exists: {destination}")
+        raise typer.Exit(1)
+    destination.write_text(_filter_scaffold_text(), encoding="utf-8")
+    typer.echo(f"Filter scaffold created: {destination}")
+
+
+@vpy_scaffold_app.command("template")
+def vpy_scaffold_template(
+    name: Annotated[str, typer.Option("--name", help="Template script name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    scripts_dir = _scripts_dir_for_config(config)
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    destination = scripts_dir / f"{name}.vpy"
+    if destination.exists():
+        typer.echo(f"Script already exists: {destination}")
+        raise typer.Exit(1)
+    destination.write_text(_template_scaffold_text(), encoding="utf-8")
+    typer.echo(f"Template scaffold created: {destination}")
+
+
+@vpy_app.command("validate")
+def vpy_validate(
+    profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    try:
+        resolved_profile = ProfileRegistry.from_config(app_config).get(profile)
+        _validate_vapoursynth_profile_scripts(
+            resolved_profile.profile,
+            workspace=_workspace_for_config(config),
+        )
+    except (
+        OSError,
+        ProfileRegistryError,
+        UnicodeDecodeError,
+        UnknownProfileError,
+        VapourSynthGenerationError,
+    ) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Static VapourSynth validation passed")
+
+
+@vpy_app.command("check")
+def vpy_check(
+    file: Annotated[Path, typer.Argument(help="Tracked media file to check.")],
+    profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    data_dir = resolve_data_dir(app_config, config)
+    file_path = _resolve_media_path(file)
+    engine = create_db_engine(database_url)
+
+    try:
+        registry = ProfileRegistry.from_config(app_config)
+        resolved_profile = registry.get(profile)
+        _validate_vapoursynth_profile_scripts(
+            resolved_profile.profile,
+            workspace=_workspace_for_config(config),
+        )
+        with Session(engine) as session:
+            context = load_planning_context(
+                session,
+                input_path=file_path,
+                resolved_profile=resolved_profile,
+            )
+            resolved_template = resolve_vapoursynth_template(context.profile)
+            resolved_filter = resolve_vapoursynth_filter(context.profile)
+            plan = build_plan(
+                context,
+                data_dir=data_dir,
+                resolved_template=resolved_template,
+                resolved_filter=resolved_filter,
+            )
+        vapoursynth_script = generate_vapoursynth_script(
+            plan,
+            template=resolved_template,
+            user_filter=resolved_filter,
+        )
+        validate_script_syntax(vapoursynth_script)
+        write_plan_artifacts(
+            plan=plan,
+            vapoursynth_script=vapoursynth_script,
+            user_filter=resolved_filter,
+            template=resolved_template,
+        )
+        check_vapoursynth_script(
+            plan.vapoursynth.script_path,
+            env=runtime_environment_variables(_workspace_for_config(config)),
+        )
+    except (
+        OSError,
+        PlanArtifactConflictError,
+        PlanningError,
+        ProfileRegistryError,
+        UnicodeDecodeError,
+        UnknownProfileError,
+        VapourSynthGenerationError,
+        VspipeError,
+    ) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo("VapourSynth runtime check passed")
+    typer.echo(f"Profile: {profile}")
+    typer.echo(f"Script: {plan.vapoursynth.script_path}")
+
+
+@vpy_app.command("sync")
+def vpy_sync(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    workspace = _workspace_for_config(config)
+    try:
+        environment = sync_environment(workspace)
+    except VpyEnvironmentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Workspace VapourSynth environment is current.")
+    typer.echo(f"Environment: {environment.identity.environment_id}")
+    typer.echo(f"Lock: {environment.lock_path}")
+
+
+@vpy_app.command("plugins")
+def vpy_plugins() -> None:
+    try:
+        plugins = list_vapoursynth_plugins()
+    except VpyPluginInventoryError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    typer.echo("NAMESPACE            NAME                 VERSION       SOURCE     PATH")
+    for plugin in plugins:
+        typer.echo(
+            f"{plugin.namespace:<20} {plugin.name:<20} "
+            f"{(plugin.version or '-'):<13} {plugin.source:<10} {plugin.path or '-'}"
+        )
+
+
+@vpy_env_app.command("show")
+def vpy_env_show(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    workspace = _workspace_for_config(config)
+    requirements = load_requirements(workspace)
+    identity = build_runtime_identity(requirements)
+    typer.echo(f"Requirements: {workspace.vpy_requirements_toml}")
+    typer.echo(f"Environment:  {identity.environment_id}")
+    typer.echo(f"Manifest:     {identity.manifest_hash}")
+    typer.echo(f"Image digest: {identity.avarch_image_digest}")
+    typer.echo(f"Python:       {identity.python_version}")
+    typer.echo(f"Python ABI:   {identity.python_abi}")
+    typer.echo(f"Platform:     {identity.platform}")
+    typer.echo(f"VapourSynth:  {identity.vapoursynth_version}")
+
+
+@vpy_env_app.command("check")
+def vpy_env_check(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    workspace = _workspace_for_config(config)
+    try:
+        environment = sync_environment(workspace)
+    except VpyEnvironmentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("PASS vpy_environment")
+    typer.echo(f"Environment: {environment.identity.environment_id}")
+    typer.echo(f"Lock: {environment.lock_path}")
+    try:
+        namespaces = ", ".join(plugin.namespace for plugin in list_vapoursynth_plugins())
+    except VpyPluginInventoryError:
+        namespaces = "unavailable"
+    typer.echo(f"Plugin namespaces: {namespaces or 'none'}")
+
+
+@vpy_packages_app.command("list")
+def vpy_packages_list(config: ConfigOption = Path("avarch.toml")) -> None:
+    config = _resolve_effective_config_path(config)
+    requirements = load_requirements(_workspace_for_config(config))
+    typer.echo("Python packages:")
+    for package in requirements.python.packages:
+        typer.echo(f"  {package}")
+    if not requirements.python.packages:
+        typer.echo("  none")
+    typer.echo("VSRepo packages:")
+    for package in requirements.vsrepo.packages:
+        typer.echo(f"  {package}")
+    if not requirements.vsrepo.packages:
+        typer.echo("  none")
+
+
+@vpy_packages_app.command("search")
+def vpy_packages_search(
+    query: Annotated[str, typer.Argument(help="VSRepo package search query.")],
+) -> None:
+    vsrepo = shutil.which("vsrepo")
+    if vsrepo is None:
+        typer.echo("VSRepo is not available in this runtime.")
+        raise typer.Exit(1)
+    update_result = subprocess.run(
+        [vsrepo, "update"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if update_result.returncode != 0:
+        if update_result.stdout:
+            typer.echo(update_result.stdout.rstrip())
+        if update_result.stderr:
+            typer.echo(update_result.stderr.rstrip(), err=True)
+        raise typer.Exit(update_result.returncode)
+
+    result = subprocess.run([vsrepo, "available"], capture_output=True, text=True, check=False)
+    if result.stdout:
+        query_folded = query.casefold()
+        matches = [
+            line for line in result.stdout.splitlines() if query_folded in line.casefold()
+        ]
+        typer.echo("\n".join(matches) if matches else "No matching VSRepo packages.")
+    if result.stderr:
+        typer.echo(result.stderr.rstrip(), err=True)
+    raise typer.Exit(result.returncode)
+
+
+@vpy_packages_app.command("install")
+def vpy_packages_install(
+    name: Annotated[str, typer.Argument(help="Package requirement or VSRepo package name.")],
+    kind: Annotated[
+        Literal["python", "vsrepo"],
+        typer.Option("--kind", help="Dependency kind to add to the manifest."),
+    ] = "python",
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    workspace = _workspace_for_config(config)
+    try:
+        if kind == "python":
+            add_python_package(workspace, name)
+        else:
+            add_vsrepo_package(workspace, name)
+        environment = sync_environment(workspace)
+    except VpyEnvironmentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"Package installed: {name}")
+    typer.echo(f"Environment: {environment.identity.environment_id}")
+
+
+@vpy_packages_app.command("remove")
+def vpy_packages_remove(
+    name: Annotated[str, typer.Argument(help="Package requirement or VSRepo package name.")],
+    kind: Annotated[
+        Literal["python", "vsrepo"],
+        typer.Option("--kind", help="Dependency kind to remove from the manifest."),
+    ] = "python",
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    workspace = _workspace_for_config(config)
+    try:
+        if kind == "python":
+            remove_python_package(workspace, name)
+        else:
+            remove_vsrepo_package(workspace, name)
+        environment = sync_environment(workspace)
+    except VpyEnvironmentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"Package removed: {name}")
+    typer.echo(f"Environment: {environment.identity.environment_id}")
+
+
+@workflow_app.command("preview")
+def workflow_preview(
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    config = _resolve_effective_config_path(config)
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        count = len(session.exec(select(MediaFile)).all())
+    typer.echo("Workflow preview")
+    typer.echo(f"Profile: {profile}")
+    typer.echo(f"Inventory files: {count}")
+
+
+@workflow_app.command("enqueue")
+def workflow_enqueue(
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
+    config: ConfigOption = Path("avarch.toml"),
+) -> None:
+    enqueue(profile=profile, priority=priority, config=config)
+
+
 @app.command("encode")
 def encode_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to encode.")],
@@ -1536,19 +2166,30 @@ def encode_file(
                 resolved_profile=resolved_profile,
             )
             resolved_template = resolve_vapoursynth_template(context.profile)
+            resolved_filter = resolve_vapoursynth_filter(context.profile)
             plan = build_plan(
                 context,
                 data_dir=data_dir,
                 resolved_template=resolved_template,
+                resolved_filter=resolved_filter,
             )
         vapoursynth_script = generate_vapoursynth_script(
             plan,
             template=resolved_template,
+            user_filter=resolved_filter,
         )
         validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(plan=plan, vapoursynth_script=vapoursynth_script)
+        write_plan_artifacts(
+            plan=plan,
+            vapoursynth_script=vapoursynth_script,
+            user_filter=resolved_filter,
+            template=resolved_template,
+        )
         if check_vpy:
-            check_vapoursynth_script(plan.vapoursynth.script_path)
+            check_vapoursynth_script(
+                plan.vapoursynth.script_path,
+                env=runtime_environment_variables(_workspace_for_config(config)),
+            )
     except PlanArtifactConflictError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
@@ -1974,7 +2615,124 @@ def _source_retained_path(record: PromotionRecord) -> str:
     return "none"
 
 
+def _profile_document_to_toml(document: ProfileDocument) -> str:
+    lines = [
+        "schema_version = 1",
+        f'name = "{_toml_escape(document.name)}"',
+    ]
+    if document.description is not None:
+        lines.append(f'description = "{_toml_escape(document.description)}"')
+    lines.append(f"tags = {_toml_string_list(document.tags)}")
+    lines.append("")
+    lines.append(f"known_limitations = {_toml_string_list(document.known_limitations)}")
+    lines.extend(
+        (
+            "",
+            f'backend = "{document.backend}"',
+            f'container = "{document.container}"',
+            "",
+            "[match]",
+            f"video_codec_not = {_toml_string_list(document.match.video_codec_not)}",
+            "",
+            "[video]",
+            f"max_width = {document.video.max_width}",
+            f"hdr_to_sdr = {_toml_bool(document.video.hdr_to_sdr)}",
+            f'source = "{document.video.source}"',
+            "",
+            "[av1an]",
+            f'encoder = "{document.av1an.encoder}"',
+            f"workers = {document.av1an.workers}",
+            f'video_args = "{_toml_escape(document.av1an.video_args)}"',
+            "",
+            "[audio]",
+            f'codec = "{_toml_escape(document.audio.codec)}"',
+            f'bitrate = "{_toml_escape(document.audio.bitrate)}"',
+            f"channels = {document.audio.channels}",
+            f"languages = {_toml_string_list(document.audio.languages)}",
+            "",
+            "[subtitles]",
+            f"languages = {_toml_string_list(document.subtitles.languages)}",
+            f"keep_forced = {_toml_bool(document.subtitles.keep_forced)}",
+            "",
+            "[validation]",
+            (
+                "duration_tolerance_seconds = "
+                f"{document.validation.duration_tolerance_seconds:g}"
+            ),
+            f"minimum_output_bytes = {document.validation.minimum_output_bytes}",
+            (
+                "minimum_output_source_ratio = "
+                f"{document.validation.minimum_output_source_ratio:g}"
+            ),
+            f"decode_sample = {_toml_bool(document.validation.decode_sample)}",
+            f"decode_sample_seconds = {document.validation.decode_sample_seconds:g}",
+        )
+    )
+    if document.vapoursynth_template is not None:
+        template = _toml_escape(str(document.vapoursynth_template))
+        lines.insert(9, f'vapoursynth_template = "{template}"')
+    if document.validation.minimum_size_reduction_percent is not None:
+        lines.append(
+            "minimum_size_reduction_percent = "
+            f"{document.validation.minimum_size_reduction_percent:g}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _toml_string_list(values: list[str]) -> str:
+    return "[" + ", ".join(f'"{_toml_escape(value)}"' for value in values) + "]"
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _toml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _filter_scaffold_text() -> str:
+    return """from __future__ import annotations
+
+import vapoursynth as vs
+
+from avarch.vpy_api import FilterContext
+
+
+def apply(video: vs.VideoNode, context: FilterContext) -> vs.VideoNode:
+    del context
+    return video
+"""
+
+
+def _template_scaffold_text() -> str:
+    return """from __future__ import annotations
+
+import vapoursynth as vs
+
+core = vs.core
+
+clip = core.bs.VideoSource(source=AVARCH_SOURCE_PATH)
+clip = core.resize.Spline36(
+    clip,
+    width=AVARCH_TARGET_WIDTH,
+    height=AVARCH_TARGET_HEIGHT,
+    format=vs.YUV420P10,
+)
+clip.set_output(index=0)
+"""
+
+
 app.add_typer(db_app, name="db")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(queue_app, name="queue")
+app.add_typer(workspace_app, name="workspace")
+app.add_typer(config_app, name="config")
+app.add_typer(workflow_app, name="workflow")
+app.add_typer(profiles_app, name="profiles")
+vpy_app.add_typer(vpy_scaffold_app, name="scaffold")
+vpy_app.add_typer(vpy_env_app, name="env")
+vpy_app.add_typer(vpy_packages_app, name="packages")
+app.add_typer(vpy_app, name="vpy")
