@@ -10,3 +10,4 @@ avarch.toml
 
 .codex/
 .uv-cache/
+/bin/
