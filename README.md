@@ -2,31 +2,32 @@
 
 Av1an-first archival transcoding orchestration.
 
-## Fresh Machine Setup
+## Docker Setup
 
 From a checked-out copy of this repo:
 
 ```sh
-./scripts/bootstrap
+docker build -t avarch .
 ```
 
-That one command:
-
-- syncs the Python environment from `uv.lock`
-- creates `avarch.toml` if it is missing
-- creates the local SQLite database in `.avarch/`
-- runs `avarch doctor`
-- reports whether the external media tools are available on `PATH`
-- exposes the `uv`-managed VapourSynth tools, including `vspipe`
-- installs Av1an `0.5.x` with Cargo if Av1an is missing or incompatible
-
-If `uv` is missing, install it first:
+Initialize local state in the mounted working directory:
 
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch init --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch doctor --config /work/avarch.toml
 ```
 
-Open a new shell after installing `uv`, then rerun `./scripts/bootstrap`.
+Mount media at a stable container path, then use that path in avarch commands.
+Keeping the container path stable keeps paths stored in SQLite portable between
+runs.
+
+```sh
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  -v /host/media:/media:ro \
+  avarch scan /media --config /work/avarch.toml
+```
 
 ## Development Schema Reset
 
@@ -39,15 +40,18 @@ local state. The source media library is not modified by this reset.
 ```sh
 rm -rf .avarch
 
-uv run avarch init --config ./avarch.toml
-uv run avarch db upgrade --config ./avarch.toml
-uv run avarch scan --config ./avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch init --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch db upgrade --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch scan /media --config /work/avarch.toml
 ```
 
 ## Day-to-Day Commands
 
 ```sh
-make bootstrap      # full local setup/check
+make docker-build   # build the runtime image
+make docker-init    # create avarch.toml and .avarch/ through Docker
+make docker-doctor  # verify mounted config and database through Docker
 make doctor         # verify config and database
 make scan           # scan configured media roots
 make test           # run tests
@@ -57,51 +61,38 @@ make check          # lint, typecheck, and test
 Equivalent direct commands:
 
 ```sh
-uv run avarch doctor
-uv run avarch scan /path/to/media
-uv run avarch files
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch doctor --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch scan /media --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" avarch files --config /work/avarch.toml
 ```
 
 ## Media Toolchain
 
-The Python app can start after `./scripts/bootstrap`. Probing and encoding also
-need these executables on `PATH`:
+The Docker image includes the runtime tools used by probing, planning checks,
+and encoding:
 
-- `ffprobe` for source metadata
-- `ffmpeg` for final muxing
-- `vspipe` for VapourSynth runtime checks and script execution
-- `av1an` for AV1 encoding
+- `ffprobe` from Debian FFmpeg packages for source metadata
+- `ffmpeg` from Debian FFmpeg packages for final muxing and broad common codec support
+- `vspipe` from the Python/VapourSynth environment for runtime checks and script execution
+- `av1an` built with Cargo for AV1 encoding
 
 The current execution contract expects Av1an `0.5.x`.
-
-Bootstrap intentionally stays in the `uv` and Cargo lane. `uv sync` installs
-the Python/VapourSynth packages and exposes `vspipe` from `.venv/bin`. If
-VapourSynth's normal config step cannot find the active Python shared library,
-bootstrap writes the same per-user VapourSynth config from the venv metadata.
-
-Av1an is installed with Cargo. When Av1an's build expects linker names such as
-`libvapoursynth.so` and `libvapoursynth-script.so`, bootstrap creates local
-build-only symlinks under `.avarch/bootstrap/lib` that point at the
-uv-managed VapourSynth libraries. It does not require manual symlinks in
-`/usr/lib`.
-
-`ffmpeg` and `ffprobe` are still system tools. Bootstrap reports them when they
-are missing, but does not install OS packages.
-
-To change the compatible Av1an range later:
-
-```sh
-AVARCH_AV1AN_VERSION_REQ='>=0.5,<0.6' ./scripts/bootstrap
-```
 
 ## Basic Workflow
 
 ```sh
-uv run avarch scan /path/to/media
-uv run avarch probe /path/to/media/movie.mkv
-uv run avarch inspect /path/to/media/movie.mkv
-uv run avarch plan /path/to/media/movie.mkv --profile av1_1080p_sdr
-uv run avarch encode /path/to/media/movie.mkv --profile av1_1080p_sdr --dry-run
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch scan /media --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch probe /media/movie.mkv --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch inspect /media/movie.mkv --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch plan /media/movie.mkv --profile av1_1080p_sdr --config /work/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v /host/media:/media:ro \
+  avarch encode /media/movie.mkv --profile av1_1080p_sdr --dry-run \
+  --config /work/avarch.toml
 ```
 
 Remove `--dry-run` from `encode` when the generated command and artifacts look
@@ -115,6 +106,5 @@ commands create it automatically with defaults.
 To use a different config path:
 
 ```sh
-AVARCH_CONFIG=/path/to/avarch.toml ./scripts/bootstrap
-uv run avarch doctor --config /path/to/avarch.toml
+docker run --rm --user "$(id -u):$(id -g)" -v /path/to/state:/work avarch doctor --config /work/avarch.toml
 ```

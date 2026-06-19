@@ -1,9 +1,6 @@
-.PHONY: bootstrap setup doctor scan test lint format typecheck check
+.PHONY: doctor scan test lint format typecheck check docker-build docker-init docker-doctor
 
-bootstrap:
-	./scripts/bootstrap
-
-setup: bootstrap
+DOCKER_USER := $(shell id -u):$(shell id -g)
 
 doctor:
 	uv run avarch doctor
@@ -27,3 +24,12 @@ check:
 	uv run ruff check .
 	uv run pyright
 	uv run pytest
+
+docker-build:
+	docker build -t avarch .
+
+docker-init:
+	docker run --rm --user "$(DOCKER_USER)" -v "$(PWD):/work" avarch init --config /work/avarch.toml
+
+docker-doctor:
+	docker run --rm --user "$(DOCKER_USER)" -v "$(PWD):/work" avarch doctor --config /work/avarch.toml
