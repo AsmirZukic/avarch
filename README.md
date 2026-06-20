@@ -26,6 +26,10 @@ avarch init
 avarch doctor
 ```
 
+The current product supports only the workspace layout created by `avarch init`.
+Root-level `avarch.toml`, root-level `profiles/`, and `.avarch/avarch.db` are
+not supported state.
+
 Set `AVARCH_IMAGE` to use a non-default tag. Set `AVARCH_GPU=nvidia` or
 `AVARCH_GPU=dri` to pass GPU devices to the encoder container.
 
@@ -55,6 +59,10 @@ make doctor         # verify config and database
 make scan           # scan configured media roots
 make test           # run tests
 make check          # lint, typecheck, and test
+make clean          # restore the repo to a clean state
+make clean-cache    # remove generated caches and build outputs only
+make clean-all      # alias for make clean
+make clean-env      # remove local Python environment/cache
 ```
 
 ## Media Toolchain
@@ -88,3 +96,10 @@ avarch scheduler run
 Workspace configuration lives at `.avarch/config.toml`. Media paths persisted in
 the database are relative to the workspace so the workspace can be moved without
 rewriting inventory records.
+
+To reset a development checkout to the current product layout:
+
+```sh
+make clean-all
+avarch init
+```

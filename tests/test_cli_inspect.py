@@ -23,7 +23,7 @@ def test_inspect_command_prints_latest_probe(tmp_path: Path) -> None:
     media_file = _insert_media_file(config_path, tmp_path / "movie.mkv")
     _insert_probe(config_path, media_file, NormalizedProbe(container="matroska,webm"))
 
-    result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["inspect", str(media_file)])
 
     assert result.exit_code == 0
     assert "Container: matroska,webm" in result.output
@@ -41,7 +41,7 @@ def test_inspect_uses_latest_probe_pointer(tmp_path: Path) -> None:
     )
     _set_latest_probe_id(config_path, media_file, first_probe_id)
 
-    result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["inspect", str(media_file)])
 
     assert result.exit_code == 0
     assert "Duration: 1 s" in result.output
@@ -60,7 +60,7 @@ def test_inspect_does_not_execute_ffprobe(
 
     monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
 
-    result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["inspect", str(media_file)])
 
     assert result.exit_code == 0
 
@@ -75,7 +75,7 @@ def test_inspect_works_when_media_file_is_missing(tmp_path: Path) -> None:
     media_file.unlink()
     _insert_probe(config_path, media_file, NormalizedProbe(container="matroska,webm"))
 
-    result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["inspect", str(media_file)])
 
     assert result.exit_code == 0
     assert "Container: matroska,webm" in result.output
@@ -85,18 +85,18 @@ def test_inspect_fails_without_probe_result(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _insert_media_file(config_path, tmp_path / "movie.mkv")
 
-    result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["inspect", str(media_file)])
 
     assert result.exit_code != 0
     assert "No stored probe result" in result.output
 
 
 def test_inspect_fails_for_unknown_file(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
     result = runner.invoke(
         app,
-        ["inspect", str(tmp_path / "unknown.mkv"), "--config", str(config_path)],
+        ["inspect", str(tmp_path / "unknown.mkv")],
     )
 
     assert result.exit_code != 0
@@ -104,8 +104,8 @@ def test_inspect_fails_for_unknown_file(tmp_path: Path) -> None:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

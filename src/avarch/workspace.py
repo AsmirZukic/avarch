@@ -109,7 +109,7 @@ class WorkspaceContext:
 
         for candidate in (current, *current.parents):
             avarch_dir = candidate / ".avarch"
-            if (avarch_dir / "workspace.toml").is_file() or (avarch_dir / "config.toml").is_file():
+            if (avarch_dir / "workspace.toml").is_file():
                 return cls(candidate)
 
         raise WorkspaceNotFoundError(

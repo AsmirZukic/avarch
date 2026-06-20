@@ -20,11 +20,11 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     movie_a.write_bytes(b"a")
     movie_b.write_bytes(b"bb")
     (library / "notes.txt").write_text("ignored", encoding="utf-8")
-    work_dir = library / ".avarch-work"
+    work_dir = library / ".avarch"
     work_dir.mkdir()
     (work_dir / "temporary.mkv").write_bytes(b"ignored")
 
-    initial = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    initial = runner.invoke(app, ["scan", str(library)])
 
     assert initial.exit_code == 0
     assert "Added:     2" in initial.output
@@ -34,7 +34,7 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert {row.status for row in rows} == {MediaFileStatus.ADDED}
 
-    second = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    second = runner.invoke(app, ["scan", str(library)])
 
     assert second.exit_code == 0
     assert "Added:     0" in second.output
@@ -42,12 +42,12 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     rows = _media_files(config_path)
     assert len(rows) == 2
     assert {row.status for row in rows} == {MediaFileStatus.PRESENT}
-    changed_files = runner.invoke(app, ["files", "--changed", "--config", str(config_path)])
+    changed_files = runner.invoke(app, ["files", "--changed"])
     assert "movie-a.mkv" not in changed_files.output
     assert "movie-b.mp4" not in changed_files.output
 
     movie_a.write_bytes(b"aaa")
-    modified = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    modified = runner.invoke(app, ["scan", str(library)])
 
     assert modified.exit_code == 0
     assert "Changed:   1" in modified.output
@@ -58,7 +58,7 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     }
 
     movie_b.unlink()
-    removed = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    removed = runner.invoke(app, ["scan", str(library)])
 
     assert removed.exit_code == 0
     assert "Missing:   1" in removed.output
@@ -68,7 +68,7 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     assert statuses["movie-b.mp4"] == MediaFileStatus.MISSING
 
     movie_b.write_bytes(b"restored")
-    restored = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    restored = runner.invoke(app, ["scan", str(library)])
 
     assert restored.exit_code == 0
     assert "Changed:   1" in restored.output
@@ -79,8 +79,8 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

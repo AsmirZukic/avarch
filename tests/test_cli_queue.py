@@ -18,16 +18,16 @@ runner = CliRunner()
 
 
 def test_enqueue_command_creates_jobs(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = tmp_path / "media"
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
-    runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    runner.invoke(app, ["scan", str(media_root)])
 
     result = runner.invoke(
         app,
-        ["enqueue", "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["enqueue", "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
@@ -35,15 +35,15 @@ def test_enqueue_command_creates_jobs(tmp_path: Path) -> None:
 
 
 def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = tmp_path / "media"
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
-    runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
-    runner.invoke(app, ["enqueue", "--profile", "av1_1080p_sdr", "--config", str(config_path)])
+    runner.invoke(app, ["scan", str(media_root)])
+    runner.invoke(app, ["enqueue", "--profile", "av1_1080p_sdr"])
 
-    result = runner.invoke(app, ["jobs", "list", "--config", str(config_path)])
+    result = runner.invoke(app, ["jobs", "list"])
 
     assert result.exit_code == 0
     assert "pending" in result.output
@@ -51,18 +51,18 @@ def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
 
 
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scheduler", "pause", "--config", str(config_path)])
+    result = runner.invoke(app, ["scheduler", "pause"])
 
     assert result.exit_code == 0
     assert "Scheduler pause requested" in result.output
 
 
 def test_queue_retry_preview_runs_without_confirm(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["queue", "retry", "--config", str(config_path)])
+    result = runner.invoke(app, ["queue", "retry"])
 
     assert result.exit_code == 0
     assert "Queue retry preview" in result.output
@@ -72,7 +72,7 @@ def test_run_command_invokes_scheduler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     calls: list[str] = []
 
     async def fake_run_scheduler(**_kwargs: object) -> SchedulerRunSummary:
@@ -81,7 +81,7 @@ def test_run_command_invokes_scheduler(
 
     monkeypatch.setattr("avarch.cli.run_scheduler", fake_run_scheduler)
 
-    result = runner.invoke(app, ["scheduler", "run", "--config", str(config_path)])
+    result = runner.invoke(app, ["scheduler", "run"])
 
     assert result.exit_code == 0
     assert calls == ["called"]
@@ -158,7 +158,7 @@ def test_run_command_prints_failed_job_error_details(
 
     monkeypatch.setattr("avarch.cli.run_scheduler", fake_run_scheduler)
 
-    result = runner.invoke(app, ["scheduler", "run", "--config", str(config_path)])
+    result = runner.invoke(app, ["scheduler", "run"])
 
     assert result.exit_code == 0
     assert "Failed jobs:" in result.output
@@ -169,7 +169,7 @@ def test_run_command_prints_failed_job_error_details(
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path

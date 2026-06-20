@@ -20,16 +20,16 @@ runner = CliRunner()
 
 
 def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_path = tmp_path / "avarch.toml"
+    config_path = tmp_path / ".avarch" / "config.toml"
     library = tmp_path / "library"
     library.mkdir()
     media_file = library / "movie.mkv"
     media_file.write_bytes(b"media")
 
-    init_result = runner.invoke(app, ["init", "--config", str(config_path)])
+    init_result = runner.invoke(app, ["init"])
     assert init_result.exit_code == 0
 
-    scan_result = runner.invoke(app, ["scan", str(library), "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan", str(library)])
     assert scan_result.exit_code == 0
 
     before = _media_file(config_path, media_file)
@@ -58,7 +58,7 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    probe_result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    probe_result = runner.invoke(app, ["probe", str(media_file)])
     assert probe_result.exit_code == 0
     assert "Container: matroska,webm" in probe_result.output
     assert _probe_result_count(config_path) == 1
@@ -72,20 +72,20 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert after.fs_fingerprint == before.fs_fingerprint
     assert after.last_seen_at == before.last_seen_at
 
-    inspect_result = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    inspect_result = runner.invoke(app, ["inspect", str(media_file)])
     assert inspect_result.exit_code == 0
     assert _summary(inspect_result.output) == _summary(probe_result.output)
 
-    second_probe = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    second_probe = runner.invoke(app, ["probe", str(media_file)])
     assert second_probe.exit_code == 0
     assert "Duration: 601 s" in second_probe.output
     assert _probe_result_count(config_path) == 2
 
-    second_inspect = runner.invoke(app, ["inspect", str(media_file), "--config", str(config_path)])
+    second_inspect = runner.invoke(app, ["inspect", str(media_file)])
     assert second_inspect.exit_code == 0
     assert _summary(second_inspect.output) == _summary(second_probe.output)
 
-    failed_probe = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    failed_probe = runner.invoke(app, ["probe", str(media_file)])
     assert failed_probe.exit_code != 0
     assert "broken" in failed_probe.output
     assert _probe_result_count(config_path) == 2
@@ -93,8 +93,9 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def _media_file(config_path: Path, path: Path) -> MediaFile:
     engine = _engine(config_path)
+    relative_path = str(path.resolve().relative_to(config_path.parent.parent))
     with Session(engine) as session:
-        return session.exec(select(MediaFile).where(MediaFile.path == str(path.resolve()))).one()
+        return session.exec(select(MediaFile).where(MediaFile.path == relative_path)).one()
 
 
 def _probe_result_count(config_path: Path) -> int:

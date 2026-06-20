@@ -15,7 +15,7 @@ die() {
 find_workspace() {
   current="${PWD:-$(pwd)}"
   while :; do
-    if [ -f "$current/.avarch/workspace.toml" ] || [ -f "$current/.avarch/config.toml" ]; then
+    if [ -f "$current/.avarch/workspace.toml" ]; then
       printf '%s\n' "$current"
       return 0
     fi

@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
@@ -13,10 +12,10 @@ runner = CliRunner()
 
 
 def test_scan_command_scans_explicit_root(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = _media_root(tmp_path)
 
-    result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    result = runner.invoke(app, ["scan", str(media_root)])
 
     assert result.exit_code == 0
     assert "Scan complete." in result.output
@@ -27,16 +26,16 @@ def test_scan_command_uses_configured_roots(tmp_path: Path) -> None:
     media_root = _media_root(tmp_path)
     _write_configured_root(config_path, media_root)
 
-    result = runner.invoke(app, ["scan", "--config", str(config_path)])
+    result = runner.invoke(app, ["scan"])
 
     assert result.exit_code == 0
     assert str(media_root) in result.output
 
 
 def test_scan_command_fails_without_roots(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scan", "--config", str(config_path)])
+    result = runner.invoke(app, ["scan"])
 
     assert result.exit_code != 0
     assert "No scan roots" in result.output
@@ -46,17 +45,17 @@ def test_scan_command_persists_inventory(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_root = _media_root(tmp_path)
 
-    result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    result = runner.invoke(app, ["scan", str(media_root)])
 
     assert result.exit_code == 0
     assert _media_file_count(config_path) == 1
 
 
 def test_scan_command_reports_counts(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = _media_root(tmp_path)
 
-    result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    result = runner.invoke(app, ["scan", str(media_root)])
 
     assert result.exit_code == 0
     assert "Added:     1" in result.output
@@ -65,33 +64,28 @@ def test_scan_command_reports_counts(tmp_path: Path) -> None:
 
 
 def test_scan_command_fails_for_invalid_root(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scan", str(tmp_path / "missing"), "--config", str(config_path)])
+    result = runner.invoke(app, ["scan", str(tmp_path / "missing")])
 
     assert result.exit_code != 0
     assert "Root does not exist" in result.output
 
 
-def test_scan_command_creates_default_config_when_missing(
+def test_scan_command_requires_workspace(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PWD", str(tmp_path))
     media_root = _media_root(tmp_path)
 
     result = runner.invoke(app, ["scan", str(media_root)])
 
-    assert result.exit_code == 0
-    assert (tmp_path / "avarch.toml").exists()
-    assert (tmp_path / ".avarch" / "avarch.db").exists()
-    assert _media_file_count(tmp_path / "avarch.toml") == 1
+    assert result.exit_code != 0
+    assert "No Avarch workspace found" in result.output
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

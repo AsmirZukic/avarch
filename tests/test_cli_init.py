@@ -8,9 +8,9 @@ runner = CliRunner()
 
 
 def test_init_creates_config_and_database(tmp_path: Path) -> None:
-    config_path = tmp_path / "avarch.toml"
+    config_path = tmp_path / ".avarch" / "config.toml"
 
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 0
     assert config_path.exists()
@@ -20,25 +20,27 @@ def test_init_creates_config_and_database(tmp_path: Path) -> None:
     assert "[logging]" in config_text
     assert 'format = "console"' in config_text
 
-    db_path = tmp_path / ".avarch" / "avarch.db"
+    db_path = tmp_path / ".avarch" / "data" / "avarch.db"
     assert db_path.exists()
 
 
-def test_init_does_not_overwrite_existing_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "avarch.toml"
+def test_init_rejects_partial_workspace_state(tmp_path: Path) -> None:
+    config_path = tmp_path / ".avarch" / "config.toml"
+    config_path.parent.mkdir()
     config_path.write_text("custom = true\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    result = runner.invoke(app, ["init"])
 
     assert result.exit_code != 0
     assert config_path.read_text(encoding="utf-8") == "custom = true\n"
 
 
-def test_init_force_overwrites_existing_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "avarch.toml"
+def test_init_force_recreates_workspace(tmp_path: Path) -> None:
+    config_path = tmp_path / ".avarch" / "config.toml"
+    config_path.parent.mkdir()
     config_path.write_text("custom = true\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["init", "--config", str(config_path), "--force"])
+    result = runner.invoke(app, ["init", "--force"])
 
     assert result.exit_code == 0
     assert "[database]" in config_path.read_text(encoding="utf-8")

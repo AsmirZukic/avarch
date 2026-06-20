@@ -108,10 +108,7 @@ def build_profile_hash(
     template_hash: str | None = None,
     script_hash: str | None = None,
 ) -> str:
-    profile_payload = profile.model_dump(
-        mode="json",
-        exclude={"vapoursynth_template"},
-    )
+    profile_payload = profile.model_dump(mode="json")
     if isinstance(profile_payload.get("vapoursynth"), dict):
         profile_payload["vapoursynth"].pop("script", None)
         profile_payload["vapoursynth"].pop("template", None)
@@ -915,8 +912,6 @@ def _normalize_language(language: str) -> str:
 
 
 def _profile_template_path(profile: EncodingProfile) -> Path | None:
-    if profile.vapoursynth_template is not None:
-        return profile.vapoursynth_template
     if profile.vapoursynth.mode == "custom_template":
         return profile.vapoursynth.template
     return None

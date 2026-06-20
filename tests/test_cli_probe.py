@@ -27,7 +27,7 @@ def test_probe_command_stores_result_for_tracked_file(
     media_file = _tracked_file(tmp_path, config_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     assert result.exit_code == 0
     assert _probe_result_count(config_path) == 1
@@ -42,7 +42,7 @@ def test_probe_command_stores_source_fs_fingerprint(
     tracked = _load_media_file(config_path, media_file)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     probe_result = _latest_probe_result(config_path)
     assert result.exit_code == 0
@@ -57,7 +57,7 @@ def test_probe_command_sets_latest_probe_id(
     media_file = _tracked_file(tmp_path, config_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     tracked = _load_media_file(config_path, media_file)
     probe_result = _latest_probe_result(config_path)
@@ -73,7 +73,7 @@ def test_probe_command_prints_normalized_summary(
     media_file = _tracked_file(tmp_path, config_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     assert result.exit_code == 0
     assert "Container: matroska,webm" in result.output
@@ -82,22 +82,22 @@ def test_probe_command_prints_normalized_summary(
 
 
 def test_probe_command_rejects_untracked_file(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_file = tmp_path / "movie.mkv"
     media_file.write_bytes(b"not tracked")
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     assert result.exit_code != 0
     assert "File is not present in the media inventory." in result.output
 
 
 def test_probe_command_rejects_missing_input_path(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
     result = runner.invoke(
         app,
-        ["probe", str(tmp_path / "missing.mkv"), "--config", str(config_path)],
+        ["probe", str(tmp_path / "missing.mkv")],
     )
 
     assert result.exit_code != 0
@@ -105,9 +105,9 @@ def test_probe_command_rejects_missing_input_path(tmp_path: Path) -> None:
 
 
 def test_probe_command_rejects_directory(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["probe", str(tmp_path), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(tmp_path)])
 
     assert result.exit_code != 0
     assert "Path is not a regular file" in result.output
@@ -117,7 +117,7 @@ def test_probe_command_rejects_missing_inventory_status(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path, status=MediaFileStatus.MISSING)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     assert result.exit_code != 0
     assert "File is marked missing" in result.output
@@ -135,7 +135,7 @@ def test_probe_command_does_not_store_failed_probe(
 
     monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     assert result.exit_code != 0
     assert _probe_result_count(config_path) == 0
@@ -148,7 +148,7 @@ def test_failed_probe_does_not_change_latest_probe_id(
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
-    first_result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    first_result = runner.invoke(app, ["probe", str(media_file)])
     before = _load_media_file(config_path, media_file)
 
     def fail_probe(_path: Path) -> dict[str, Any]:
@@ -156,7 +156,7 @@ def test_failed_probe_does_not_change_latest_probe_id(
 
     monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     after = _load_media_file(config_path, media_file)
     assert first_result.exit_code == 0
@@ -174,7 +174,7 @@ def test_probe_command_does_not_mutate_media_file_state(
     before = _load_media_file(config_path, media_file)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    result = runner.invoke(app, ["probe", str(media_file), "--config", str(config_path)])
+    result = runner.invoke(app, ["probe", str(media_file)])
 
     after = _load_media_file(config_path, media_file)
     assert result.exit_code == 0
@@ -188,8 +188,8 @@ def _fake_ffprobe(_path: Path) -> dict[str, Any]:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

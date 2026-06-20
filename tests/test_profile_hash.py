@@ -111,8 +111,12 @@ def test_profile_hash_changes_when_stream_policy_changes() -> None:
 
 
 def test_same_template_content_at_different_paths_has_same_profile_hash() -> None:
-    left = _profile({"vapoursynth_template": "/templates/left.vpy"})
-    right = _profile({"vapoursynth_template": "/templates/right.vpy"})
+    left = _profile(
+        {"vapoursynth": {"mode": "custom_template", "template": "/templates/left.vpy"}}
+    )
+    right = _profile(
+        {"vapoursynth": {"mode": "custom_template", "template": "/templates/right.vpy"}}
+    )
 
     assert build_profile_hash(left, template_hash="template-hash") == build_profile_hash(
         right,
@@ -121,7 +125,9 @@ def test_same_template_content_at_different_paths_has_same_profile_hash() -> Non
 
 
 def test_changed_template_content_changes_profile_hash() -> None:
-    profile = _profile({"vapoursynth_template": "/templates/custom.vpy"})
+    profile = _profile(
+        {"vapoursynth": {"mode": "custom_template", "template": "/templates/custom.vpy"}}
+    )
 
     assert build_profile_hash(profile, template_hash="first") != build_profile_hash(
         profile,

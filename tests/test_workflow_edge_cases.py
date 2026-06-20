@@ -86,15 +86,15 @@ def test_every_user_facing_command_has_help(command: list[str]) -> None:
 
 
 def test_first_time_user_can_recover_from_existing_config_with_force(tmp_path: Path) -> None:
-    config_path = tmp_path / "avarch.toml"
+    config_path = tmp_path / ".avarch" / "config.toml"
 
-    first = runner.invoke(app, ["init", "--config", str(config_path)])
-    second = runner.invoke(app, ["init", "--config", str(config_path)])
-    forced = runner.invoke(app, ["init", "--force", "--config", str(config_path)])
+    first = runner.invoke(app, ["init"])
+    second = runner.invoke(app, ["init"])
+    forced = runner.invoke(app, ["init", "--force"])
 
     assert first.exit_code == 0
     assert second.exit_code != 0
-    assert "Config already exists" in second.output
+    assert "Workspace already exists" in second.output
     assert forced.exit_code == 0
     assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
 
@@ -102,7 +102,7 @@ def test_first_time_user_can_recover_from_existing_config_with_force(tmp_path: P
 def test_scan_workflows_report_missing_roots_file_roots_and_multiple_roots(
     tmp_path: Path,
 ) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
     first_root.mkdir()
@@ -112,15 +112,15 @@ def test_scan_workflows_report_missing_roots_file_roots_and_multiple_roots(
     first_movie.write_bytes(b"a")
     second_movie.write_bytes(b"b")
 
-    no_roots = runner.invoke(app, ["scan", "--config", str(config_path)])
+    no_roots = runner.invoke(app, ["scan"])
     missing_root = runner.invoke(
         app,
-        ["scan", str(tmp_path / "missing"), "--config", str(config_path)],
+        ["scan", str(tmp_path / "missing")],
     )
-    file_root = runner.invoke(app, ["scan", str(first_movie), "--config", str(config_path)])
+    file_root = runner.invoke(app, ["scan", str(first_movie)])
     multiple_roots = runner.invoke(
         app,
-        ["scan", str(first_root), str(second_root), "--config", str(config_path)],
+        ["scan", str(first_root), str(second_root)],
     )
 
     assert no_roots.exit_code != 0
@@ -135,28 +135,28 @@ def test_scan_workflows_report_missing_roots_file_roots_and_multiple_roots(
 
 
 def test_novice_commands_fail_with_actionable_messages(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     untracked = tmp_path / "movie.mkv"
     untracked.write_bytes(b"media")
     output = tmp_path / "movie.av1.mkv"
 
-    probe_untracked = runner.invoke(app, ["probe", str(untracked), "--config", str(config_path)])
+    probe_untracked = runner.invoke(app, ["probe", str(untracked)])
     inspect_untracked = runner.invoke(
         app,
-        ["inspect", str(untracked), "--config", str(config_path)],
+        ["inspect", str(untracked)],
     )
     plan_without_profile = runner.invoke(
         app,
-        ["plan", str(untracked), "--config", str(config_path)],
+        ["plan", str(untracked)],
     )
     encode_without_profile = runner.invoke(
         app,
-        ["encode", str(untracked), "--config", str(config_path)],
+        ["encode", str(untracked)],
     )
-    enqueue_without_profile = runner.invoke(app, ["enqueue", "--config", str(config_path)])
+    enqueue_without_profile = runner.invoke(app, ["enqueue"])
     validate_reversed_or_untracked = runner.invoke(
         app,
-        ["validate", str(untracked), "--against", str(output), "--config", str(config_path)],
+        ["validate", str(untracked), "--against", str(output)],
     )
 
     assert probe_untracked.exit_code != 0
@@ -177,7 +177,7 @@ def test_dry_run_review_workflow_does_not_create_final_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path, movie = _tracked_and_probed_movie(tmp_path, monkeypatch)
+    _, movie = _tracked_and_probed_movie(tmp_path, monkeypatch)
 
     result = runner.invoke(
         app,
@@ -187,8 +187,6 @@ def test_dry_run_review_workflow_does_not_create_final_output(
             "--profile",
             "av1_1080p_sdr",
             "--dry-run",
-            "--config",
-            str(config_path),
         ],
     )
 
@@ -201,17 +199,17 @@ def test_dry_run_review_workflow_does_not_create_final_output(
 
 
 def test_queue_workflows_report_profile_status_and_retry_errors(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
     missing_profile = runner.invoke(
         app,
-        ["enqueue", "--profile", "does_not_exist", "--config", str(config_path)],
+        ["enqueue", "--profile", "does_not_exist"],
     )
     invalid_status = runner.invoke(
         app,
-        ["jobs", "list", "--status", "confused", "--config", str(config_path)],
+        ["jobs", "list", "--status", "confused"],
     )
-    retry_preview = runner.invoke(app, ["queue", "retry", "--config", str(config_path)])
+    retry_preview = runner.invoke(app, ["queue", "retry"])
 
     assert missing_profile.exit_code != 0
     assert "Unknown profile: does_not_exist" in missing_profile.output
@@ -255,7 +253,7 @@ def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
         )
         assert passing_job.id is not None
 
-    result = runner.invoke(app, ["jobs", "list", "--config", str(config_path)])
+    result = runner.invoke(app, ["jobs", "list"])
 
     assert result.exit_code == 0
     assert "failed" in result.output
@@ -294,8 +292,6 @@ def test_existing_passing_validation_is_reused_without_running_worker(
             output_path,
             "--against",
             str(tmp_path / "movie.mkv"),
-            "--config",
-            str(config_path),
         ],
     )
 
@@ -346,7 +342,7 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
 
     result = runner.invoke(
         app,
-        ["queue", "retry", "--status", "failed", "--confirm", "--config", str(config_path)],
+        ["queue", "retry", "--status", "failed", "--confirm"],
     )
 
     with Session(engine) as session:
@@ -432,8 +428,8 @@ def test_headless_systemd_scheduler_workflow() -> None:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 
@@ -450,7 +446,7 @@ def _runtime_config(config_path: Path) -> AppConfig:
             "database": app_config.database.model_copy(
                 update={"url": resolve_database_url(app_config, config_path)}
             ),
-            "app": app_config.app.model_copy(update={"data_dir": config_path.parent / ".avarch"}),
+            "app": app_config.app.model_copy(update={"data_dir": config_path.parent / "data"}),
         }
     )
 
@@ -469,8 +465,8 @@ def _tracked_and_probed_movie(
         return sdr_probe_payload()
 
     monkeypatch.setattr("avarch.cli.run_ffprobe", fake_ffprobe)
-    scan = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
-    probe = runner.invoke(app, ["probe", str(movie), "--config", str(config_path)])
+    scan = runner.invoke(app, ["scan", str(media_root)])
+    probe = runner.invoke(app, ["probe", str(movie)])
     assert scan.exit_code == 0
     assert probe.exit_code == 0
     return config_path, movie

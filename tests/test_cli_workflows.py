@@ -17,28 +17,23 @@ runner = CliRunner()
 def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
     tmp_path: Path,
 ) -> None:
-    config_path = tmp_path / "avarch.toml"
-    profiles_path = tmp_path / "profiles"
-    profile_path = profiles_path / "av1_1080p_sdr.toml"
-    readme_path = profiles_path / "README.md"
+    config_path = tmp_path / ".avarch" / "config.toml"
+    profiles_path = tmp_path / ".avarch" / "profiles"
 
     help_result = runner.invoke(app, ["--help"])
-    init_result = runner.invoke(app, ["init", "--config", str(config_path)])
-    doctor_result = runner.invoke(app, ["doctor", "--config", str(config_path)])
-    db_current_result = runner.invoke(app, ["db", "current", "--config", str(config_path)])
-    db_upgrade_result = runner.invoke(app, ["db", "upgrade", "--config", str(config_path)])
+    init_result = runner.invoke(app, ["init"])
+    doctor_result = runner.invoke(app, ["doctor"])
+    db_current_result = runner.invoke(app, ["db", "current"])
+    db_upgrade_result = runner.invoke(app, ["db", "upgrade"])
 
     assert help_result.exit_code == 0
     assert init_result.exit_code == 0
     assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
     assert profiles_path.is_dir()
-    assert profile_path.is_file()
-    assert readme_path.is_file()
-    assert "Inspect the .toml files here" in readme_path.read_text(encoding="utf-8")
     assert f"Profiles dir: {profiles_path}" in init_result.output
-    assert "Profiles: av1_1080p_sdr" in init_result.output
+    assert "Profiles: av1_1080p_sdr, default" in init_result.output
     resolved_profile = ProfileRegistry.from_config(load_config(config_path)).get("av1_1080p_sdr")
-    assert resolved_profile.origin == ProfileOrigin.USER
+    assert resolved_profile.origin == ProfileOrigin.BUILTIN
     assert doctor_result.exit_code == 0
     assert "PASS config_exists" in doctor_result.output
     assert db_current_result.exit_code == 0
@@ -48,49 +43,54 @@ def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
 
 
 def test_first_time_setup_workflow_reports_broken_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "avarch.toml"
+    config_path = tmp_path / ".avarch" / "config.toml"
+    (tmp_path / ".avarch").mkdir()
+    (tmp_path / ".avarch" / "workspace.toml").write_text(
+        'schema_version = 1\nid = "test"\n',
+        encoding="utf-8",
+    )
     config_path.write_text("[broken\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["doctor", "--config", str(config_path)])
+    result = runner.invoke(app, ["doctor"])
 
     assert result.exit_code != 0
     assert "FAIL config_parses" in result.output
 
 
 def test_inventory_workflow_scans_lists_changed_and_missing_files(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = tmp_path / "media"
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"first")
 
-    scan_result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
-    files_result = runner.invoke(app, ["files", "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan", str(media_root)])
+    files_result = runner.invoke(app, ["files"])
 
     movie.write_bytes(b"changed bytes")
     changed_scan_result = runner.invoke(
         app,
-        ["scan", str(media_root), "--config", str(config_path)],
+        ["scan", str(media_root)],
     )
     changed_files_result = runner.invoke(
         app,
-        ["files", "--changed", "--config", str(config_path)],
+        ["files", "--changed"],
     )
 
     movie.unlink()
     missing_scan_result = runner.invoke(
         app,
-        ["scan", str(media_root), "--config", str(config_path)],
+        ["scan", str(media_root)],
     )
     missing_files_result = runner.invoke(
         app,
-        ["files", "--changed", "--config", str(config_path)],
+        ["files", "--changed"],
     )
 
     assert scan_result.exit_code == 0
     assert "Added:     1" in scan_result.output
     assert files_result.exit_code == 0
-    assert str(movie.resolve()) in files_result.output
+    assert "media/movie.mkv" in files_result.output
     assert changed_scan_result.exit_code == 0
     assert "Changed:   1" in changed_scan_result.output
     assert "changed" in changed_files_result.output
@@ -100,9 +100,9 @@ def test_inventory_workflow_scans_lists_changed_and_missing_files(tmp_path: Path
 
 
 def test_inventory_workflow_rejects_invalid_scan_root(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scan", str(tmp_path / "missing"), "--config", str(config_path)])
+    result = runner.invoke(app, ["scan", str(tmp_path / "missing")])
 
     assert result.exit_code != 0
     assert "Root does not exist" in result.output
@@ -112,23 +112,23 @@ def test_probe_inspect_and_plan_workflow_builds_reviewable_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = tmp_path / "media"
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    scan_result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
-    probe_result = runner.invoke(app, ["probe", str(movie), "--config", str(config_path)])
-    inspect_result = runner.invoke(app, ["inspect", str(movie), "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan", str(media_root)])
+    probe_result = runner.invoke(app, ["probe", str(movie)])
+    inspect_result = runner.invoke(app, ["inspect", str(movie)])
     plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
     repeated_plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
 
     artifact_dir = _artifact_dir_from_output(plan_result.output)
@@ -151,31 +151,31 @@ def test_probe_inspect_and_plan_workflow_reports_user_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path = _init_config(tmp_path)
+    _init_config(tmp_path)
     media_root = tmp_path / "media"
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
-    scan_result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan", str(media_root)])
     plan_before_probe = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
     unknown_profile = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "missing", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "missing"],
     )
-    probe_result = runner.invoke(app, ["probe", str(movie), "--config", str(config_path)])
+    probe_result = runner.invoke(app, ["probe", str(movie)])
     movie.write_bytes(b"changed after probe")
     stale_scan_result = runner.invoke(
         app,
-        ["scan", str(media_root), "--config", str(config_path)],
+        ["scan", str(media_root)],
     )
     stale_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
 
     assert scan_result.exit_code == 0
@@ -194,8 +194,8 @@ def _fake_ffprobe(_path: Path) -> dict[str, Any]:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

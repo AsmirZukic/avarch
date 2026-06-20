@@ -120,7 +120,6 @@ class EncodingProfile(BaseModel):
 
     backend: Literal["av1an"]
     container: Literal["mkv"]
-    vapoursynth_template: Path | None = None
     vapoursynth: ProfileVapourSynthSettings = Field(default_factory=ProfileVapourSynthSettings)
     match: ProfileMatchSettings
     video: ProfileVideoSettings
@@ -128,13 +127,6 @@ class EncodingProfile(BaseModel):
     audio: ProfileAudioSettings
     subtitles: ProfileSubtitleSettings
     validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
-
-    @model_validator(mode="after")
-    def legacy_template_must_not_conflict(self) -> EncodingProfile:
-        if self.vapoursynth_template is not None and self.vapoursynth.mode != "generated":
-            raise ValueError("vapoursynth_template cannot be combined with [vapoursynth] mode")
-        return self
-
 
 class ProfileDocument(EncodingProfile):
     name: str

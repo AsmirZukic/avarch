@@ -150,14 +150,14 @@ def test_scan_root_accepts_uppercase_extensions(tmp_path: Path) -> None:
 
 
 def test_scan_root_skips_excluded_directories(tmp_path: Path) -> None:
-    work_dir = tmp_path / ".avarch-work"
+    work_dir = tmp_path / "transient"
     work_dir.mkdir()
     (work_dir / "temporary.mkv").write_bytes(b"abc")
 
     snapshots = scan_root(
         tmp_path,
         extensions={".mkv"},
-        exclude_directories={".avarch-work"},
+        exclude_directories={"transient"},
     )
 
     assert snapshots == []

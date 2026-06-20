@@ -123,7 +123,8 @@ PROFILE_DIRECTORY_README = """Avarch profile documents live in this directory.
 
 Inspect the .toml files here to see which profiles are available.
 Edit a copied profile or add a new .toml file to create your own profile.
-Update [profile_registry].search_paths in avarch.toml if you want profiles in a different location.
+Update [profile_registry].search_paths in .avarch/config.toml if you want profiles in a
+different location.
 """
 
 
@@ -216,10 +217,6 @@ def _resolved_profile(
         document = ProfileDocument.model_validate(data)
     except ValidationError as exc:
         raise ProfileRegistryError(f"Invalid profile document: {source}") from exc
-    if base_dir is not None and document.vapoursynth_template is not None:
-        template = document.vapoursynth_template
-        if not template.is_absolute():
-            document = document.model_copy(update={"vapoursynth_template": base_dir / template})
     if scripts_dir is not None:
         vapoursynth = document.vapoursynth
         updates: dict[str, Path] = {}

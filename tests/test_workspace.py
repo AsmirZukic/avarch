@@ -55,7 +55,6 @@ def test_init_creates_complete_workspace_layout(
     assert (tmp_path / ".avarch" / "work").is_dir()
     assert (tmp_path / ".avarch" / "tmp").is_dir()
     assert (tmp_path / ".avarch" / "run").is_dir()
-    assert not (tmp_path / "avarch.toml").exists()
 
 
 def test_workspace_scan_persists_relative_media_paths(

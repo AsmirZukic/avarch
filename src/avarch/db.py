@@ -13,9 +13,9 @@ RESET_DATABASE_MESSAGE = """This database cannot be used by this avarch build.
 Move or remove the configured avarch data directory, then initialize
 fresh local state:
 
-    uv run avarch init --config ./avarch.toml
-    uv run avarch db upgrade --config ./avarch.toml
-    uv run avarch scan --config ./avarch.toml"""
+    uv run avarch init
+    uv run avarch db upgrade
+    uv run avarch scan ."""
 
 
 class UnsupportedDatabaseSchemaError(RuntimeError):

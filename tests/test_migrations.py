@@ -13,7 +13,8 @@ from avarch.db_migrations import upgrade_database
 
 
 def test_repository_contains_one_migration_revision() -> None:
-    revisions = sorted(Path("migrations/versions").glob("*.py"))
+    repo_root = Path(__file__).resolve().parents[1]
+    revisions = sorted((repo_root / "migrations" / "versions").glob("*.py"))
 
     assert [revision.name for revision in revisions] == ["0001_initial_schema.py"]
 

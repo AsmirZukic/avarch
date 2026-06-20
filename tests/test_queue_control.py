@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.config import DEFAULT_CONFIG_TEXT, AppConfig, load_config
+from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import (
     Job,
@@ -516,8 +516,9 @@ def _get_job(session: Session, job_id: int) -> Job:
 
 
 def _config(tmp_path: Path) -> AppConfig:
-    config_path = tmp_path / "avarch.toml"
-    config_path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+    config_path = tmp_path / ".avarch" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(WORKSPACE_CONFIG_TEXT, encoding="utf-8")
     return load_config(config_path)
 
 

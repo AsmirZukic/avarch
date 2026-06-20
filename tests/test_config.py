@@ -3,13 +3,19 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from avarch.config import DEFAULT_CONFIG_TEXT, AppConfig, load_config
+from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 
 
 def test_default_config_has_sqlite_database() -> None:
     config = AppConfig()
 
-    assert config.database.url.startswith("sqlite:///")
+    assert config.database.url == "sqlite:///data/avarch.db"
+
+
+def test_default_config_uses_workspace_data_dir() -> None:
+    config = AppConfig()
+
+    assert config.app.data_dir == Path("data")
 
 
 def test_default_config_has_console_logging() -> None:
@@ -28,7 +34,8 @@ def test_default_resource_limits() -> None:
 
 
 def test_load_config_from_toml(tmp_path: Path) -> None:
-    config_file = tmp_path / "avarch.toml"
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
     config_file.write_text(
         """
 [app]
@@ -53,7 +60,8 @@ format = "json"
 
 
 def test_config_loads_resource_limits(tmp_path: Path) -> None:
-    config_file = tmp_path / "avarch.toml"
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
     config_file.write_text(
         """
 [resources]
@@ -77,7 +85,8 @@ def test_resource_limits_must_be_positive() -> None:
 
 
 def test_existing_config_without_resources_still_loads(tmp_path: Path) -> None:
-    config_file = tmp_path / "avarch.toml"
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
     config_file.write_text("[scanner]\nroots = []\n", encoding="utf-8")
 
     config = load_config(config_file)
@@ -97,7 +106,7 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
 
 def test_unknown_app_configuration_field_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        AppConfig.model_validate({"app": {"work_dir": ".avarch-work"}})
+        AppConfig.model_validate({"app": {"work_dir": "work"}})
 
 
 def test_unknown_scanner_configuration_field_is_rejected() -> None:
@@ -112,13 +121,14 @@ def test_default_scanner_config_has_no_roots() -> None:
 
 
 def test_load_scanner_config(tmp_path: Path) -> None:
-    config_file = tmp_path / "avarch.toml"
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
     config_file.write_text(
         """
 [scanner]
 roots = ["/storage/media"]
 extensions = [".mkv", "MP4", ".mp4"]
-exclude_directories = [".avarch-work", "tmp"]
+exclude_directories = ["transient", "tmp"]
 """.strip(),
         encoding="utf-8",
     )
@@ -127,7 +137,7 @@ exclude_directories = [".avarch-work", "tmp"]
 
     assert config.scanner.roots == [Path("/storage/media")]
     assert config.scanner.extensions == {".mkv", ".mp4"}
-    assert config.scanner.exclude_directories == {".avarch-work", "tmp"}
+    assert config.scanner.exclude_directories == {"transient", "tmp"}
 
 
 def test_scanner_extensions_are_normalized() -> None:
@@ -136,15 +146,15 @@ def test_scanner_extensions_are_normalized() -> None:
     assert config.scanner.extensions == {".mkv", ".mp4"}
 
 
-def test_default_config_text_includes_scanner_settings() -> None:
-    assert "[scanner]" in DEFAULT_CONFIG_TEXT
-    assert "exclude_directories" in DEFAULT_CONFIG_TEXT
+def test_workspace_config_text_includes_scanner_settings() -> None:
+    assert "[scanner]" in WORKSPACE_CONFIG_TEXT
+    assert "exclude_directories" in WORKSPACE_CONFIG_TEXT
 
 
-def test_default_config_text_includes_profile_registry_settings() -> None:
-    assert "[profile_registry]" in DEFAULT_CONFIG_TEXT
-    assert "search_paths" in DEFAULT_CONFIG_TEXT
-    assert "[profiles." not in DEFAULT_CONFIG_TEXT
+def test_workspace_config_text_includes_profile_registry_settings() -> None:
+    assert "[profile_registry]" in WORKSPACE_CONFIG_TEXT
+    assert "search_paths" in WORKSPACE_CONFIG_TEXT
+    assert "[profiles." not in WORKSPACE_CONFIG_TEXT
 
 
 def test_app_config_contains_profile_registry_settings() -> None:
@@ -154,7 +164,8 @@ def test_app_config_contains_profile_registry_settings() -> None:
 
 
 def test_load_config_resolves_profile_registry_search_paths(tmp_path: Path) -> None:
-    config_file = tmp_path / "avarch.toml"
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
     config_file.write_text(
         """
 [profile_registry]
@@ -166,7 +177,7 @@ search_paths = ["profiles", "/opt/avarch/profiles"]
     config = load_config(config_file)
 
     assert config.profile_registry.search_paths == [
-        tmp_path / "profiles",
+        tmp_path / ".avarch" / "profiles",
         Path("/opt/avarch/profiles"),
     ]
 

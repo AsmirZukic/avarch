@@ -119,9 +119,11 @@ def build_script_hash(text: str) -> str:
 def resolve_vapoursynth_template(
     profile: EncodingProfile,
 ) -> ResolvedVapourSynthTemplate | None:
-    template_path = profile.vapoursynth_template
-    if template_path is None and profile.vapoursynth.mode == "custom_template":
-        template_path = profile.vapoursynth.template
+    template_path = (
+        profile.vapoursynth.template
+        if profile.vapoursynth.mode == "custom_template"
+        else None
+    )
     if template_path is None:
         return None
 

@@ -33,7 +33,8 @@ def test_current_hash_contracts_are_single_baseline() -> None:
 
 
 def test_current_alembic_revision_is_single_baseline() -> None:
-    revisions = list(Path("migrations/versions").glob("*.py"))
+    repo_root = Path(__file__).resolve().parents[1]
+    revisions = list((repo_root / "migrations" / "versions").glob("*.py"))
 
     assert ALEMBIC_BASELINE_REVISION == "0001_initial"
     assert [revision.name for revision in revisions] == ["0001_initial_schema.py"]

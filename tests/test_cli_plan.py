@@ -28,7 +28,7 @@ def test_plan_command_creates_bundle(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
@@ -39,26 +39,23 @@ def test_plan_command_creates_bundle(tmp_path: Path) -> None:
     assert (artifact_dir / "movie.vpy").is_file()
 
 
-def test_plan_command_reseeds_default_profiles_when_user_profiles_dir_is_missing(
+def test_plan_command_uses_packaged_builtin_when_workspace_profiles_dir_is_missing(
     tmp_path: Path,
 ) -> None:
     config_path = _init_config(tmp_path)
-    profiles_dir = tmp_path / "profiles"
-    profile_path = profiles_dir / "av1_1080p_sdr.toml"
+    profiles_dir = tmp_path / ".avarch" / "profiles"
     shutil.rmtree(profiles_dir)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_probe(config_path, media_file)
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
     assert "Profile:      av1_1080p_sdr" in result.output
-    assert profiles_dir.is_dir()
-    assert profile_path.is_file()
-    assert "name = \"av1_1080p_sdr\"" in profile_path.read_text(encoding="utf-8")
+    assert not (profiles_dir / "av1_1080p_sdr.toml").exists()
 
 
 def test_plan_command_does_not_run_vspipe_by_default(
@@ -76,7 +73,7 @@ def test_plan_command_does_not_run_vspipe_by_default(
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
@@ -105,8 +102,6 @@ def test_plan_command_check_vpy_validates_bestsource_script(
             "--profile",
             "av1_1080p_sdr",
             "--check-vpy",
-            "--config",
-            str(config_path),
         ],
     )
 
@@ -129,7 +124,7 @@ def test_plan_command_prints_summary(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
@@ -155,7 +150,7 @@ def test_plan_command_executes_no_external_process(
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code == 0
@@ -165,7 +160,7 @@ def test_repeated_plan_command_is_idempotent(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_probe(config_path, media_file)
-    command = ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)]
+    command = ["plan", str(media_file), "--profile", "av1_1080p_sdr"]
 
     first = runner.invoke(app, command)
     second = runner.invoke(app, command)
@@ -193,7 +188,7 @@ def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code != 0
@@ -212,7 +207,7 @@ def test_plan_command_rejects_builtin_hdr_source(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code != 0
@@ -237,7 +232,7 @@ def test_plan_command_rejects_missing_audio_match(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
     )
 
     assert result.exit_code != 0
@@ -245,8 +240,8 @@ def test_plan_command_rejects_missing_audio_match(tmp_path: Path) -> None:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
 

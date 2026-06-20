@@ -19,7 +19,6 @@ from sqlmodel import Session, col, select
 
 from avarch import __version__
 from avarch.config import (
-    DEFAULT_CONFIG_TEXT,
     WORKSPACE_CONFIG_TEXT,
     AppConfig,
     load_config,
@@ -75,7 +74,6 @@ from avarch.profiles.registry import (
     ProfileRegistry,
     ProfileRegistryError,
     UnknownProfileError,
-    seed_packaged_profiles,
 )
 from avarch.promoter import (
     PromotionError,
@@ -139,7 +137,6 @@ from avarch.workspace import (
     WorkspaceContext,
     WorkspaceError,
     create_workspace,
-    ensure_workspace_layout,
 )
 
 log = structlog.get_logger(__name__)
@@ -178,7 +175,6 @@ VersionOption = Annotated[
         help="Show version and exit.",
     ),
 ]
-ConfigOption = Annotated[Path, typer.Option("--config", help="Config file path.")]
 ForceOption = Annotated[bool, typer.Option("--force", help="Overwrite existing config.")]
 LogFormatOption = Annotated[
     Literal["console", "json"] | None,
@@ -201,46 +197,8 @@ def version() -> None:
 
 
 @app.command()
-def init(config: ConfigOption = Path("avarch.toml"), force: ForceOption = False) -> None:
-    if _uses_default_config_path(config) and not _resolve_cli_path(config).exists():
-        _init_workspace(force=force)
-        return
-
-    config = _resolve_cli_path(config)
-    if config.exists() and not force:
-        typer.echo(f"Config already exists: {config}")
-        raise typer.Exit(1)
-
-    _write_default_config(config)
-
-    app_config = load_config(config)
-    configure_logging(app_config.logging.level, app_config.logging.format)
-    log.info("config_loaded", path=str(config))
-
-    data_dir = resolve_data_dir(app_config, config)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    if config.name == "config.toml" and config.parent.name == ".avarch":
-        ensure_workspace_layout(WorkspaceContext(config.parent.parent.resolve()))
-        seeded_profiles = ()
-    else:
-        seeded_profiles = _ensure_visible_profiles(app_config)
-
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    log.info("database_upgraded", database_url=database_url)
-
-    profiles = ", ".join(
-        profile.name for profile in ProfileRegistry.from_config(app_config).list_profiles()
-    )
-    primary_profiles_dir = _primary_profile_search_path(app_config)
-
-    typer.echo(f"Config: {config}")
-    typer.echo(f"Data dir: {data_dir}")
-    if primary_profiles_dir is not None:
-        typer.echo(f"Profiles dir: {primary_profiles_dir}")
-    typer.echo(f"Profiles: {profiles}")
-    if seeded_profiles:
-        typer.echo("Starter profiles were copied into the profiles directory.")
+def init(force: ForceOption = False) -> None:
+    _init_workspace(force=force)
 
 
 def _init_workspace(*, force: bool) -> None:
@@ -270,8 +228,8 @@ def _init_workspace(*, force: bool) -> None:
 
 
 @db_app.command("upgrade")
-def db_upgrade(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
+def db_upgrade() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -280,8 +238,8 @@ def db_upgrade(config: ConfigOption = Path("avarch.toml")) -> None:
 
 
 @db_app.command("current")
-def db_current(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
+def db_current() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     try:
@@ -296,10 +254,9 @@ def db_current(config: ConfigOption = Path("avarch.toml")) -> None:
 
 @app.command()
 def doctor(
-    config: ConfigOption = Path("avarch.toml"),
     log_format: LogFormatOption = None,
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     if not config.exists():
         configure_logging()
         _doctor_fail("config_exists", "missing config")
@@ -377,9 +334,8 @@ def doctor(
 @app.command()
 def scan(
     roots: RootsArgument = None,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -435,9 +391,8 @@ def files(
         bool,
         typer.Option("--changed", help="Show added, changed, and missing files only."),
     ] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -471,9 +426,8 @@ def files(
 def enqueue(
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
     priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -508,9 +462,8 @@ def run_queue(
         bool,
         typer.Option("--resume", help="Resume a paused scheduler before starting."),
     ] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -559,10 +512,9 @@ def queue_retry_command(
         typer.Option("--dry-run", help="Preview without changing jobs."),
     ] = False,
     confirm: Annotated[bool, typer.Option("--confirm", help="Apply retry updates.")] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
     del dry_run
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -605,9 +557,8 @@ def queue_retry_command(
 @scheduler_app.command("pause")
 def pause(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -624,8 +575,8 @@ def pause(
 
 
 @scheduler_app.command("resume")
-def resume_scheduler_command(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
+def resume_scheduler_command() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -645,9 +596,8 @@ def drain_scheduler_command(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -669,9 +619,8 @@ def stop_scheduler_command(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -689,8 +638,8 @@ def stop_scheduler_command(
 
 
 @scheduler_app.command("status")
-def scheduler_status_command(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_cli_path(config)
+def scheduler_status_command() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -735,9 +684,8 @@ def jobs_list(
     stage: Annotated[str | None, typer.Option("--stage", help="Filter by job stage.")] = None,
     profile: Annotated[str | None, typer.Option("--profile", help="Filter by profile.")] = None,
     limit: Annotated[int | None, typer.Option("--limit", help="Maximum rows to print.")] = None,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -787,9 +735,8 @@ def jobs_list(
 @jobs_app.command("show")
 def jobs_show(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -868,10 +815,9 @@ def jobs_logs(
         int,
         typer.Option("--tail-bytes", help="Bytes to tail per log."),
     ] = 16 * 1024,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
     tail_bytes = min(tail_bytes, MAX_CLI_LOG_TAIL_BYTES)
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -896,9 +842,8 @@ def jobs_cancel(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for cancellation to settle.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -919,9 +864,8 @@ def jobs_cancel(
 def jobs_hold(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
     reason: Annotated[str | None, typer.Option("--reason")] = None,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -938,9 +882,8 @@ def jobs_hold(
 @jobs_app.command("release")
 def jobs_release(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -953,9 +896,8 @@ def jobs_release(
 @jobs_app.command("retry")
 def jobs_retry(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -980,9 +922,8 @@ def jobs_retry(
 def jobs_priority(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
     value: Annotated[int, typer.Argument(help="New priority.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1017,10 +958,9 @@ def queue_clear_command(
     confirm: Annotated[bool, typer.Option("--confirm")] = False,
     wait: Annotated[bool, typer.Option("--wait")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
     del dry_run
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1060,9 +1000,8 @@ def queue_clear_command(
 @app.command("probe")
 def probe_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to probe.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1115,9 +1054,8 @@ def probe_file(
 @app.command("inspect")
 def inspect_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to inspect.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1151,9 +1089,8 @@ def inspect_file(
 def validate_file(
     output: Annotated[Path, typer.Argument(help="Planned encoded output to validate.")],
     against: Annotated[Path, typer.Option("--against", help="Source media file.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1268,9 +1205,8 @@ def promote_job(
         bool,
         typer.Option("--recover", help="Recover an interrupted promotion for this job."),
     ] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1364,9 +1300,8 @@ def plan_file(
             help="Run vspipe --info after writing the generated script.",
         ),
     ] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1450,26 +1385,17 @@ def _upgrade_database_or_exit(database_url: str) -> None:
 
 
 def _load_and_configure(config: Path) -> AppConfig:
-    config_created = False
     if not config.exists():
-        _write_default_config(config)
-        config_created = True
+        configure_logging()
+        typer.echo(f"Workspace config is missing: {config}")
+        raise typer.Exit(1)
 
     app_config = load_config(config)
     configure_logging(app_config.logging.level, app_config.logging.format)
-    if config_created:
-        log.info("config_created", path=str(config))
     log.info("config_loaded", path=str(config))
 
     data_dir = resolve_data_dir(app_config, config)
     data_dir.mkdir(parents=True, exist_ok=True)
-    seeded_profiles = _ensure_visible_profiles(app_config)
-    if seeded_profiles:
-        log.info(
-            "default_profiles_seeded",
-            directory=str(seeded_profiles[0].parent),
-            profiles=[path.stem for path in seeded_profiles],
-        )
 
     return app_config
 
@@ -1485,29 +1411,6 @@ def _runtime_config(app_config: AppConfig, config: Path) -> AppConfig:
     )
 
 
-def _write_default_config(config: Path) -> None:
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
-
-
-def _ensure_visible_profiles(config: AppConfig) -> tuple[Path, ...]:
-    search_paths = config.profile_registry.search_paths
-    for search_path in search_paths:
-        search_path.mkdir(parents=True, exist_ok=True)
-
-    has_profiles = any(
-        any(path.is_file() for path in search_path.glob("*.toml")) for search_path in search_paths
-    )
-    if has_profiles:
-        return ()
-
-    primary_search_path = _primary_profile_search_path(config)
-    if primary_search_path is None:
-        return ()
-
-    return seed_packaged_profiles(primary_search_path)
-
-
 def _primary_profile_search_path(config: AppConfig) -> Path | None:
     search_paths = config.profile_registry.search_paths
     if not search_paths:
@@ -1516,13 +1419,6 @@ def _primary_profile_search_path(config: AppConfig) -> Path | None:
 
 
 def _resolve_cli_path(path: Path) -> Path:
-    if _uses_default_config_path(path):
-        invocation_cwd = _invocation_cwd()
-        candidate = invocation_cwd / ".avarch" / "config.toml"
-        legacy_candidate = invocation_cwd / "avarch.toml"
-        if candidate.exists() and not legacy_candidate.exists():
-            return candidate
-
     if path.is_absolute():
         return path
 
@@ -1540,56 +1436,35 @@ def _invocation_cwd() -> Path:
     return Path.cwd()
 
 
-def _uses_default_config_path(path: Path) -> bool:
-    return path == Path("avarch.toml")
-
-
-def _resolve_effective_config_path(path: Path) -> Path:
-    resolved = _resolve_cli_path(path)
-    if not _uses_default_config_path(path) or resolved.exists():
-        return resolved
+def _workspace_context() -> WorkspaceContext:
     try:
-        return WorkspaceContext.discover(_resolve_cli_path(Path("."))).config_toml
-    except WorkspaceError:
-        return resolved
+        return WorkspaceContext.discover(_resolve_cli_path(Path(".")))
+    except WorkspaceError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+
+def _workspace_config_path() -> Path:
+    return _workspace_context().config_toml
 
 
 def _doctor_vpy_requirements(config: Path) -> VpyRequirements:
-    if config.name == "config.toml" and config.parent.name == ".avarch":
-        workspace = WorkspaceContext(config.parent.parent.resolve())
-        if workspace.vpy_requirements_toml.exists():
-            return load_requirements(workspace)
-    try:
-        workspace = WorkspaceContext.discover(config.parent)
-    except WorkspaceError:
-        return VpyRequirements()
+    workspace = WorkspaceContext(config.parent.parent.resolve())
     if workspace.vpy_requirements_toml.exists():
         return load_requirements(workspace)
     return VpyRequirements()
 
 
 def _workspace_for_config(config: Path) -> WorkspaceContext:
-    config = _resolve_effective_config_path(config)
-    if config.name == "config.toml" and config.parent.name == ".avarch":
-        return WorkspaceContext(config.parent.parent.resolve())
-    try:
-        return WorkspaceContext.discover(config.parent)
-    except WorkspaceError:
-        return WorkspaceContext(config.parent.resolve())
+    return WorkspaceContext(config.parent.parent.resolve())
 
 
 def _workspace_root_for_storage(config: Path) -> Path | None:
-    config = _resolve_effective_config_path(config)
-    if config.name == "config.toml" and config.parent.name == ".avarch":
-        return config.parent.parent.resolve()
-    return None
+    return config.parent.parent.resolve()
 
 
 def _scripts_dir_for_config(config: Path) -> Path:
-    workspace = _workspace_for_config(config)
-    if workspace.config_toml.exists():
-        return workspace.scripts_dir
-    return config.parent / "scripts"
+    return _workspace_for_config(config).scripts_dir
 
 
 def _validate_vapoursynth_profile_scripts(
@@ -1741,8 +1616,8 @@ def workspace_info() -> None:
 
 
 @config_app.command("show")
-def config_show(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def config_show() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     typer.echo(f"Config: {config}")
     typer.echo(f"Data dir: {resolve_data_dir(app_config, config)}")
@@ -1753,8 +1628,8 @@ def config_show(config: ConfigOption = Path("avarch.toml")) -> None:
 
 
 @profiles_app.command("list")
-def profiles_list(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def profiles_list() -> None:
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     try:
         profiles = ProfileRegistry.from_config(app_config).list_profiles()
@@ -1771,9 +1646,8 @@ def profiles_list(config: ConfigOption = Path("avarch.toml")) -> None:
 def profiles_copy(
     source_name: Annotated[str, typer.Argument(help="Built-in profile to copy.")],
     name: Annotated[str, typer.Option("--name", help="New user profile name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     try:
         registry = ProfileRegistry.from_config(app_config)
@@ -1812,18 +1686,17 @@ def profiles_scaffold(
         str | None,
         typer.Option("--filter", help="Optional filter script filename."),
     ] = None,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    profiles_copy(source_name=from_profile, name=name, config=config)
+    profiles_copy(source_name=from_profile, name=name)
     if filter_script is not None:
-        vpy_scaffold_filter(name=Path(filter_script).stem, config=config)
+        vpy_scaffold_filter(name=Path(filter_script).stem)
 
 
 @vpy_scaffold_app.command("filter")
 def vpy_scaffold_filter(
     name: Annotated[str, typer.Option("--name", help="Filter module name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
+    config = _workspace_config_path()
     scripts_dir = _scripts_dir_for_config(config)
     scripts_dir.mkdir(parents=True, exist_ok=True)
     destination = scripts_dir / f"{name}.py"
@@ -1837,8 +1710,8 @@ def vpy_scaffold_filter(
 @vpy_scaffold_app.command("template")
 def vpy_scaffold_template(
     name: Annotated[str, typer.Option("--name", help="Template script name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
+    config = _workspace_config_path()
     scripts_dir = _scripts_dir_for_config(config)
     scripts_dir.mkdir(parents=True, exist_ok=True)
     destination = scripts_dir / f"{name}.vpy"
@@ -1852,9 +1725,8 @@ def vpy_scaffold_template(
 @vpy_app.command("validate")
 def vpy_validate(
     profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     try:
         resolved_profile = ProfileRegistry.from_config(app_config).get(profile)
@@ -1878,9 +1750,8 @@ def vpy_validate(
 def vpy_check(
     file: Annotated[Path, typer.Argument(help="Tracked media file to check.")],
     profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -1944,8 +1815,8 @@ def vpy_check(
 
 
 @vpy_app.command("sync")
-def vpy_sync(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def vpy_sync() -> None:
+    config = _workspace_config_path()
     workspace = _workspace_for_config(config)
     try:
         environment = sync_environment(workspace)
@@ -1974,8 +1845,8 @@ def vpy_plugins() -> None:
 
 
 @vpy_env_app.command("show")
-def vpy_env_show(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def vpy_env_show() -> None:
+    config = _workspace_config_path()
     workspace = _workspace_for_config(config)
     requirements = load_requirements(workspace)
     identity = build_runtime_identity(requirements)
@@ -1990,8 +1861,8 @@ def vpy_env_show(config: ConfigOption = Path("avarch.toml")) -> None:
 
 
 @vpy_env_app.command("check")
-def vpy_env_check(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def vpy_env_check() -> None:
+    config = _workspace_config_path()
     workspace = _workspace_for_config(config)
     try:
         environment = sync_environment(workspace)
@@ -2009,8 +1880,8 @@ def vpy_env_check(config: ConfigOption = Path("avarch.toml")) -> None:
 
 
 @vpy_packages_app.command("list")
-def vpy_packages_list(config: ConfigOption = Path("avarch.toml")) -> None:
-    config = _resolve_effective_config_path(config)
+def vpy_packages_list() -> None:
+    config = _workspace_config_path()
     requirements = load_requirements(_workspace_for_config(config))
     typer.echo("Python packages:")
     for package in requirements.python.packages:
@@ -2064,9 +1935,8 @@ def vpy_packages_install(
         Literal["python", "vsrepo"],
         typer.Option("--kind", help="Dependency kind to add to the manifest."),
     ] = "python",
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     workspace = _workspace_for_config(config)
     try:
         if kind == "python":
@@ -2088,9 +1958,8 @@ def vpy_packages_remove(
         Literal["python", "vsrepo"],
         typer.Option("--kind", help="Dependency kind to remove from the manifest."),
     ] = "python",
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     workspace = _workspace_for_config(config)
     try:
         if kind == "python":
@@ -2108,9 +1977,8 @@ def vpy_packages_remove(
 @workflow_app.command("preview")
 def workflow_preview(
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_effective_config_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -2126,9 +1994,8 @@ def workflow_preview(
 def workflow_enqueue(
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
     priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    enqueue(profile=profile, priority=priority, config=config)
+    enqueue(profile=profile, priority=priority)
 
 
 @app.command("encode")
@@ -2146,9 +2013,8 @@ def encode_file(
             help="Run vspipe --info after writing the generated script.",
         ),
     ] = False,
-    config: ConfigOption = Path("avarch.toml"),
 ) -> None:
-    config = _resolve_cli_path(config)
+    config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
@@ -2668,9 +2534,6 @@ def _profile_document_to_toml(document: ProfileDocument) -> str:
             f"decode_sample_seconds = {document.validation.decode_sample_seconds:g}",
         )
     )
-    if document.vapoursynth_template is not None:
-        template = _toml_escape(str(document.vapoursynth_template))
-        lines.insert(9, f'vapoursynth_template = "{template}"')
     if document.validation.minimum_size_reduction_percent is not None:
         lines.append(
             "minimum_size_reduction_percent = "

@@ -21,7 +21,7 @@ def test_configured_scan_workflow_handles_roots_extensions_exclusions_and_symlin
     media_root.mkdir()
     movie = media_root / "movie.MKV"
     ignored_text = media_root / "notes.txt"
-    excluded_dir = media_root / ".avarch-work"
+    excluded_dir = media_root / ".avarch"
     excluded_movie = excluded_dir / "excluded.mkv"
     nested = media_root / "nested"
     nested_movie = nested / "episode.mp4"
@@ -33,17 +33,17 @@ def test_configured_scan_workflow_handles_roots_extensions_exclusions_and_symlin
     nested_movie.write_bytes(b"nested")
     (media_root / "linked.mkv").symlink_to(movie)
 
-    config_path = _write_inventory_config(tmp_path, roots=[media_root])
+    _write_inventory_config(tmp_path, roots=[media_root])
 
-    scan_result = runner.invoke(app, ["scan", "--config", str(config_path)])
-    files_result = runner.invoke(app, ["files", "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan"])
+    files_result = runner.invoke(app, ["files"])
 
     assert scan_result.exit_code == 0
     assert "Added:     2" in scan_result.output
-    assert str(movie.resolve()) in files_result.output
-    assert str(nested_movie.resolve()) in files_result.output
-    assert str(ignored_text.resolve()) not in files_result.output
-    assert str(excluded_movie.resolve()) not in files_result.output
+    assert "media/movie.MKV" in files_result.output
+    assert "media/nested/episode.mp4" in files_result.output
+    assert "media/notes.txt" not in files_result.output
+    assert "media/.avarch/excluded.mkv" not in files_result.output
     assert "linked.mkv" not in files_result.output
 
 
@@ -56,31 +56,31 @@ def test_empty_extension_workflow_can_mark_previously_tracked_files_missing(
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
 
-    first_scan = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    first_scan = runner.invoke(app, ["scan", str(media_root)])
     _replace_config_line(
         config_path,
         'extensions = [".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"]',
         "extensions = []",
     )
-    second_scan = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
-    changed_files = runner.invoke(app, ["files", "--changed", "--config", str(config_path)])
+    second_scan = runner.invoke(app, ["scan", str(media_root)])
+    changed_files = runner.invoke(app, ["files", "--changed"])
 
     assert first_scan.exit_code == 0
     assert second_scan.exit_code == 0
     assert "Missing:   1" in second_scan.output
     assert "missing" in changed_files.output
-    assert str(movie.resolve()) in changed_files.output
+    assert "media/movie.mkv" in changed_files.output
 
 
 def test_media_catalog_workflow_can_stop_after_probe_and_inspect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path, movie = _tracked_movie(tmp_path)
+    _, movie = _tracked_movie(tmp_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
 
-    probe_result = runner.invoke(app, ["probe", str(movie), "--config", str(config_path)])
-    inspect_result = runner.invoke(app, ["inspect", str(movie), "--config", str(config_path)])
+    probe_result = runner.invoke(app, ["probe", str(movie)])
+    inspect_result = runner.invoke(app, ["inspect", str(movie)])
 
     assert probe_result.exit_code == 0
     assert inspect_result.exit_code == 0
@@ -98,7 +98,7 @@ def test_plan_workflow_materializes_bundle_for_manual_av1an_review(
 
     plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
 
     artifact_dir = _artifact_dir_from_output(plan_result.output)
@@ -136,8 +136,6 @@ def test_plan_check_vpy_workflow_runs_runtime_validation_when_requested(
             "--profile",
             "av1_1080p_sdr",
             "--check-vpy",
-            "--config",
-            str(config_path),
         ],
     )
 
@@ -167,8 +165,6 @@ def test_runtime_validation_failure_keeps_generated_bundle(
             "--profile",
             "av1_1080p_sdr",
             "--check-vpy",
-            "--config",
-            str(config_path),
         ],
     )
 
@@ -189,13 +185,13 @@ def test_existing_artifact_conflict_workflow_blocks_overwrite(
 
     first = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
     artifact_dir = _artifact_dir_from_output(first.output)
     (artifact_dir / "movie.vpy").write_text("# user changed artifact\n", encoding="utf-8")
     second = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
     )
 
     assert first.exit_code == 0
@@ -208,26 +204,25 @@ def test_custom_template_workflow_supports_hdr_and_preserves_user_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    template_path = tmp_path / "templates" / "custom.vpy"
+    config_path, movie = _tracked_movie(tmp_path)
+    template_path = config_path.parent / "scripts" / "custom.vpy"
     template_body = (
         "OTHER_SOURCE = '/tmp/not-the-planned-source.mkv'\n"
         "clip = object()\n"
         "clip.set_output(index=0)\n"
     )
-    template_path.parent.mkdir()
     template_path.write_text(template_body, encoding="utf-8")
-    config_path, movie = _tracked_movie(tmp_path)
     _write_user_profile(
         config_path.parent / "profiles" / "custom_template.toml",
         name="custom_template",
-        extra='vapoursynth_template = "../templates/custom.vpy"\n',
+        extra='[vapoursynth]\nmode = "custom_template"\ntemplate = "custom.vpy"\n',
     )
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_hdr_ffprobe)
     _probe(config_path, movie)
 
     result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "custom_template", "--config", str(config_path)],
+        ["plan", str(movie), "--profile", "custom_template"],
     )
 
     artifact_dir = _artifact_dir_from_output(result.output)
@@ -261,11 +256,13 @@ def test_multiple_config_workflow_isolates_databases_and_artifacts(
 
     first_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(first_config)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        env={"PWD": str(first_dir)},
     )
     second_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr", "--config", str(second_config)],
+        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        env={"PWD": str(second_dir)},
     )
 
     assert first_plan.exit_code == 0
@@ -284,22 +281,24 @@ def _fake_hdr_ffprobe(_path: Path) -> dict[str, Any]:
 
 
 def _init_config(tmp_path: Path) -> Path:
-    config_path = tmp_path / "avarch.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"], env={"PWD": str(tmp_path)})
     assert result.exit_code == 0
     return config_path
 
 
 def _write_inventory_config(tmp_path: Path, *, roots: list[Path]) -> Path:
-    config_path = tmp_path / "avarch.toml"
+    config_path = tmp_path / ".avarch" / "config.toml"
+    result = runner.invoke(app, ["init"], env={"PWD": str(tmp_path)})
+    assert result.exit_code == 0
     roots_text = ", ".join(f'"{root}"' for root in roots)
     config_path.write_text(
         f"""
 [app]
-data_dir = ".avarch"
+data_dir = "data"
 
 [database]
-url = "sqlite:///.avarch/avarch.db"
+url = "sqlite:///data/avarch.db"
 
 [logging]
 level = "INFO"
@@ -308,7 +307,10 @@ format = "console"
 [scanner]
 roots = [{roots_text}]
 extensions = ["mkv", ".mp4"]
-exclude_directories = [".avarch-work"]
+exclude_directories = [".avarch"]
+
+[profile_registry]
+search_paths = ["profiles"]
 """.strip(),
         encoding="utf-8",
     )
@@ -321,19 +323,24 @@ def _tracked_movie(tmp_path: Path) -> tuple[Path, Path]:
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
-    scan_result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    scan_result = runner.invoke(app, ["scan", str(media_root)], env={"PWD": str(tmp_path)})
     assert scan_result.exit_code == 0
     return config_path, movie
 
 
 def _scan_probe(config_path: Path, media_root: Path, movie: Path) -> None:
-    scan_result = runner.invoke(app, ["scan", str(media_root), "--config", str(config_path)])
+    workspace_root = config_path.parent.parent
+    scan_result = runner.invoke(app, ["scan", str(media_root)], env={"PWD": str(workspace_root)})
     assert scan_result.exit_code == 0
     _probe(config_path, movie)
 
 
 def _probe(config_path: Path, movie: Path) -> None:
-    probe_result = runner.invoke(app, ["probe", str(movie), "--config", str(config_path)])
+    probe_result = runner.invoke(
+        app,
+        ["probe", str(movie)],
+        env={"PWD": str(config_path.parent.parent)},
+    )
     assert probe_result.exit_code == 0
 
 
@@ -345,7 +352,7 @@ def _artifact_dir_from_output(output: str) -> Path:
 
 
 def _plan_dir(config_path: Path) -> Path:
-    plans_dir = config_path.parent / ".avarch" / "plans"
+    plans_dir = config_path.parent / "data" / "plans"
     plan_dirs = list(plans_dir.iterdir())
     assert len(plan_dirs) == 1
     return plan_dirs[0]

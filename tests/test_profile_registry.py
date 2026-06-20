@@ -27,18 +27,23 @@ def test_registry_loads_seeded_profiles(tmp_path: Path) -> None:
 
 
 def test_user_profiles_load_through_registry(tmp_path: Path) -> None:
-    profile_path = tmp_path / "my_1080p.toml"
+    profiles_dir = tmp_path / ".avarch" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    profile_path = profiles_dir / "my_1080p.toml"
     profile_path.write_text(
-        _profile_text(name="my_1080p", extra='vapoursynth_template = "custom.vpy"\n'),
+        _profile_text(
+            name="my_1080p",
+            extra='[vapoursynth]\nmode = "custom_template"\ntemplate = "custom.vpy"\n',
+        ),
         encoding="utf-8",
     )
 
-    registry = ProfileRegistry.load(search_paths=[tmp_path])
+    registry = ProfileRegistry.load(search_paths=[profiles_dir])
     profile = registry.get("my_1080p")
 
     assert profile.origin == ProfileOrigin.USER
     assert profile.profile.video.max_width == 1920
-    assert profile.profile.vapoursynth_template == tmp_path / "custom.vpy"
+    assert profile.profile.vapoursynth.template == tmp_path / ".avarch" / "scripts" / "custom.vpy"
 
 
 def test_user_profiles_load_recursively(tmp_path: Path) -> None:

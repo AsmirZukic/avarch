@@ -15,13 +15,13 @@ LogFormat = Literal["console", "json"]
 class AppSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    data_dir: Path = Path(".avarch")
+    data_dir: Path = Path("data")
 
 
 class DatabaseSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = "sqlite:///.avarch/avarch.db"
+    url: str = "sqlite:///data/avarch.db"
 
 
 class LoggingSettings(BaseModel):
@@ -65,8 +65,6 @@ def _default_extensions() -> set[str]:
 def _default_exclude_directories() -> set[str]:
     return {
         ".avarch",
-        ".avarch-work",
-        ".avarch-output",
     }
 
 
@@ -112,32 +110,6 @@ class AppConfig(BaseModel):
     scanner: ScannerSettings = ScannerSettings()
     profile_registry: ProfileRegistrySettings = ProfileRegistrySettings()
 
-
-DEFAULT_CONFIG_TEXT = """[app]
-data_dir = ".avarch"
-
-[database]
-url = "sqlite:///.avarch/avarch.db"
-
-[logging]
-level = "INFO"
-format = "console"
-
-[resources]
-cheap_workers = 4
-av1an_jobs = 1
-file_ops = 1
-
-[scanner]
-roots = []
-extensions = [".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".ts", ".m2ts"]
-exclude_directories = [".avarch", ".avarch-work", ".avarch-output"]
-
-[profile_registry]
-# Avarch reads profile documents from this directory.
-# `avarch init` seeds starter profile files here so you can inspect and edit them.
-search_paths = ["./profiles"]
-"""
 
 WORKSPACE_CONFIG_TEXT = """[app]
 data_dir = "data"
