@@ -27,13 +27,33 @@ find_workspace() {
   done
 }
 
-workspace=$(find_workspace) || die "No Avarch workspace found. Run 'avarch init' from the workspace root."
+workspace_required() {
+  case "${1:-}" in
+    "" | "-h" | "--help" | "--version" | "version" | "init")
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
 uid=$(id -u)
 gid=$(id -g)
 
 set -- "$@"
-docker_args="run --rm --user $uid:$gid -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
+workspace=""
+if workspace=$(find_workspace); then
+  docker_args="run --rm --user $uid:$gid -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
+elif workspace_required "${1:-}"; then
+  die "No Avarch workspace found. Run 'avarch init' from the workspace root."
+else
+  workspace="${PWD:-$(pwd)}"
+  docker_args="run --rm --user $uid:$gid"
+  if [ "${1:-}" = "init" ]; then
+    docker_args="$docker_args -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
+  fi
+fi
 
 if [ "${AVARCH_GPU:-}" = "nvidia" ]; then
   docker_args="$docker_args --gpus all"

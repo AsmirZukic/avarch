@@ -7,6 +7,63 @@ from pathlib import Path
 WRAPPER = Path(__file__).resolve().parents[1] / "bin" / "avarch"
 
 
+def test_wrapper_runs_version_without_workspace(tmp_path: Path) -> None:
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=tmp_path,
+        env=_wrapper_env(fake_bin, log, image="avarch:test"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert "-v " not in command
+    assert "avarch:test version" in command
+
+
+def test_wrapper_mounts_current_directory_for_init_without_workspace(tmp_path: Path) -> None:
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "init"],
+        cwd=tmp_path,
+        env=_wrapper_env(fake_bin, log, image="avarch:test"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert f"-v {tmp_path}:/workspace" in command
+    assert "-w /workspace" in command
+    assert "avarch:test init" in command
+
+
+def test_wrapper_still_requires_workspace_for_workspace_commands(tmp_path: Path) -> None:
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "scan", "."],
+        cwd=tmp_path,
+        env=_wrapper_env(fake_bin, log, image="avarch:test"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "No Avarch workspace found" in result.stderr
+    assert not log.exists()
+
+
 def test_wrapper_discovers_workspace_and_forwards_exit_code(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     nested = workspace / "Movies"
