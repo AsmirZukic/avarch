@@ -58,14 +58,6 @@ else
   fi
 fi
 
-if [ "${AVARCH_GPU:-}" = "nvidia" ]; then
-  docker_args="$docker_args --gpus all"
-elif [ "${AVARCH_GPU:-}" = "dri" ]; then
-  docker_args="$docker_args --device /dev/dri:/dev/dri"
-elif [ -n "${AVARCH_GPU:-}" ] && [ "${AVARCH_GPU:-}" != "cpu" ]; then
-  die "Unsupported AVARCH_GPU value: ${AVARCH_GPU}. Use cpu, nvidia, or dri."
-fi
-
 if [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
   existing=$(docker ps -aq --filter "name=^/${ENCODER_CONTAINER_NAME}$" | head -n 1 || true)
   if [ -n "$existing" ]; then

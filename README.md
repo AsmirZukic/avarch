@@ -30,8 +30,7 @@ The current product supports only the workspace layout created by `avarch init`.
 Root-level `avarch.toml`, root-level `profiles/`, and `.avarch/avarch.db` are
 not supported state.
 
-Set `AVARCH_IMAGE` to use a non-default tag. Set `AVARCH_GPU=nvidia` or
-`AVARCH_GPU=dri` to pass GPU devices to the encoder container.
+Set `AVARCH_IMAGE` to use a non-default tag.
 
 ## Development Schema Reset
 

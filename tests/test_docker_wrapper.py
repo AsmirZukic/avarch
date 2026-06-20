@@ -87,24 +87,6 @@ def test_wrapper_discovers_workspace_and_forwards_exit_code(tmp_path: Path) -> N
     assert "avarch:test version" in command
 
 
-def test_wrapper_adds_gpu_options(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    log = tmp_path / "docker.log"
-    fake_bin = _fake_docker(tmp_path)
-
-    result = subprocess.run(
-        [str(WRAPPER), "doctor"],
-        cwd=workspace,
-        env=_wrapper_env(fake_bin, log, gpu="nvidia"),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0
-    assert "--gpus all" in log.read_text(encoding="utf-8")
-
-
 def test_wrapper_rejects_running_scheduler_container(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
@@ -226,7 +208,6 @@ def _wrapper_env(
     docker_exit_code: str = "0",
     docker_ps_id: str = "",
     docker_inspect_result: str = "false\t\t",
-    gpu: str = "",
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -239,8 +220,4 @@ def _wrapper_env(
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
         }
     )
-    if gpu:
-        env["AVARCH_GPU"] = gpu
-    else:
-        env.pop("AVARCH_GPU", None)
     return env
