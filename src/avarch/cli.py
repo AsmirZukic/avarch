@@ -133,7 +133,6 @@ from avarch.vpy_env import (
 )
 from avarch.vpy_plugins import VpyPluginInventoryError, list_vapoursynth_plugins
 from avarch.workspace import (
-    WorkspaceAlreadyExistsError,
     WorkspaceContext,
     WorkspaceError,
     create_workspace,
@@ -205,7 +204,7 @@ def _init_workspace(*, force: bool) -> None:
     workspace_root = _resolve_cli_path(Path(".")).resolve()
     try:
         workspace = create_workspace(workspace_root, force=force)
-    except WorkspaceAlreadyExistsError as exc:
+    except WorkspaceError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 

@@ -9,7 +9,13 @@ from avarch.cli import app
 from avarch.config import load_config, resolve_database_url
 from avarch.db import create_db_engine
 from avarch.models.db import Job, MediaFile
-from avarch.workspace import WorkspaceContext, WorkspacePathError, create_workspace
+from avarch.workspace import (
+    WorkspaceContext,
+    WorkspaceCreateError,
+    WorkspaceError,
+    WorkspacePathError,
+    create_workspace,
+)
 
 runner = CliRunner()
 
@@ -32,6 +38,40 @@ def test_workspace_path_cannot_escape_root(tmp_path: Path) -> None:
 
     with pytest.raises(WorkspacePathError):
         workspace.resolve_inside(Path("..") / "outside.mkv")
+
+
+def test_create_workspace_reports_permission_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    denied_path = tmp_path / ".avarch.tmp-denied"
+
+    def fail_mkdtemp(*_args: object, **_kwargs: object) -> str:
+        raise PermissionError(13, "Permission denied", str(denied_path))
+
+    monkeypatch.setattr("avarch.workspace.tempfile.mkdtemp", fail_mkdtemp)
+
+    with pytest.raises(WorkspaceCreateError, match="Cannot initialize Avarch workspace"):
+        create_workspace(tmp_path)
+
+
+def test_init_reports_workspace_errors_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PWD", str(tmp_path))
+
+    def fail_create_workspace(*_args: object, **_kwargs: object) -> WorkspaceContext:
+        raise WorkspaceError("Cannot initialize Avarch workspace at /workspace")
+
+    monkeypatch.setattr("avarch.cli.create_workspace", fail_create_workspace)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert "Cannot initialize Avarch workspace" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_init_creates_complete_workspace_layout(

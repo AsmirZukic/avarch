@@ -51,6 +51,9 @@ else
   workspace="${PWD:-$(pwd)}"
   docker_args="run --rm --user $uid:$gid"
   if [ "${1:-}" = "init" ]; then
+    if [ ! -w "$workspace" ]; then
+      die "Workspace root is not writable: $workspace"
+    fi
     docker_args="$docker_args -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
   fi
 fi

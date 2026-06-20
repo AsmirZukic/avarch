@@ -37,6 +37,10 @@ class WorkspacePathError(WorkspaceError):
     pass
 
 
+class WorkspaceCreateError(WorkspaceError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceContext:
     root: Path
@@ -132,28 +136,48 @@ class WorkspaceContext:
 
 def create_workspace(root: Path, *, force: bool = False) -> WorkspaceContext:
     root = root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise WorkspaceCreateError(_permission_message(root, exc)) from exc
     context = WorkspaceContext(root)
 
     if context.avarch_dir.exists():
         if not force:
             raise WorkspaceAlreadyExistsError(f"Workspace already exists: {context.avarch_dir}")
-        shutil.rmtree(context.avarch_dir)
+        try:
+            shutil.rmtree(context.avarch_dir)
+        except PermissionError as exc:
+            raise WorkspaceCreateError(_permission_message(context.avarch_dir, exc)) from exc
 
-    temp_dir = Path(
-        tempfile.mkdtemp(
-            prefix=".avarch.tmp-",
-            dir=root,
+    try:
+        temp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=".avarch.tmp-",
+                dir=root,
+            )
         )
-    )
+    except PermissionError as exc:
+        raise WorkspaceCreateError(_permission_message(root, exc)) from exc
     try:
         _populate_workspace_tree(temp_dir, workspace_id=uuid.uuid4())
         os.replace(temp_dir, context.avarch_dir)
+    except PermissionError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise WorkspaceCreateError(_permission_message(context.avarch_dir, exc)) from exc
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
     return context
+
+
+def _permission_message(path: Path, exc: PermissionError) -> str:
+    target = Path(exc.filename) if exc.filename else path
+    return (
+        f"Cannot initialize Avarch workspace at {path}: permission denied while writing "
+        f"{target}. Check that the project directory is writable by the container user."
+    )
 
 
 def ensure_workspace_layout(context: WorkspaceContext) -> None:
