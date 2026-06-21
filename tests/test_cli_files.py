@@ -16,7 +16,7 @@ def test_files_command_lists_inventory(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     _insert_media_file(config_path, "/media/movie.mkv", MediaFileStatus.PRESENT)
 
-    result = runner.invoke(app, ["files"])
+    result = runner.invoke(app, ["files", "list"])
 
     assert result.exit_code == 0
     assert "present" in result.output
@@ -28,7 +28,7 @@ def test_files_command_sorts_by_path(tmp_path: Path) -> None:
     _insert_media_file(config_path, "/media/b.mkv", MediaFileStatus.PRESENT)
     _insert_media_file(config_path, "/media/a.mkv", MediaFileStatus.PRESENT)
 
-    result = runner.invoke(app, ["files"])
+    result = runner.invoke(app, ["files", "list"])
 
     assert result.exit_code == 0
     assert result.output.index("/media/a.mkv") < result.output.index("/media/b.mkv")
@@ -38,7 +38,7 @@ def test_files_changed_includes_added_files(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     _insert_media_file(config_path, "/media/added.mkv", MediaFileStatus.ADDED)
 
-    result = runner.invoke(app, ["files", "--changed"])
+    result = runner.invoke(app, ["files", "list", "--changed"])
 
     assert "added" in result.output
 
@@ -47,7 +47,7 @@ def test_files_changed_includes_changed_files(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     _insert_media_file(config_path, "/media/changed.mkv", MediaFileStatus.CHANGED)
 
-    result = runner.invoke(app, ["files", "--changed"])
+    result = runner.invoke(app, ["files", "list", "--changed"])
 
     assert "changed" in result.output
 
@@ -56,7 +56,7 @@ def test_files_changed_includes_missing_files(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     _insert_media_file(config_path, "/media/missing.mkv", MediaFileStatus.MISSING)
 
-    result = runner.invoke(app, ["files", "--changed"])
+    result = runner.invoke(app, ["files", "list", "--changed"])
 
     assert "missing" in result.output
 
@@ -65,7 +65,7 @@ def test_files_changed_excludes_present_files(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     _insert_media_file(config_path, "/media/present.mkv", MediaFileStatus.PRESENT)
 
-    result = runner.invoke(app, ["files", "--changed"])
+    result = runner.invoke(app, ["files", "list", "--changed"])
 
     assert "/media/present.mkv" not in result.output
 
@@ -73,7 +73,7 @@ def test_files_changed_excludes_present_files(tmp_path: Path) -> None:
 def test_files_command_handles_empty_inventory(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
-    result = runner.invoke(app, ["files"])
+    result = runner.invoke(app, ["files", "list"])
 
     assert result.exit_code == 0
     assert "STATUS" in result.output
@@ -82,7 +82,7 @@ def test_files_command_handles_empty_inventory(tmp_path: Path) -> None:
 def test_files_command_requires_workspace(
     tmp_path: Path,
 ) -> None:
-    result = runner.invoke(app, ["files"])
+    result = runner.invoke(app, ["files", "list"])
 
     assert result.exit_code != 0
     assert "No Avarch workspace found" in result.output

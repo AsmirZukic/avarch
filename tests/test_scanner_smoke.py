@@ -42,7 +42,7 @@ def test_scanner_inventory_lifecycle_smoke(tmp_path: Path) -> None:
     rows = _media_files(config_path)
     assert len(rows) == 2
     assert {row.status for row in rows} == {MediaFileStatus.PRESENT}
-    changed_files = runner.invoke(app, ["files", "--changed"])
+    changed_files = runner.invoke(app, ["files", "list", "--changed"])
     assert "movie-a.mkv" not in changed_files.output
     assert "movie-b.mp4" not in changed_files.output
 

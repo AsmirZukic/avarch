@@ -36,6 +36,20 @@ HDR_TRANSFER_VALUES = {
     "smpte2084",
     "arib-std-b67",
 }
+_RESIZE_MATRIX_NAMES = {
+    "bt709": "709",
+    "bt2020nc": "2020ncl",
+    "bt2020c": "2020cl",
+}
+_RESIZE_PRIMARIES_NAMES = {
+    "bt709": "709",
+    "bt2020": "2020",
+}
+_RESIZE_TRANSFER_NAMES = {
+    "bt709": "709",
+    "smpte2084": "st2084",
+    "arib-std-b67": "std-b67",
+}
 
 
 class VapourSynthGenerationError(RuntimeError):
@@ -210,6 +224,7 @@ def build_vapoursynth_identity_hash(
 def generate_builtin_script(plan: TranscodePlan) -> str:
     _validate_builtin_plan(plan)
     source_path = repr(str(plan.vapoursynth.source_path))
+    resize_arguments = _builtin_resize_arguments(plan)
     bestsource_plugin_path = resolve_bestsource_plugin_path()
     load_bestsource_plugin = ""
     if bestsource_plugin_path is not None:
@@ -239,6 +254,7 @@ def generate_builtin_script(plan: TranscodePlan) -> str:
         f"    width={plan.vapoursynth.target_width},\n"
         f"    height={plan.vapoursynth.target_height},\n"
         "    format=vs.YUV420P10,\n"
+        f"{resize_arguments}"
         ")\n"
         "\n"
         "clip.set_output(index=0)\n"
@@ -520,6 +536,35 @@ def is_hdr_source(
     return transfer in HDR_TRANSFER_VALUES or source_hdr_metadata_present
 
 
+def _builtin_resize_arguments(plan: TranscodePlan) -> str:
+    if not is_hdr_source(
+        source_color_transfer=plan.vapoursynth.source_color_transfer,
+        source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
+    ):
+        return ""
+
+    matrix_in = _resize_name(_RESIZE_MATRIX_NAMES, plan.vapoursynth.source_color_space)
+    primaries_in = _resize_name(_RESIZE_PRIMARIES_NAMES, plan.vapoursynth.source_color_primaries)
+    transfer_in = _resize_name(_RESIZE_TRANSFER_NAMES, plan.vapoursynth.source_color_transfer)
+    arguments = {
+        "matrix_in_s": matrix_in,
+        "transfer_in_s": transfer_in,
+        "primaries_in_s": primaries_in,
+        "matrix_s": "709",
+        "transfer_s": "709",
+        "primaries_s": "709",
+    }
+    return "".join(
+        f"    {name}={value!r},\n" for name, value in arguments.items() if value is not None
+    )
+
+
+def _resize_name(mapping: dict[str, str], value: str | None) -> str | None:
+    if value is None:
+        return None
+    return mapping.get(value.strip().lower())
+
+
 def _validate_builtin_plan(plan: TranscodePlan) -> None:
     _validate_common_plan(plan)
     if plan.vapoursynth.mode not in {"generated", "custom_filter"}:
@@ -537,9 +582,9 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
     if is_hdr_source(
         source_color_transfer=plan.vapoursynth.source_color_transfer,
         source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
-    ):
+    ) and not plan.vapoursynth.hdr_to_sdr:
         raise HdrProcessingNotImplementedError(
-            "built-in VapourSynth generation does not support HDR input; use a custom template"
+            "built-in VapourSynth generation requires hdr_to_sdr for HDR input"
         )
 
 

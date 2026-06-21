@@ -65,7 +65,7 @@ def test_inventory_workflow_scans_lists_changed_and_missing_files(tmp_path: Path
     movie.write_bytes(b"first")
 
     scan_result = runner.invoke(app, ["scan", str(media_root)])
-    files_result = runner.invoke(app, ["files"])
+    files_result = runner.invoke(app, ["files", "list"])
 
     movie.write_bytes(b"changed bytes")
     changed_scan_result = runner.invoke(
@@ -74,7 +74,7 @@ def test_inventory_workflow_scans_lists_changed_and_missing_files(tmp_path: Path
     )
     changed_files_result = runner.invoke(
         app,
-        ["files", "--changed"],
+        ["files", "list", "--changed"],
     )
 
     movie.unlink()
@@ -84,7 +84,7 @@ def test_inventory_workflow_scans_lists_changed_and_missing_files(tmp_path: Path
     )
     missing_files_result = runner.invoke(
         app,
-        ["files", "--changed"],
+        ["files", "list", "--changed"],
     )
 
     assert scan_result.exit_code == 0
@@ -120,15 +120,15 @@ def test_probe_inspect_and_plan_workflow_builds_reviewable_artifacts(
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
 
     scan_result = runner.invoke(app, ["scan", str(media_root)])
-    probe_result = runner.invoke(app, ["probe", str(movie)])
-    inspect_result = runner.invoke(app, ["inspect", str(movie)])
+    probe_result = runner.invoke(app, ["probe", "--file", str(movie)])
+    inspect_result = runner.invoke(app, ["files", "show", "--file", str(movie)])
     plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
     repeated_plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
 
     artifact_dir = _artifact_dir_from_output(plan_result.output)
@@ -144,7 +144,7 @@ def test_probe_inspect_and_plan_workflow_builds_reviewable_artifacts(
     assert (artifact_dir / "validation-policy.json").is_file()
     assert (artifact_dir / "movie.vpy").is_file()
     assert repeated_plan_result.exit_code == 0
-    assert _artifact_dir_from_output(repeated_plan_result.output) == artifact_dir
+    assert "plan-current" in repeated_plan_result.output
 
 
 def test_probe_inspect_and_plan_workflow_reports_user_errors(
@@ -161,13 +161,13 @@ def test_probe_inspect_and_plan_workflow_reports_user_errors(
     scan_result = runner.invoke(app, ["scan", str(media_root)])
     plan_before_probe = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
     unknown_profile = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "missing"],
+        ["plan", "--profile", "missing", "--file", str(movie)],
     )
-    probe_result = runner.invoke(app, ["probe", str(movie)])
+    probe_result = runner.invoke(app, ["probe", "--file", str(movie)])
     movie.write_bytes(b"changed after probe")
     stale_scan_result = runner.invoke(
         app,
@@ -175,18 +175,18 @@ def test_probe_inspect_and_plan_workflow_reports_user_errors(
     )
     stale_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
 
     assert scan_result.exit_code == 0
-    assert plan_before_probe.exit_code != 0
-    assert "No canonical probe result exists" in plan_before_probe.output
+    assert plan_before_probe.exit_code == 0
+    assert "probe-missing" in plan_before_probe.output
     assert unknown_profile.exit_code != 0
     assert "Unknown profile: missing" in unknown_profile.output
     assert probe_result.exit_code == 0
     assert stale_scan_result.exit_code == 0
-    assert stale_plan.exit_code != 0
-    assert "Run avarch probe for this file again." in stale_plan.output
+    assert stale_plan.exit_code == 0
+    assert "probe-stale" in stale_plan.output
 
 
 def _fake_ffprobe(_path: Path) -> dict[str, Any]:

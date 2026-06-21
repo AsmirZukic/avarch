@@ -396,23 +396,25 @@ def calculate_target_dimensions(
 def select_audio(
     probe: NormalizedProbe,
     profile: EncodingProfile,
-) -> AudioPlan:
+) -> AudioPlan | None:
+    if not probe.audio_streams:
+        return None
+
     language_rank = {
         language: index
         for index, language in enumerate(_normalized_languages(profile.audio.languages))
     }
-    eligible = [
+    preferred = [
         stream
         for stream in probe.audio_streams
         if stream.language is not None and _normalize_language(stream.language) in language_rank
     ]
-    if not eligible:
-        raise PlanningError("No eligible audio stream matches the selected profile.")
+    eligible = preferred or list(probe.audio_streams)
 
     stream = min(
         eligible,
         key=lambda item: (
-            language_rank[_normalize_language(item.language or "")],
+            language_rank.get(_normalize_language(item.language or ""), len(language_rank)),
             item.commentary,
             not item.default,
             item.index,
@@ -453,7 +455,7 @@ def build_validation_policy(
     probe: NormalizedProbe,
     profile: EncodingProfile,
     video: VideoPlan,
-    audio: AudioPlan,
+    audio: AudioPlan | None,
     subtitles: SubtitlePlan,
     source_size_bytes: int,
 ) -> ValidationPolicy:
@@ -462,9 +464,11 @@ def build_validation_policy(
     accepted_containers = ACCEPTED_CONTAINER_NAMES.get(profile.container)
     if accepted_containers is None:
         raise PlanningError(f"Unsupported output container for validation: {profile.container}")
-    expected_audio_codec = EXPECTED_AUDIO_CODEC_NAMES.get(audio.target_codec)
-    if expected_audio_codec is None:
-        raise PlanningError(f"Unsupported audio encoder for validation: {audio.target_codec}")
+    expected_audio_codec = None
+    if audio is not None:
+        expected_audio_codec = EXPECTED_AUDIO_CODEC_NAMES.get(audio.target_codec)
+        if expected_audio_codec is None:
+            raise PlanningError(f"Unsupported audio encoder for validation: {audio.target_codec}")
 
     policy = ValidationPolicy(
         policy_hash="",
@@ -476,10 +480,10 @@ def build_validation_policy(
         expected_video_codec="av1",
         expected_width=video.target_width,
         expected_height=video.target_height,
-        expected_audio_stream_count=1,
+        expected_audio_stream_count=1 if audio is not None else 0,
         expected_audio_codec=expected_audio_codec,
-        expected_audio_channels=audio.target_channels,
-        expected_audio_language=audio.source_language,
+        expected_audio_channels=audio.target_channels if audio is not None else None,
+        expected_audio_language=audio.source_language if audio is not None else None,
         expected_subtitles=[
             ExpectedSubtitlePolicy(
                 output_order=order,
@@ -641,11 +645,11 @@ def build_plan(
             video_input_path=paths.video_output_path,
             source_input_path=input_path,
             output_path=paths.output_path,
-            audio_stream_index=audio.source_stream_index,
+            audio_stream_index=audio.source_stream_index if audio is not None else None,
             subtitle_stream_indexes=[stream.source_stream_index for stream in subtitles.streams],
-            audio_codec=audio.target_codec,
-            audio_bitrate=audio.target_bitrate,
-            audio_channels=audio.target_channels,
+            audio_codec=audio.target_codec if audio is not None else None,
+            audio_bitrate=audio.target_bitrate if audio is not None else None,
+            audio_channels=audio.target_channels if audio is not None else None,
         ),
         runtime=ExecutionRuntimePaths(
             runtime_dir=paths.runtime_dir,

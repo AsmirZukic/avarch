@@ -4,6 +4,7 @@ import ast
 import asyncio
 import os
 import shutil
+import signal
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -37,6 +38,11 @@ from avarch.execution import (
     create_mux_temporary_path,
     execute_plan,
 )
+from avarch.inventory import (
+    active_inventory_files_with_missing_or_stale_probe,
+    probe_is_missing_or_stale,
+    select_inventory_files,
+)
 from avarch.logging import configure_logging
 from avarch.models.db import (
     Job,
@@ -44,6 +50,8 @@ from avarch.models.db import (
     JobEvent,
     MediaFile,
     MediaFileStatus,
+    MediaPlan,
+    ProbeResult,
     PromotionRecord,
     ValidationResult,
 )
@@ -86,14 +94,12 @@ from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
 from avarch.scheduler import (
     MAX_CLI_LOG_TAIL_BYTES,
     JobControlError,
-    JobPreparationError,
     SchedulerAlreadyRunningError,
     SchedulerControlError,
     cancel_job,
     clear_queue,
     cli_actor,
     drain_scheduler,
-    enqueue_inventory,
     execute_validation_job,
     hold_job,
     new_runner_id,
@@ -106,6 +112,17 @@ from avarch.scheduler import (
     scheduler_status,
     stop_scheduler,
     update_job_priority,
+)
+from avarch.scheduler_lifecycle import (
+    SchedulerLifecycleError,
+    SchedulerWorkspaceLock,
+    current_process_metadata,
+    launch_detached,
+    remove_metadata,
+    runtime_paths,
+    terminate_scheduler,
+    verified_status,
+    write_metadata,
 )
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
@@ -149,6 +166,8 @@ db_app = typer.Typer(help="Database commands.")
 scheduler_app = typer.Typer(help="Scheduler commands.")
 jobs_app = typer.Typer(help="Job commands.")
 queue_app = typer.Typer(help="Queue commands.")
+files_app = typer.Typer(help="Inventory file commands.")
+plans_app = typer.Typer(help="Plan commands.")
 workspace_app = typer.Typer(help="Workspace commands.")
 config_app = typer.Typer(help="Configuration commands.")
 workflow_app = typer.Typer(help="Workflow commands.")
@@ -384,8 +403,8 @@ def scan(
     typer.echo("Scan complete.")
 
 
-@app.command()
-def files(
+@files_app.command("list")
+def files_list(
     changed: Annotated[
         bool,
         typer.Option("--changed", help="Show added, changed, and missing files only."),
@@ -421,9 +440,69 @@ def files(
         )
 
 
+@files_app.command("show")
+def files_show(
+    file: Annotated[Path, typer.Option("--file", help="Tracked media file to inspect.")],
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+
+    workspace_root = _workspace_root_for_storage(config)
+    if workspace_root is None:
+        workspace_root = Path.cwd()
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        selection = select_inventory_files(
+            session,
+            file_selectors=[file],
+            workspace_root=workspace_root,
+            resolve_path=_resolve_media_path,
+            active_only=False,
+        )
+        if selection.missing or not selection.selected:
+            _echo_untracked_file()
+            raise typer.Exit(1)
+        media_file = selection.selected[0]
+        if media_file.id is None:
+            typer.echo("File is not present in the media inventory.")
+            raise typer.Exit(1)
+        probe_result = get_canonical_probe_result(session, media_file)
+        current_plan = _current_plan_for_file(session, media_file)
+
+    typer.echo(f"File:       {_display_media_path(media_file, workspace_root)}")
+    typer.echo(f"Status:     {_status_value(media_file.status)}")
+    typer.echo(f"Size:       {_format_size(media_file.size_bytes)}")
+    typer.echo(f"Fingerprint:{media_file.fs_fingerprint}")
+    typer.echo(f"Probe:      {probe_result.probe_hash if probe_result is not None else '-'}")
+    typer.echo(f"Plan:       {current_plan.plan_hash if current_plan is not None else '-'}")
+    if probe_result is not None:
+        try:
+            normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
+        except ProbeError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo("")
+        typer.echo(
+            format_probe_summary(
+                _absolute_media_path(media_file, workspace_root),
+                normalized_probe,
+                probe_result.probe_hash,
+            )
+        )
+
+
 @app.command()
 def enqueue(
-    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    files: Annotated[
+        list[Path] | None,
+        typer.Option("--file", help="Restrict enqueueing to a tracked media file."),
+    ] = None,
+    plans: Annotated[
+        list[str] | None,
+        typer.Option("--plan", help="Restrict enqueueing to a persisted plan id or hash."),
+    ] = None,
     priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
 ) -> None:
     config = _workspace_config_path()
@@ -431,28 +510,97 @@ def enqueue(
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
 
-    runtime_config = _runtime_config(app_config, config)
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
-    try:
-        with Session(engine) as session, session.begin():
-            summary = enqueue_inventory(
+    with Session(engine) as session, session.begin():
+        try:
+            selected_plans = _select_plans_for_enqueue(
                 session,
-                config=runtime_config,
-                profile_name=profile,
-                priority=priority,
-                now=_utc_now(),
+                file_selectors=files,
+                plan_selectors=plans,
+                workspace_root=workspace_root,
             )
-    except JobPreparationError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
+        except ValueError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        summary = _enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
 
-    typer.echo("Queue update")
-    typer.echo("")
-    typer.echo(f"Profile:         {profile}")
-    typer.echo(f"Inventory files: {summary.selected}")
-    typer.echo(f"Created jobs:    {summary.created}")
-    typer.echo(f"Already queued:  {summary.existing}")
-    typer.echo(f"Missing skipped: {summary.missing_skipped}")
+    _echo_pipeline_summary(
+        selected=len(selected_plans),
+        processed=summary["created"],
+        skipped=summary["skipped"],
+        failed=0,
+    )
+    if summary["already_done"]:
+        typer.echo(f"already-completed: {summary['already_done']}")
+    if summary["already_queued"]:
+        typer.echo(f"already-queued: {summary['already_queued']}")
+
+
+@plans_app.command("list")
+def plans_list(
+    current: Annotated[
+        bool,
+        typer.Option("--current/--all", help="Show only current valid plans by default."),
+    ] = True,
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        statement = select(MediaPlan).order_by(
+            col(MediaPlan.created_at).asc(),
+            col(MediaPlan.id).asc(),
+        )
+        if current:
+            statement = statement.where(
+                MediaPlan.is_current == True,  # noqa: E712
+                MediaPlan.is_valid == True,  # noqa: E712
+            )
+        rows = list(session.exec(statement).all())
+        media_by_id = {
+            media_file.id: media_file
+            for media_file in session.exec(select(MediaFile)).all()
+            if media_file.id is not None
+        }
+
+    typer.echo("ID  CURRENT  PROFILE          PLAN HASH                         FILE")
+    for plan in rows:
+        media_file = media_by_id.get(plan.media_file_id)
+        filename = Path(media_file.path).name if media_file is not None else "<missing>"
+        current_label = "yes" if plan.is_current and plan.is_valid else "no"
+        typer.echo(
+            f"{plan.id:<3} {current_label:<8} {plan.profile_name:<15} "
+            f"{plan.plan_hash[:32]:<32} {filename}"
+        )
+
+
+@plans_app.command("show")
+def plans_show(
+    plan_id: Annotated[str, typer.Argument(help="Plan id or plan hash.")],
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        plan = _find_plan(session, plan_id)
+        if plan is None:
+            typer.echo(f"Plan not found: {plan_id}")
+            raise typer.Exit(1)
+        media_file = session.get(MediaFile, plan.media_file_id)
+
+    typer.echo(f"Plan {plan.id}")
+    typer.echo(f"File:       {media_file.path if media_file is not None else '<missing>'}")
+    typer.echo(f"Profile:    {plan.profile_name}")
+    typer.echo(f"Current:    {'yes' if plan.is_current and plan.is_valid else 'no'}")
+    typer.echo(f"Plan hash:  {plan.plan_hash}")
+    typer.echo(f"Probe hash: {plan.probe_hash}")
+    typer.echo(f"Output:     {plan.output_path}")
+    typer.echo(f"Artifact:   {plan.plan_path}")
 
 
 @scheduler_app.command("run")
@@ -461,12 +609,42 @@ def run_queue(
         bool,
         typer.Option("--resume", help="Resume a paused scheduler before starting."),
     ] = False,
+    detached: Annotated[
+        bool,
+        typer.Option("-d", "--detached", help="Run the scheduler as a detached subprocess."),
+    ] = False,
+    managed_child: Annotated[
+        bool,
+        typer.Option("--managed-child", help="Internal detached scheduler child.", hidden=True),
+    ] = False,
+    mode: Annotated[
+        Literal["foreground", "detached"],
+        typer.Option("--mode", help="Internal scheduler launch mode.", hidden=True),
+    ] = "foreground",
 ) -> None:
     config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
     runtime_config = _runtime_config(app_config, config)
+    workspace = _workspace_for_config(config)
+
+    if detached and not managed_child:
+        child_argv = ["scheduler", "run"]
+        if resume:
+            child_argv.append("--resume")
+        try:
+            metadata = launch_detached(
+                workspace=workspace,
+                argv=child_argv,
+            )
+        except SchedulerLifecycleError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        typer.echo("Scheduler started")
+        typer.echo(f"PID: {metadata.pid}")
+        typer.echo(f"Log: {metadata.log_path}")
+        return
 
     typer.echo("Scheduler started")
     typer.echo("")
@@ -477,15 +655,39 @@ def run_queue(
     typer.echo("")
     _echo_queue_counts(database_url)
 
+    paths = runtime_paths(workspace)
+    lock = SchedulerWorkspaceLock(paths.lock_path)
+    runner_id = new_runner_id()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        engine = create_db_engine(database_url)
+        try:
+            with Session(engine) as session, session.begin():
+                stop_scheduler(session, now=_utc_now(), reason="SIGTERM")
+        except SchedulerControlError:
+            pass
+
     try:
+        lock.acquire()
+        metadata = current_process_metadata(workspace=workspace, mode=mode)
+        write_metadata(paths, metadata)
+        signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
-            run_scheduler(config=runtime_config, runner_id=new_runner_id(), resume=resume)
+            run_scheduler(config=runtime_config, runner_id=runner_id, resume=resume)
         )
+    except SchedulerLifecycleError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
     except (SchedulerAlreadyRunningError, SchedulerControlError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     except KeyboardInterrupt as exc:
         raise typer.Exit(130) from exc
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        remove_metadata(paths)
+        lock.release()
 
     typer.echo("")
     typer.echo(
@@ -561,6 +763,10 @@ def pause(
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
+    workspace = _workspace_for_config(config)
+    if verified_status(workspace).metadata is None:
+        typer.echo("No live scheduler process exists.")
+        raise typer.Exit(1)
 
     engine = create_db_engine(database_url)
     try:
@@ -579,6 +785,10 @@ def resume_scheduler_command() -> None:
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
+    workspace = _workspace_for_config(config)
+    if verified_status(workspace).metadata is None:
+        typer.echo("No live scheduler process exists.")
+        raise typer.Exit(1)
 
     engine = create_db_engine(database_url)
     try:
@@ -616,22 +826,34 @@ def drain_scheduler_command(
 @scheduler_app.command("stop")
 def stop_scheduler_command(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
-    wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
+    wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = True,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Forcefully terminate the scheduler."),
+    ] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
     config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
+    workspace = _workspace_for_config(config)
     engine = create_db_engine(database_url)
-    try:
-        with Session(engine) as session, session.begin():
-            stop_scheduler(session, now=_utc_now(), reason=reason)
-    except SchedulerControlError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    typer.echo("Scheduler stop requested")
-    if wait and not _wait_for_scheduler_inactive(engine, timeout_seconds=timeout_seconds):
+    live = verified_status(workspace).metadata is not None
+    if live and not force:
+        try:
+            with Session(engine) as session, session.begin():
+                stop_scheduler(session, now=_utc_now(), reason=reason)
+        except SchedulerControlError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+    stopped = terminate_scheduler(
+        workspace=workspace,
+        force=force,
+        timeout_seconds=timeout_seconds if wait else 0.1,
+    )
+    typer.echo("Scheduler stopped" if stopped or not live else "Scheduler stop requested")
+    if wait and verified_status(workspace).metadata is not None:
         typer.echo("Timed out waiting for scheduler stop.")
         raise typer.Exit(1)
 
@@ -642,6 +864,8 @@ def scheduler_status_command() -> None:
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
+    workspace = _workspace_for_config(config)
+    process_status = verified_status(workspace)
     engine = create_db_engine(database_url)
     with Session(engine) as session:
         status = scheduler_status(session, now=_utc_now())
@@ -650,16 +874,19 @@ def scheduler_status_command() -> None:
             for media_file in session.exec(select(MediaFile)).all()
             if media_file.id is not None
         }
-    typer.echo("Scheduler")
-    typer.echo("")
-    typer.echo(f"Mode:             {status.mode.value}")
-    typer.echo(f"Control request:  {status.control_generation}")
-    typer.echo(f"Acknowledged:     {status.acknowledged_generation}")
-    typer.echo("")
-    typer.echo(f"Runner:           {status.runner_id or 'none'}")
-    typer.echo(f"Lease:            {status.lease_state}")
-    typer.echo(f"Heartbeat:        {_format_relative_time(status.heartbeat_at)}")
-    typer.echo(f"Expires:          {_format_expiry(status.lease_expires_at)}")
+    typer.echo(f"Scheduler: {process_status.state}")
+    if process_status.metadata is not None:
+        typer.echo(f"PID:       {process_status.metadata.pid}")
+        typer.echo(f"State:     {status.mode.value}")
+        typer.echo(f"Started:   {process_status.metadata.started_at}")
+        typer.echo(f"Log:       {process_status.metadata.log_path}")
+    elif process_status.stale_removed:
+        typer.echo("State:     stale metadata removed")
+    else:
+        state = status.mode.value if status.lease_state != "inactive" else "stopped"
+        typer.echo(f"State:     {state}")
+    typer.echo(f"Lease:     {status.lease_state}")
+    typer.echo(f"Runner:    {status.runner_id or 'none'}")
     typer.echo("")
     typer.echo("Queue:")
     for job_status in JobStatus:
@@ -675,6 +902,39 @@ def scheduler_status_command() -> None:
             media_file = media_by_id.get(job.media_file_id)
             path = Path(media_file.path).name if media_file is not None else "<missing>"
             typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
+
+
+@scheduler_app.command("restart")
+def scheduler_restart_command(
+    timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    workspace = _workspace_for_config(config)
+    engine = create_db_engine(database_url)
+    if verified_status(workspace).metadata is not None:
+        try:
+            with Session(engine) as session, session.begin():
+                stop_scheduler(session, now=_utc_now(), reason="restart")
+        except SchedulerControlError:
+            pass
+        if not terminate_scheduler(
+            workspace=workspace,
+            force=False,
+            timeout_seconds=timeout_seconds,
+        ):
+            typer.echo("Unable to stop existing scheduler.")
+            raise typer.Exit(1)
+    try:
+        metadata = launch_detached(workspace=workspace, argv=["scheduler", "run"])
+    except SchedulerLifecycleError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo("Scheduler restarted")
+    typer.echo(f"PID: {metadata.pid}")
+    typer.echo(f"Log: {metadata.log_path}")
 
 
 @jobs_app.command("list")
@@ -837,7 +1097,8 @@ def jobs_logs(
 
 @jobs_app.command("cancel")
 def jobs_cancel(
-    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    job_id: Annotated[int | None, typer.Argument(help="Job id.")] = None,
+    running: Annotated[bool, typer.Option("--running", help="Cancel all running jobs.")] = False,
     reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for cancellation to settle.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
@@ -849,12 +1110,35 @@ def jobs_cancel(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            cancel_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
+            if running:
+                running_jobs = list(
+                    session.exec(select(Job).where(Job.status == JobStatus.RUNNING)).all()
+                )
+                for job in running_jobs:
+                    if job.id is not None:
+                        cancel_job(
+                            session,
+                            job_id=job.id,
+                            actor=cli_actor(),
+                            reason=reason,
+                            now=_utc_now(),
+                        )
+                job_count = len(running_jobs)
+            elif job_id is not None:
+                cancel_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
+                job_count = 1
+            else:
+                typer.echo("Provide JOB_ID or --running.")
+                raise typer.Exit(1)
     except JobControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
-    typer.echo("Job cancellation requested")
-    if wait and not _wait_for_job_status(engine, job_id, JobStatus.CANCELED, timeout_seconds):
+    typer.echo(f"Job cancellation requested: {job_count}")
+    if (
+        wait
+        and job_id is not None
+        and not _wait_for_job_status(engine, job_id, JobStatus.CANCELED, timeout_seconds)
+    ):
         typer.echo("Timed out waiting for job cancellation.")
         raise typer.Exit(1)
 
@@ -894,7 +1178,8 @@ def jobs_release(
 
 @jobs_app.command("retry")
 def jobs_retry(
-    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    job_id: Annotated[int | None, typer.Argument(help="Job id.")] = None,
+    failed: Annotated[bool, typer.Option("--failed", help="Retry all failed jobs.")] = False,
 ) -> None:
     config = _workspace_config_path()
     app_config = _load_and_configure(config)
@@ -904,6 +1189,21 @@ def jobs_retry(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
+            if failed:
+                summary = retry_queue(
+                    session,
+                    config=runtime_config,
+                    actor=cli_actor(),
+                    now=_utc_now(),
+                    statuses={JobStatus.FAILED},
+                    all_jobs=True,
+                    confirm=True,
+                )
+                typer.echo(f"Failed jobs retry prepared: {summary.retryable}")
+                return
+            if job_id is None:
+                typer.echo("Provide JOB_ID or --failed.")
+                raise typer.Exit(1)
             next_stage = retry_job(
                 session,
                 job_id=job_id,
@@ -940,6 +1240,106 @@ def jobs_priority(
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job priority updated")
+
+
+@jobs_app.command("clear")
+def jobs_clear(
+    completed: Annotated[bool, typer.Option("--completed", help="Clear completed jobs.")] = False,
+    failed: Annotated[bool, typer.Option("--failed", help="Clear failed jobs.")] = False,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Apply clear updates.")] = False,
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    statuses: set[JobStatus] = set()
+    if completed:
+        statuses.add(JobStatus.COMPLETED)
+    if failed:
+        statuses.add(JobStatus.FAILED)
+    if not statuses:
+        typer.echo("Select --completed or --failed.")
+        raise typer.Exit(1)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session, session.begin():
+        summary = clear_queue(
+            session,
+            actor=cli_actor(),
+            now=_utc_now(),
+            statuses=statuses,
+            all_jobs=True,
+            confirm=confirm,
+        )
+    typer.echo("Jobs clear" if confirm else "Jobs clear preview")
+    typer.echo(f"Matched: {summary.matched}")
+    typer.echo(f"Changed: {summary.changed}")
+
+
+@jobs_app.command("validate")
+def jobs_validate(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+) -> None:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    runtime_config = _runtime_config(app_config, config)
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            typer.echo(f"Job not found: {job_id}")
+            raise typer.Exit(1)
+        if job.status == JobStatus.RUNNING:
+            typer.echo("Validation cannot run while the job is running.")
+            raise typer.Exit(1)
+        existing = _canonical_validation(session, job)
+        if (
+            job.status == JobStatus.VALIDATED
+            and job.stage == JobStage.PROMOTE
+            and existing is not None
+            and existing.passed
+        ):
+            report = ValidationReport.model_validate_json(existing.details_json)
+            typer.echo(format_validation_report_summary(report, reused=True))
+            return
+        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
+            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
+        )
+        was_failed = job.status == JobStatus.FAILED
+        if not eligible:
+            typer.echo("Job is not eligible for validation.")
+            raise typer.Exit(1)
+
+    if was_failed:
+        with Session(engine) as session, session.begin():
+            stored = session.get(Job, job_id)
+            if stored is None:
+                typer.echo("Job disappeared before validation could run.")
+                raise typer.Exit(1)
+            stored.status = JobStatus.PENDING
+            stored.stage = JobStage.VALIDATE
+            stored.claimed_by = None
+            stored.last_error_type = None
+            stored.last_error_message = None
+            stored.finished_at = None
+            stored.updated_at = _utc_now()
+            session.add(stored)
+
+    result = asyncio.run(
+        execute_validation_job(
+            job_id=job_id,
+            runner_id=new_runner_id(),
+            config=runtime_config,
+        )
+    )
+    if result is None:
+        typer.echo("Validation could not run.")
+        raise typer.Exit(1)
+    report = ValidationReport.model_validate_json(result.details_json)
+    typer.echo(format_validation_report_summary(report))
+    if not report.passed:
+        raise typer.Exit(1)
 
 
 @queue_app.command("clear")
@@ -998,59 +1398,96 @@ def queue_clear_command(
 
 @app.command("probe")
 def probe_file(
-    file: Annotated[Path, typer.Argument(help="Tracked media file to probe.")],
+    files: Annotated[
+        list[Path] | None,
+        typer.Option("--file", help="Restrict probing to a tracked media file."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Probe selected files even if current."),
+    ] = False,
 ) -> None:
     config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
 
-    file_path = _resolve_media_path(file)
-    if not file_path.exists():
-        typer.echo(f"File does not exist: {file_path}")
-        raise typer.Exit(1)
-    if not file_path.is_file():
-        typer.echo(f"Path is not a regular file: {file_path}")
-        raise typer.Exit(1)
-
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
+    selected = 0
+    processed = 0
+    skipped = 0
+    failed = 0
     with Session(engine) as session:
-        media_file = _get_media_file(session, file_path)
-        if media_file is None:
-            _echo_untracked_file()
-            raise typer.Exit(1)
-        if _status_value(media_file.status) == MediaFileStatus.MISSING.value:
-            typer.echo("File is marked missing in the media inventory.")
-            typer.echo("Run avarch scan for the containing root first.")
-            raise typer.Exit(1)
-
-        try:
-            raw_probe = run_ffprobe(file_path)
-            normalized_probe = normalize_probe(raw_probe)
-            probe_result = store_probe_result(
+        if files:
+            selection = select_inventory_files(
                 session,
-                media_file=media_file,
-                raw_probe=raw_probe,
-                normalized_probe=normalized_probe,
-                created_at=_utc_now(),
+                file_selectors=files,
+                workspace_root=workspace_root,
+                resolve_path=_resolve_media_path,
             )
-            session.commit()
-            session.refresh(probe_result)
-        except ProbeError as exc:
-            session.rollback()
-            typer.echo(str(exc))
-            raise typer.Exit(1) from exc
+            if selection.missing:
+                typer.echo(f"File is not present in the media inventory: {selection.missing[0]}")
+                typer.echo("Run avarch scan for the containing root first.")
+                raise typer.Exit(1)
+            media_files = list(selection.selected)
+        else:
+            media_files = list(active_inventory_files_with_missing_or_stale_probe(session))
 
-    typer.echo(
-        format_probe_summary(
-            file_path,
-            normalized_probe,
-            probe_result.probe_hash,
-        )
+        selected = len(media_files)
+        for media_file in media_files:
+            if not force and not probe_is_missing_or_stale(session, media_file):
+                skipped += 1
+                typer.echo(
+                    f"Skipped {_display_media_path(media_file, workspace_root)}: probe-current"
+                )
+                continue
+            file_path = _absolute_media_path(media_file, workspace_root)
+            if not file_path.exists():
+                failed += 1
+                typer.echo(
+                    f"Failed {_display_media_path(media_file, workspace_root)}: file-missing"
+                )
+                continue
+            if not file_path.is_file():
+                failed += 1
+                typer.echo(
+                    f"Failed {_display_media_path(media_file, workspace_root)}: not-regular-file"
+                )
+                continue
+            raw_probe: dict[str, object]
+            normalized_probe: object
+            probe_result: ProbeResult
+            try:
+                raw_probe = run_ffprobe(file_path)
+                normalized_probe = normalize_probe(raw_probe)
+                probe_result = store_probe_result(
+                    session,
+                    media_file=media_file,
+                    raw_probe=raw_probe,
+                    normalized_probe=normalized_probe,
+                    created_at=_utc_now(),
+                )
+                session.commit()
+                session.refresh(probe_result)
+                processed += 1
+            except ProbeError as exc:
+                session.rollback()
+                failed += 1
+                typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
+                continue
+            typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
+
+    _echo_pipeline_summary(
+        selected=selected,
+        processed=processed,
+        skipped=skipped,
+        failed=failed,
     )
+    if failed:
+        raise typer.Exit(1)
 
 
-@app.command("inspect")
 def inspect_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to inspect.")],
 ) -> None:
@@ -1084,7 +1521,6 @@ def inspect_file(
     typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
 
 
-@app.command("validate")
 def validate_file(
     output: Annotated[Path, typer.Argument(help="Planned encoded output to validate.")],
     against: Annotated[Path, typer.Option("--against", help="Source media file.")],
@@ -1290,8 +1726,18 @@ def promote_job(
 
 @app.command("plan")
 def plan_file(
-    file: Annotated[Path, typer.Argument(help="Tracked media file to plan.")],
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    files: Annotated[
+        list[Path] | None,
+        typer.Option("--file", help="Restrict planning to a tracked media file."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Create a new plan even when an equivalent current plan exists.",
+        ),
+    ] = False,
     check_vpy: Annotated[
         bool,
         typer.Option(
@@ -1306,64 +1752,134 @@ def plan_file(
     _upgrade_database_or_exit(database_url)
     data_dir = resolve_data_dir(app_config, config)
 
-    file_path = _resolve_media_path(file)
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
-    runtime_checked = False
+    selected = 0
+    processed = 0
+    skipped = 0
+    failed = 0
     try:
         registry = ProfileRegistry.from_config(app_config)
         resolved_profile = registry.get(profile)
-        with Session(engine) as session:
-            context = load_planning_context(
+        resolved_template = resolve_vapoursynth_template(resolved_profile.profile)
+        resolved_filter = resolve_vapoursynth_filter(resolved_profile.profile)
+    except (ProfileRegistryError, UnknownProfileError, VapourSynthGenerationError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+
+    with Session(engine) as session:
+        if files:
+            selection = select_inventory_files(
                 session,
-                input_path=file_path,
-                resolved_profile=resolved_profile,
+                file_selectors=files,
+                workspace_root=workspace_root,
+                resolve_path=_resolve_media_path,
             )
-            resolved_template = resolve_vapoursynth_template(context.profile)
-            resolved_filter = resolve_vapoursynth_filter(context.profile)
-            plan = build_plan(
-                context,
-                data_dir=data_dir,
-                resolved_template=resolved_template,
-                resolved_filter=resolved_filter,
-            )
-        vapoursynth_script = generate_vapoursynth_script(
-            plan,
-            template=resolved_template,
-            user_filter=resolved_filter,
-        )
-        validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(
-            plan=plan,
-            vapoursynth_script=vapoursynth_script,
-            user_filter=resolved_filter,
-            template=resolved_template,
-        )
-    except PlanArtifactConflictError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except PlanningError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except (ProfileRegistryError, UnknownProfileError) as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except VapourSynthGenerationError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
+            if selection.missing:
+                typer.echo(f"File is not present in the media inventory: {selection.missing[0]}")
+                typer.echo("Run avarch scan for the containing root first.")
+                raise typer.Exit(1)
+            media_files = list(selection.selected)
+        else:
+            media_files = _eligible_files_for_planning(session)
+        selected = len(media_files)
 
-    if check_vpy:
+    for media_file in media_files:
+        runtime_checked = False
+        file_path = _absolute_media_path(media_file, workspace_root)
         try:
-            check_vapoursynth_script(
-                plan.vapoursynth.script_path,
-                env=runtime_environment_variables(_workspace_for_config(config)),
+            with Session(engine) as session:
+                if media_file.id is None:
+                    raise PlanningError("Media file must be persisted before planning.")
+                stored_media_file = session.get(MediaFile, media_file.id)
+                if stored_media_file is None:
+                    raise PlanningError("File is not present in the media inventory.")
+                if stored_media_file.latest_probe_id is None:
+                    skipped += 1
+                    typer.echo(
+                        "Skipped "
+                        f"{_display_media_path(stored_media_file, workspace_root)}: probe-missing"
+                    )
+                    continue
+                probe_result = session.get(ProbeResult, stored_media_file.latest_probe_id)
+                if (
+                    probe_result is None
+                    or probe_result.source_fs_fingerprint != stored_media_file.fs_fingerprint
+                ):
+                    skipped += 1
+                    typer.echo(
+                        "Skipped "
+                        f"{_display_media_path(stored_media_file, workspace_root)}: probe-stale"
+                    )
+                    continue
+                context = load_planning_context(
+                    session,
+                    input_path=file_path,
+                    resolved_profile=resolved_profile,
+                )
+                plan = build_plan(
+                    context,
+                    data_dir=data_dir,
+                    resolved_template=resolved_template,
+                    resolved_filter=resolved_filter,
+                )
+                if not force and _equivalent_current_plan_exists(
+                    session,
+                    media_file_id=stored_media_file.id,
+                    probe_hash=plan.probe_hash,
+                    profile_hash=plan.profile_hash,
+                    execution_identity_hash=plan.execution_identity.identity_hash,
+                ):
+                    skipped += 1
+                    typer.echo(
+                        "Skipped "
+                        f"{_display_media_path(stored_media_file, workspace_root)}: plan-current"
+                    )
+                    continue
+            vapoursynth_script = generate_vapoursynth_script(
+                plan,
+                template=resolved_template,
+                user_filter=resolved_filter,
             )
-            runtime_checked = True
+            validate_script_syntax(vapoursynth_script)
+            write_plan_artifacts(
+                plan=plan,
+                vapoursynth_script=vapoursynth_script,
+                user_filter=resolved_filter,
+                template=resolved_template,
+            )
+            if check_vpy:
+                check_vapoursynth_script(
+                    plan.vapoursynth.script_path,
+                    env=runtime_environment_variables(_workspace_for_config(config)),
+                )
+                runtime_checked = True
+            with Session(engine) as session, session.begin():
+                _persist_media_plan(session, plan=plan, now=_utc_now())
+            processed += 1
+            _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
+        except PlanArtifactConflictError as exc:
+            failed += 1
+            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
+        except PlanningError as exc:
+            failed += 1
+            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
+        except VapourSynthGenerationError as exc:
+            failed += 1
+            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
         except VspipeError as exc:
+            failed += 1
             typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
-            typer.echo(str(exc))
-            raise typer.Exit(1) from exc
+            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
 
-    _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
+    _echo_pipeline_summary(
+        selected=selected,
+        processed=processed,
+        skipped=skipped,
+        failed=failed,
+    )
+    if failed:
+        raise typer.Exit(1)
 
 
 def _doctor_pass(check: str) -> None:
@@ -1391,7 +1907,7 @@ def _load_and_configure(config: Path) -> AppConfig:
 
     app_config = load_config(config)
     configure_logging(app_config.logging.level, app_config.logging.format)
-    log.info("config_loaded", path=str(config))
+    log.debug("config_loaded", path=str(config))
 
     data_dir = resolve_data_dir(app_config, config)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -1537,6 +2053,263 @@ def _get_media_file(session: Session, path: Path) -> MediaFile | None:
     return session.exec(statement).first()
 
 
+def _absolute_media_path(media_file: MediaFile, workspace_root: Path) -> Path:
+    path = Path(media_file.path)
+    if path.is_absolute():
+        return path
+    return workspace_root / path
+
+
+def _display_media_path(media_file: MediaFile, workspace_root: Path) -> str:
+    return str(_absolute_media_path(media_file, workspace_root))
+
+
+def _eligible_files_for_planning(session: Session) -> list[MediaFile]:
+    media_files = list(
+        session.exec(
+            select(MediaFile)
+            .where(MediaFile.status != MediaFileStatus.MISSING)
+            .order_by(MediaFile.path)
+        ).all()
+    )
+    eligible: list[MediaFile] = []
+    for media_file in media_files:
+        if media_file.latest_probe_id is None:
+            continue
+        probe_result = session.get(ProbeResult, media_file.latest_probe_id)
+        if probe_result is None:
+            continue
+        if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
+            continue
+        eligible.append(media_file)
+    return eligible
+
+
+def _equivalent_current_plan_exists(
+    session: Session,
+    *,
+    media_file_id: int | None,
+    probe_hash: str,
+    profile_hash: str,
+    execution_identity_hash: str,
+) -> bool:
+    if media_file_id is None:
+        return False
+    return (
+        session.exec(
+            select(MediaPlan).where(
+                MediaPlan.media_file_id == media_file_id,
+                MediaPlan.probe_hash == probe_hash,
+                MediaPlan.profile_hash == profile_hash,
+                MediaPlan.execution_identity_hash == execution_identity_hash,
+                MediaPlan.is_current == True,  # noqa: E712
+                MediaPlan.is_valid == True,  # noqa: E712
+            )
+        ).first()
+        is not None
+    )
+
+
+def _persist_media_plan(session: Session, *, plan: TranscodePlan, now: datetime) -> MediaPlan:
+    existing = session.exec(select(MediaPlan).where(MediaPlan.plan_hash == plan.plan_hash)).first()
+    if existing is not None:
+        existing.is_current = True
+        existing.is_valid = True
+        existing.superseded_at = None
+        session.add(existing)
+        _supersede_other_current_plans(session, plan=plan, keep_plan_id=existing.id, now=now)
+        return existing
+
+    probe_result = session.exec(
+        select(ProbeResult).where(
+            ProbeResult.media_file_id == plan.media_file_id,
+            ProbeResult.probe_hash == plan.probe_hash,
+        )
+    ).first()
+    if probe_result is None or probe_result.id is None:
+        raise PlanningError("The planned probe result no longer exists.")
+
+    media_plan = MediaPlan(
+        media_file_id=plan.media_file_id,
+        probe_result_id=probe_result.id,
+        profile_name=plan.profile_name,
+        profile_hash=plan.profile_hash,
+        probe_hash=plan.probe_hash,
+        source_fs_fingerprint=plan.source_fs_fingerprint,
+        execution_identity_hash=plan.execution_identity.identity_hash,
+        plan_hash=plan.plan_hash,
+        plan_path=str(plan.artifacts.plan_json),
+        output_path=str(plan.output_path),
+        is_current=True,
+        is_valid=True,
+        created_at=now,
+    )
+    session.add(media_plan)
+    session.flush()
+    _supersede_other_current_plans(session, plan=plan, keep_plan_id=media_plan.id, now=now)
+    return media_plan
+
+
+def _supersede_other_current_plans(
+    session: Session,
+    *,
+    plan: TranscodePlan,
+    keep_plan_id: int | None,
+    now: datetime,
+) -> None:
+    plans = list(
+        session.exec(
+            select(MediaPlan).where(
+                MediaPlan.media_file_id == plan.media_file_id,
+                MediaPlan.profile_name == plan.profile_name,
+                MediaPlan.is_current == True,  # noqa: E712
+            )
+        ).all()
+    )
+    for media_plan in plans:
+        if media_plan.id == keep_plan_id:
+            continue
+        media_plan.is_current = False
+        media_plan.superseded_at = now
+        session.add(media_plan)
+
+
+def _current_plan_for_file(session: Session, media_file: MediaFile) -> MediaPlan | None:
+    if media_file.id is None:
+        return None
+    return session.exec(
+        select(MediaPlan)
+        .where(
+            MediaPlan.media_file_id == media_file.id,
+            MediaPlan.is_current == True,  # noqa: E712
+            MediaPlan.is_valid == True,  # noqa: E712
+        )
+        .order_by(col(MediaPlan.created_at).desc(), col(MediaPlan.id).desc())
+    ).first()
+
+
+def _select_plans_for_enqueue(
+    session: Session,
+    *,
+    file_selectors: list[Path] | None,
+    plan_selectors: list[str] | None,
+    workspace_root: Path,
+) -> list[MediaPlan]:
+    if file_selectors and plan_selectors:
+        raise ValueError("Use either --file or --plan selectors, not both.")
+    if plan_selectors:
+        plans: dict[int, MediaPlan] = {}
+        for selector in plan_selectors:
+            plan = _find_plan(session, selector)
+            if plan is None:
+                raise ValueError(f"Plan not found: {selector}")
+            if plan.id is not None:
+                plans.setdefault(plan.id, plan)
+        return sorted(plans.values(), key=lambda item: (item.created_at, item.id or 0))
+    if file_selectors:
+        selection = select_inventory_files(
+            session,
+            file_selectors=file_selectors,
+            workspace_root=workspace_root,
+            resolve_path=_resolve_media_path,
+        )
+        if selection.missing:
+            raise ValueError(f"File is not present in the media inventory: {selection.missing[0]}")
+        file_plans = [
+            _current_plan_for_file(session, media_file) for media_file in selection.selected
+        ]
+        return [plan for plan in file_plans if plan is not None]
+    return list(
+        session.exec(
+            select(MediaPlan)
+            .where(
+                MediaPlan.is_current == True,  # noqa: E712
+                MediaPlan.is_valid == True,  # noqa: E712
+            )
+            .order_by(col(MediaPlan.created_at).asc(), col(MediaPlan.id).asc())
+        ).all()
+    )
+
+
+def _find_plan(session: Session, selector: str) -> MediaPlan | None:
+    if selector.isdecimal():
+        plan = session.get(MediaPlan, int(selector))
+        if plan is not None:
+            return plan
+    return session.exec(select(MediaPlan).where(MediaPlan.plan_hash == selector)).first()
+
+
+def _enqueue_plans(
+    session: Session,
+    plans: list[MediaPlan],
+    *,
+    priority: int,
+    now: datetime,
+) -> dict[str, int]:
+    created = 0
+    already_queued = 0
+    already_done = 0
+    stale = 0
+    for plan in plans:
+        media_file = session.get(MediaFile, plan.media_file_id)
+        if media_file is None or _status_value(media_file.status) == MediaFileStatus.MISSING.value:
+            stale += 1
+            continue
+        if media_file.fs_fingerprint != plan.source_fs_fingerprint:
+            stale += 1
+            continue
+        queue_key = plan.plan_hash
+        existing = session.exec(select(Job).where(Job.queue_key == queue_key)).first()
+        if existing is not None:
+            if existing.status in {JobStatus.COMPLETED, JobStatus.VALIDATED}:
+                already_done += 1
+            else:
+                already_queued += 1
+            continue
+        session.add(
+            Job(
+                media_file_id=plan.media_file_id,
+                profile_name=plan.profile_name,
+                profile_hash=plan.profile_hash,
+                source_fs_fingerprint=plan.source_fs_fingerprint,
+                queue_key=queue_key,
+                probe_result_id=plan.probe_result_id,
+                probe_hash=plan.probe_hash,
+                plan_hash=plan.plan_hash,
+                plan_path=plan.plan_path,
+                output_path=plan.output_path,
+                status=JobStatus.PENDING,
+                stage=JobStage.ENCODE,
+                priority=priority,
+                attempts=0,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        created += 1
+    return {
+        "created": created,
+        "skipped": already_queued + already_done + stale,
+        "already_queued": already_queued,
+        "already_done": already_done,
+        "stale": stale,
+    }
+
+
+def _echo_pipeline_summary(
+    *,
+    selected: int,
+    processed: int,
+    skipped: int,
+    failed: int,
+) -> None:
+    typer.echo("Summary")
+    typer.echo(f"Selected: {selected}")
+    typer.echo(f"Processed: {processed}")
+    typer.echo(f"Skipped: {skipped}")
+    typer.echo(f"Failed: {failed}")
+
+
 def _echo_untracked_file() -> None:
     typer.echo("File is not present in the media inventory.")
     typer.echo("Run avarch scan for the containing root first.")
@@ -1574,14 +2347,17 @@ def _echo_plan_summary(
     )
     typer.echo(f"  resize:     {'yes' if typed_plan.video.resize_required else 'no'}")
     typer.echo("")
-    typer.echo(
-        "Audio: "
-        f"[{typed_plan.audio.source_stream_index}] "
-        f"{_display_optional(typed_plan.audio.source_codec)} "
-        f"{_display_optional(typed_plan.audio.source_language)} -> "
-        f"{typed_plan.audio.target_codec} {typed_plan.audio.target_bitrate} "
-        f"{typed_plan.audio.target_channels}ch"
-    )
+    if typed_plan.audio is None:
+        typer.echo("Audio: none")
+    else:
+        typer.echo(
+            "Audio: "
+            f"[{typed_plan.audio.source_stream_index}] "
+            f"{_display_optional(typed_plan.audio.source_codec)} "
+            f"{_display_optional(typed_plan.audio.source_language)} -> "
+            f"{typed_plan.audio.target_codec} {typed_plan.audio.target_bitrate} "
+            f"{typed_plan.audio.target_channels}ch"
+        )
     typer.echo(f"Subtitles: {subtitles}")
     typer.echo("")
     typer.echo("VapourSynth:")
@@ -1973,7 +2749,6 @@ def vpy_packages_remove(
     typer.echo(f"Environment: {environment.identity.environment_id}")
 
 
-@workflow_app.command("preview")
 def workflow_preview(
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
 ) -> None:
@@ -1989,15 +2764,15 @@ def workflow_preview(
     typer.echo(f"Inventory files: {count}")
 
 
-@workflow_app.command("enqueue")
 def workflow_enqueue(
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
     priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
 ) -> None:
-    enqueue(profile=profile, priority=priority)
+    del profile, priority
+    typer.echo("The workflow namespace has been removed. Use plan and enqueue directly.")
+    raise typer.Exit(1)
 
 
-@app.command("encode")
 def encode_file(
     file: Annotated[Path, typer.Argument(help="Tracked media file to encode.")],
     profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
@@ -2235,24 +3010,6 @@ def _display_optional_datetime(value: datetime | None) -> str:
     if value is None:
         return "-"
     return value.isoformat(sep=" ", timespec="seconds")
-
-
-def _format_relative_time(value: datetime | None) -> str:
-    if value is None:
-        return "unknown"
-    seconds = int((_utc_now().replace(tzinfo=None) - value.replace(tzinfo=None)).total_seconds())
-    if seconds < 0:
-        return "now"
-    return f"{seconds} seconds ago"
-
-
-def _format_expiry(value: datetime | None) -> str:
-    if value is None:
-        return "none"
-    seconds = int((value.replace(tzinfo=None) - _utc_now().replace(tzinfo=None)).total_seconds())
-    if seconds < 0:
-        return f"{abs(seconds)} seconds ago"
-    return f"in {seconds} seconds"
 
 
 def _wait_for_scheduler_inactive(engine: Engine, *, timeout_seconds: float) -> bool:
@@ -2589,10 +3346,10 @@ clip.set_output(index=0)
 app.add_typer(db_app, name="db")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(jobs_app, name="jobs")
-app.add_typer(queue_app, name="queue")
+app.add_typer(files_app, name="files")
+app.add_typer(plans_app, name="plans")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(config_app, name="config")
-app.add_typer(workflow_app, name="workflow")
 app.add_typer(profiles_app, name="profiles")
 vpy_app.add_typer(vpy_scaffold_app, name="scaffold")
 vpy_app.add_typer(vpy_env_app, name="env")

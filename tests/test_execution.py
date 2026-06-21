@@ -193,6 +193,45 @@ def test_build_ffmpeg_mux_command_maps_global_source_indexes(tmp_path: Path) -> 
     ]
 
 
+def test_build_ffmpeg_mux_command_allows_video_only_sources(tmp_path: Path) -> None:
+    spec = FfmpegMuxSpec(
+        video_input_path=tmp_path / "video-only.mkv",
+        source_input_path=tmp_path / "movie.mkv",
+        output_path=tmp_path / "movie.av1.mkv",
+        audio_stream_index=None,
+        subtitle_stream_indexes=[],
+    )
+    temporary_output = tmp_path / ".movie.av1.mkv.muxing-test.mkv"
+
+    command = build_ffmpeg_mux_command(spec, temporary_output)
+
+    assert "-c:a" not in command
+    assert "1:None" not in command
+    assert command == [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "info",
+        "-n",
+        "-i",
+        str(spec.video_input_path),
+        "-i",
+        str(spec.source_input_path),
+        "-map",
+        "0:v:0",
+        "-map_metadata",
+        "1",
+        "-map_chapters",
+        "1",
+        "-c:v",
+        "copy",
+        "-c:s",
+        "copy",
+        str(temporary_output),
+    ]
+
+
 def test_mux_temporary_path_accepts_relative_plan_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -247,6 +286,7 @@ def test_preflight_rejects_missing_ffmpeg_audio_decoder(
 ) -> None:
     _install_fake_tools(tmp_path, monkeypatch, ffmpeg_decoders=["aac"])
     plan = _sample_plan(tmp_path)
+    assert plan.audio is not None
     plan = plan.model_copy(
         update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})}
     )

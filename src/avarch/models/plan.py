@@ -149,12 +149,12 @@ class FfmpegMuxSpec(BaseModel):
     source_input_path: Path
     output_path: Path
 
-    audio_stream_index: int = Field(ge=0)
+    audio_stream_index: int | None = Field(default=None, ge=0)
     subtitle_stream_indexes: list[int]
 
-    audio_codec: str
-    audio_bitrate: str
-    audio_channels: int
+    audio_codec: str | None = None
+    audio_bitrate: str | None = None
+    audio_channels: int | None = None
 
     copy_subtitles: Literal[True] = True
     copy_chapters: Literal[True] = True
@@ -271,7 +271,7 @@ class TranscodePlan(BaseModel):
     probe_hash: str
 
     video: VideoPlan
-    audio: AudioPlan
+    audio: AudioPlan | None
     subtitles: SubtitlePlan
 
     execution_identity: ExecutionIdentity

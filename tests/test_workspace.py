@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from avarch.cli import app
 from avarch.config import load_config, resolve_database_url
 from avarch.db import create_db_engine
 from avarch.models.db import Job, MediaFile
+from avarch.models.scheduler import JobStage, JobStatus
 from avarch.workspace import (
     WorkspaceContext,
     WorkspaceCreateError,
@@ -182,12 +184,24 @@ def _init_scan_and_enqueue(workspace_root: Path, *, movie_name: str = "movie.mkv
     media_dir.mkdir()
     (media_dir / movie_name).write_bytes(b"media")
     scan_result = runner.invoke(app, ["scan", "."], env={"PWD": str(workspace_root)})
-    enqueue_result = runner.invoke(
-        app,
-        ["workflow", "enqueue", "--profile", "default"],
-        env={"PWD": str(workspace_root)},
-    )
+    now = datetime.now(UTC)
+    with Session(_engine(workspace_root)) as session, session.begin():
+        media_file = session.exec(select(MediaFile)).one()
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name="default",
+                profile_hash="profile",
+                source_fs_fingerprint=media_file.fs_fingerprint,
+                queue_key=f"queue:{movie_name}",
+                status=JobStatus.PENDING,
+                stage=JobStage.ENCODE,
+                priority=0,
+                attempts=0,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
     assert init_result.exit_code == 0
     assert scan_result.exit_code == 0
-    assert enqueue_result.exit_code == 0

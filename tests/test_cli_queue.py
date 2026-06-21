@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from avarch.cli import app
 from avarch.config import load_config, resolve_database_url
 from avarch.db import create_db_engine
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
+from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus, MediaPlan, ProbeResult
 from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 from avarch.scheduler import SchedulerRunSummary
 
@@ -18,30 +18,22 @@ runner = CliRunner()
 
 
 def test_enqueue_command_creates_jobs(tmp_path: Path) -> None:
-    _init_config(tmp_path)
-    media_root = tmp_path / "media"
-    media_root.mkdir()
-    movie = media_root / "movie.mkv"
-    movie.write_bytes(b"media")
-    runner.invoke(app, ["scan", str(media_root)])
+    config_path = _init_config(tmp_path)
+    _insert_current_plan(config_path, tmp_path / "movie.mkv")
 
     result = runner.invoke(
         app,
-        ["enqueue", "--profile", "av1_1080p_sdr"],
+        ["enqueue"],
     )
 
     assert result.exit_code == 0
-    assert "Created jobs:    1" in result.output
+    assert "Processed: 1" in result.output
 
 
 def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
-    _init_config(tmp_path)
-    media_root = tmp_path / "media"
-    media_root.mkdir()
-    movie = media_root / "movie.mkv"
-    movie.write_bytes(b"media")
-    runner.invoke(app, ["scan", str(media_root)])
-    runner.invoke(app, ["enqueue", "--profile", "av1_1080p_sdr"])
+    config_path = _init_config(tmp_path)
+    _insert_current_plan(config_path, tmp_path / "movie.mkv")
+    runner.invoke(app, ["enqueue"])
 
     result = runner.invoke(app, ["jobs", "list"])
 
@@ -50,22 +42,33 @@ def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
     assert "movie.mkv" in result.output
 
 
+def test_jobs_list_prints_table_without_internal_info_logs(tmp_path: Path) -> None:
+    _init_config(tmp_path)
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    assert result.exit_code == 0
+    assert result.output.startswith("ID  STATUS")
+    assert "config_loaded" not in result.output
+    assert "alembic.runtime.migration" not in result.output
+
+
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
     result = runner.invoke(app, ["scheduler", "pause"])
 
-    assert result.exit_code == 0
-    assert "Scheduler pause requested" in result.output
+    assert result.exit_code != 0
+    assert "No live scheduler process exists" in result.output
 
 
 def test_queue_retry_preview_runs_without_confirm(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
-    result = runner.invoke(app, ["queue", "retry"])
+    result = runner.invoke(app, ["jobs", "retry", "--failed"])
 
     assert result.exit_code == 0
-    assert "Queue retry preview" in result.output
+    assert "Failed jobs retry prepared: 0" in result.output
 
 
 def test_run_command_invokes_scheduler(
@@ -173,3 +176,52 @@ def _init_config(tmp_path: Path) -> Path:
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     return config_path
+
+
+def _insert_current_plan(config_path: Path, media_path: Path) -> None:
+    media_path.write_bytes(b"media")
+    app_config = load_config(config_path)
+    engine = create_db_engine(resolve_database_url(app_config, config_path))
+    now = datetime.now(UTC)
+    stat_result = media_path.stat()
+    with Session(engine) as session, session.begin():
+        media_file = MediaFile(
+            path=str(media_path.resolve()),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+            device_id=stat_result.st_dev,
+            inode=stat_result.st_ino,
+            fs_fingerprint="fingerprint",
+            status=MediaFileStatus.PRESENT,
+            discovered_at=now,
+            last_seen_at=now,
+        )
+        session.add(media_file)
+        session.flush()
+        probe_result = ProbeResult(
+            media_file_id=media_file.id or 0,
+            ffprobe_json="{}",
+            normalized_json="{}",
+            probe_hash="probe",
+            source_fs_fingerprint=media_file.fs_fingerprint,
+            created_at=now,
+        )
+        session.add(probe_result)
+        session.flush()
+        session.add(
+            MediaPlan(
+                media_file_id=media_file.id or 0,
+                probe_result_id=probe_result.id or 0,
+                profile_name="av1_1080p_sdr",
+                profile_hash="profile",
+                probe_hash="probe",
+                source_fs_fingerprint=media_file.fs_fingerprint,
+                execution_identity_hash="execution",
+                plan_hash=f"plan:{media_path.name}",
+                plan_path=str(config_path.parent / "data" / "plan.json"),
+                output_path=str(media_path.with_suffix(".av1.mkv")),
+                is_current=True,
+                is_valid=True,
+                created_at=now,
+            )
+        )

@@ -121,30 +121,26 @@ def build_ffmpeg_mux_command(spec: FfmpegMuxSpec, temporary_output: Path) -> lis
         _command_path(spec.source_input_path),
         "-map",
         "0:v:0",
-        "-map",
-        f"1:{spec.audio_stream_index}",
     ]
+    if spec.audio_stream_index is not None:
+        command.extend(["-map", f"1:{spec.audio_stream_index}"])
     for stream_index in spec.subtitle_stream_indexes:
         command.extend(["-map", f"1:{stream_index}"])
-    command.extend(
-        [
-            "-map_metadata",
-            "1",
-            "-map_chapters",
-            "1",
-            "-c:v",
-            "copy",
-            "-c:a",
-            spec.audio_codec,
-            "-b:a",
-            spec.audio_bitrate,
-            "-ac:a:0",
-            str(spec.audio_channels),
-            "-c:s",
-            "copy",
-            _command_path(temporary_output),
-        ]
-    )
+    command.extend(["-map_metadata", "1", "-map_chapters", "1", "-c:v", "copy"])
+    if spec.audio_stream_index is not None:
+        if spec.audio_codec is None or spec.audio_bitrate is None or spec.audio_channels is None:
+            raise InvalidExecutionPlanError("Mux audio settings are incomplete.")
+        command.extend(
+            [
+                "-c:a",
+                spec.audio_codec,
+                "-b:a",
+                spec.audio_bitrate,
+                "-ac:a:0",
+                str(spec.audio_channels),
+            ]
+        )
+    command.extend(["-c:s", "copy", _command_path(temporary_output)])
     return command
 
 
@@ -385,6 +381,8 @@ def _preflight_ffmpeg_version(executable: str) -> None:
 
 
 def _preflight_ffmpeg_audio_codecs(plan: TranscodePlan) -> None:
+    if plan.audio is None:
+        return
     source_codec = _normalize_codec_name(plan.audio.source_codec)
     if source_codec is not None:
         decoders = _ffmpeg_codec_names(plan.mux.executable, "-decoders")

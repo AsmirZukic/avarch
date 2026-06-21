@@ -50,11 +50,10 @@ runner = CliRunner()
         ["db", "current"],
         ["db", "upgrade"],
         ["scan"],
-        ["files"],
+        ["files", "list"],
         ["probe"],
-        ["inspect"],
+        ["files", "show"],
         ["plan"],
-        ["encode"],
         ["enqueue"],
         ["scheduler"],
         ["scheduler", "run"],
@@ -63,6 +62,7 @@ runner = CliRunner()
         ["scheduler", "drain"],
         ["scheduler", "stop"],
         ["scheduler", "status"],
+        ["scheduler", "restart"],
         ["jobs"],
         ["jobs", "list"],
         ["jobs", "show"],
@@ -72,10 +72,11 @@ runner = CliRunner()
         ["jobs", "release"],
         ["jobs", "retry"],
         ["jobs", "priority"],
-        ["queue"],
-        ["queue", "clear"],
-        ["queue", "retry"],
-        ["validate"],
+        ["jobs", "clear"],
+        ["jobs", "validate"],
+        ["plans"],
+        ["plans", "list"],
+        ["plans", "show"],
     ],
 )
 def test_every_user_facing_command_has_help(command: list[str]) -> None:
@@ -138,39 +139,29 @@ def test_novice_commands_fail_with_actionable_messages(tmp_path: Path) -> None:
     _init_config(tmp_path)
     untracked = tmp_path / "movie.mkv"
     untracked.write_bytes(b"media")
-    output = tmp_path / "movie.av1.mkv"
 
-    probe_untracked = runner.invoke(app, ["probe", str(untracked)])
+    probe_untracked = runner.invoke(app, ["probe", "--file", str(untracked)])
     inspect_untracked = runner.invoke(
         app,
-        ["inspect", str(untracked)],
+        ["files", "show", "--file", str(untracked)],
     )
     plan_without_profile = runner.invoke(
         app,
-        ["plan", str(untracked)],
-    )
-    encode_without_profile = runner.invoke(
-        app,
-        ["encode", str(untracked)],
+        ["plan", "--file", str(untracked)],
     )
     enqueue_without_profile = runner.invoke(app, ["enqueue"])
-    validate_reversed_or_untracked = runner.invoke(
-        app,
-        ["validate", str(untracked), "--against", str(output)],
-    )
+    validate_missing_job = runner.invoke(app, ["jobs", "validate", "1"])
 
     assert probe_untracked.exit_code != 0
-    assert "File is not present in the media inventory." in probe_untracked.output
+    assert "File is not present in the media inventory:" in probe_untracked.output
     assert inspect_untracked.exit_code != 0
     assert "File is not present in the media inventory." in inspect_untracked.output
     assert plan_without_profile.exit_code != 0
     assert "Missing option" in plan_without_profile.output
-    assert encode_without_profile.exit_code != 0
-    assert "Missing option" in encode_without_profile.output
-    assert enqueue_without_profile.exit_code != 0
-    assert "Missing option" in enqueue_without_profile.output
-    assert validate_reversed_or_untracked.exit_code != 0
-    assert "File is not present in the media inventory." in validate_reversed_or_untracked.output
+    assert enqueue_without_profile.exit_code == 0
+    assert "Selected: 0" in enqueue_without_profile.output
+    assert validate_missing_job.exit_code != 0
+    assert "Job not found" in validate_missing_job.output
 
 
 def test_dry_run_review_workflow_does_not_create_final_output(
@@ -182,26 +173,25 @@ def test_dry_run_review_workflow_does_not_create_final_output(
     result = runner.invoke(
         app,
         [
-            "encode",
-            str(movie),
+            "plan",
             "--profile",
             "av1_1080p_sdr",
-            "--dry-run",
+            "--file",
+            str(movie),
         ],
     )
 
     output_line = next(line for line in result.output.splitlines() if line.startswith("Output:"))
     output_path = Path(output_line.split(":", 1)[1].strip())
     assert result.exit_code == 0
-    assert "Av1an argv:" in result.output
-    assert "FFmpeg mux argv:" in result.output
+    assert "Dry run only. No encoding was started." in result.output
     assert not output_path.exists()
 
 
 def test_queue_workflows_report_profile_status_and_retry_errors(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
-    missing_profile = runner.invoke(
+    removed_profile_option = runner.invoke(
         app,
         ["enqueue", "--profile", "does_not_exist"],
     )
@@ -209,14 +199,14 @@ def test_queue_workflows_report_profile_status_and_retry_errors(tmp_path: Path) 
         app,
         ["jobs", "list", "--status", "confused"],
     )
-    retry_preview = runner.invoke(app, ["queue", "retry"])
+    retry_preview = runner.invoke(app, ["jobs", "retry", "--failed"])
 
-    assert missing_profile.exit_code != 0
-    assert "Unknown profile: does_not_exist" in missing_profile.output
+    assert removed_profile_option.exit_code != 0
+    assert "No such option" in removed_profile_option.output
     assert invalid_status.exit_code != 0
     assert "Unknown job status: confused" in invalid_status.output
     assert retry_preview.exit_code == 0
-    assert "Queue retry preview" in retry_preview.output
+    assert "Failed jobs retry prepared: 0" in retry_preview.output
 
 
 def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
@@ -278,7 +268,9 @@ def test_existing_passing_validation_is_reused_without_running_worker(
             now=now,
         )
         output_path = job.output_path
+        job_id = job.id
     assert output_path is not None
+    assert job_id is not None
 
     async def fail_if_called(**_kwargs: object) -> object:
         raise AssertionError("completed PASS validation should be reused")
@@ -287,13 +279,12 @@ def test_existing_passing_validation_is_reused_without_running_worker(
 
     result = runner.invoke(
         app,
-        [
-            "validate",
-            output_path,
-            "--against",
-            str(tmp_path / "movie.mkv"),
-        ],
-    )
+            [
+                "jobs",
+                "validate",
+                str(job_id),
+            ],
+        )
 
     assert result.exit_code == 0
     assert "Validation PASS" in result.output
@@ -342,14 +333,14 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
 
     result = runner.invoke(
         app,
-        ["queue", "retry", "--status", "failed", "--confirm"],
+        ["jobs", "retry", "--failed"],
     )
 
     with Session(engine) as session:
         job = session.get(Job, 1)
 
     assert result.exit_code == 0
-    assert "Resume validate:   1" in result.output
+    assert "Failed jobs retry prepared: 1" in result.output
     assert job is not None
     assert job.status == JobStatus.PENDING
     assert job.stage == JobStage.VALIDATE
@@ -466,7 +457,7 @@ def _tracked_and_probed_movie(
 
     monkeypatch.setattr("avarch.cli.run_ffprobe", fake_ffprobe)
     scan = runner.invoke(app, ["scan", str(media_root)])
-    probe = runner.invoke(app, ["probe", str(movie)])
+    probe = runner.invoke(app, ["probe", "--file", str(movie)])
     assert scan.exit_code == 0
     assert probe.exit_code == 0
     return config_path, movie

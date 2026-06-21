@@ -58,7 +58,7 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    probe_result = runner.invoke(app, ["probe", str(media_file)])
+    probe_result = runner.invoke(app, ["probe", "--file", str(media_file)])
     assert probe_result.exit_code == 0
     assert "Container: matroska,webm" in probe_result.output
     assert _probe_result_count(config_path) == 1
@@ -72,20 +72,21 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert after.fs_fingerprint == before.fs_fingerprint
     assert after.last_seen_at == before.last_seen_at
 
-    inspect_result = runner.invoke(app, ["inspect", str(media_file)])
+    inspect_result = runner.invoke(app, ["files", "show", "--file", str(media_file)])
     assert inspect_result.exit_code == 0
-    assert _summary(inspect_result.output) == _summary(probe_result.output)
+    assert "Container: matroska,webm" in inspect_result.output
+    assert first_probe.probe_hash in inspect_result.output
 
-    second_probe = runner.invoke(app, ["probe", str(media_file)])
+    second_probe = runner.invoke(app, ["probe", "--file", str(media_file), "--force"])
     assert second_probe.exit_code == 0
     assert "Duration: 601 s" in second_probe.output
     assert _probe_result_count(config_path) == 2
 
-    second_inspect = runner.invoke(app, ["inspect", str(media_file)])
+    second_inspect = runner.invoke(app, ["files", "show", "--file", str(media_file)])
     assert second_inspect.exit_code == 0
-    assert _summary(second_inspect.output) == _summary(second_probe.output)
+    assert "Duration: 601 s" in second_inspect.output
 
-    failed_probe = runner.invoke(app, ["probe", str(media_file)])
+    failed_probe = runner.invoke(app, ["probe", "--file", str(media_file), "--force"])
     assert failed_probe.exit_code != 0
     assert "broken" in failed_probe.output
     assert _probe_result_count(config_path) == 2
@@ -110,10 +111,6 @@ def _latest_probe_result(config_path: Path) -> ProbeResult:
         results = session.exec(select(ProbeResult)).all()
     assert results
     return max(results, key=lambda result: result.id or 0)
-
-
-def _summary(output: str) -> str:
-    return output[output.index("File: ") :]
 
 
 def _engine(config_path: Path) -> Engine:

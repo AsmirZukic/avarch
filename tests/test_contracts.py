@@ -2,6 +2,7 @@ from pathlib import Path
 
 from avarch.contracts import (
     ALEMBIC_BASELINE_REVISION,
+    ALEMBIC_HEAD_REVISION,
     AV1AN_SPEC_HASH_CONTRACT,
     EXECUTION_IDENTITY_HASH_CONTRACT,
     FFMPEG_MUX_SPEC_HASH_CONTRACT,
@@ -32,9 +33,13 @@ def test_current_hash_contracts_are_single_baseline() -> None:
     assert PROMOTION_POLICY_HASH_CONTRACT == "promotion-policy-v1"
 
 
-def test_current_alembic_revision_is_single_baseline() -> None:
+def test_current_alembic_revision_chain() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    revisions = list((repo_root / "migrations" / "versions").glob("*.py"))
+    revisions = sorted((repo_root / "migrations" / "versions").glob("*.py"))
 
     assert ALEMBIC_BASELINE_REVISION == "0001_initial"
-    assert [revision.name for revision in revisions] == ["0001_initial_schema.py"]
+    assert ALEMBIC_HEAD_REVISION == "0002_media_plan"
+    assert [revision.name for revision in revisions] == [
+        "0001_initial_schema.py",
+        "0002_media_plan.py",
+    ]

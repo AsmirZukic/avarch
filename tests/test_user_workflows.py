@@ -36,7 +36,7 @@ def test_configured_scan_workflow_handles_roots_extensions_exclusions_and_symlin
     _write_inventory_config(tmp_path, roots=[media_root])
 
     scan_result = runner.invoke(app, ["scan"])
-    files_result = runner.invoke(app, ["files"])
+    files_result = runner.invoke(app, ["files", "list"])
 
     assert scan_result.exit_code == 0
     assert "Added:     2" in scan_result.output
@@ -63,7 +63,7 @@ def test_empty_extension_workflow_can_mark_previously_tracked_files_missing(
         "extensions = []",
     )
     second_scan = runner.invoke(app, ["scan", str(media_root)])
-    changed_files = runner.invoke(app, ["files", "--changed"])
+    changed_files = runner.invoke(app, ["files", "list", "--changed"])
 
     assert first_scan.exit_code == 0
     assert second_scan.exit_code == 0
@@ -79,8 +79,8 @@ def test_media_catalog_workflow_can_stop_after_probe_and_inspect(
     _, movie = _tracked_movie(tmp_path)
     monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
 
-    probe_result = runner.invoke(app, ["probe", str(movie)])
-    inspect_result = runner.invoke(app, ["inspect", str(movie)])
+    probe_result = runner.invoke(app, ["probe", "--file", str(movie)])
+    inspect_result = runner.invoke(app, ["files", "show", "--file", str(movie)])
 
     assert probe_result.exit_code == 0
     assert inspect_result.exit_code == 0
@@ -98,7 +98,7 @@ def test_plan_workflow_materializes_bundle_for_manual_av1an_review(
 
     plan_result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
 
     artifact_dir = _artifact_dir_from_output(plan_result.output)
@@ -132,9 +132,10 @@ def test_plan_check_vpy_workflow_runs_runtime_validation_when_requested(
         app,
         [
             "plan",
-            str(movie),
             "--profile",
             "av1_1080p_sdr",
+            "--file",
+            str(movie),
             "--check-vpy",
         ],
     )
@@ -161,9 +162,10 @@ def test_runtime_validation_failure_keeps_generated_bundle(
         app,
         [
             "plan",
-            str(movie),
             "--profile",
             "av1_1080p_sdr",
+            "--file",
+            str(movie),
             "--check-vpy",
         ],
     )
@@ -185,18 +187,18 @@ def test_existing_artifact_conflict_workflow_blocks_overwrite(
 
     first = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
     artifact_dir = _artifact_dir_from_output(first.output)
     (artifact_dir / "movie.vpy").write_text("# user changed artifact\n", encoding="utf-8")
     second = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
     )
 
     assert first.exit_code == 0
-    assert second.exit_code != 0
-    assert "Plan artifact bundle already exists" in second.output
+    assert second.exit_code == 0
+    assert "plan-current" in second.output
     assert (artifact_dir / "movie.vpy").read_text(encoding="utf-8") == "# user changed artifact\n"
 
 
@@ -222,7 +224,7 @@ def test_custom_template_workflow_supports_hdr_and_preserves_user_body(
 
     result = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "custom_template"],
+        ["plan", "--profile", "custom_template", "--file", str(movie)],
     )
 
     artifact_dir = _artifact_dir_from_output(result.output)
@@ -256,12 +258,12 @@ def test_multiple_config_workflow_isolates_databases_and_artifacts(
 
     first_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
         env={"PWD": str(first_dir)},
     )
     second_plan = runner.invoke(
         app,
-        ["plan", str(movie), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(movie)],
         env={"PWD": str(second_dir)},
     )
 
@@ -338,7 +340,7 @@ def _scan_probe(config_path: Path, media_root: Path, movie: Path) -> None:
 def _probe(config_path: Path, movie: Path) -> None:
     probe_result = runner.invoke(
         app,
-        ["probe", str(movie)],
+        ["probe", "--file", str(movie)],
         env={"PWD": str(config_path.parent.parent)},
     )
     assert probe_result.exit_code == 0

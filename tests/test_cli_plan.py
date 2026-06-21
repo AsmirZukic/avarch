@@ -28,7 +28,7 @@ def test_plan_command_creates_bundle(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code == 0
@@ -50,7 +50,7 @@ def test_plan_command_uses_packaged_builtin_when_workspace_profiles_dir_is_missi
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code == 0
@@ -73,7 +73,7 @@ def test_plan_command_does_not_run_vspipe_by_default(
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code == 0
@@ -98,9 +98,10 @@ def test_plan_command_check_vpy_validates_bestsource_script(
         app,
         [
             "plan",
-            str(media_file),
             "--profile",
             "av1_1080p_sdr",
+            "--file",
+            str(media_file),
             "--check-vpy",
         ],
     )
@@ -124,7 +125,7 @@ def test_plan_command_prints_summary(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code == 0
@@ -150,7 +151,7 @@ def test_plan_command_executes_no_external_process(
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code == 0
@@ -160,14 +161,16 @@ def test_repeated_plan_command_is_idempotent(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_probe(config_path, media_file)
-    command = ["plan", str(media_file), "--profile", "av1_1080p_sdr"]
+    command = ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)]
 
     first = runner.invoke(app, command)
     second = runner.invoke(app, command)
 
     assert first.exit_code == 0
     assert second.exit_code == 0
-    assert _artifact_dir_from_output(first.output) == _artifact_dir_from_output(second.output)
+    assert "Processed: 1" in first.output
+    assert "plan-current" in second.output
+    assert "Processed: 0" in second.output
 
 
 def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
@@ -188,14 +191,14 @@ def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
     assert result.exit_code != 0
     assert "video codec is excluded: av1" in result.output
 
 
-def test_plan_command_rejects_builtin_hdr_source(tmp_path: Path) -> None:
+def test_plan_command_accepts_builtin_hdr_source_with_hdr_to_sdr(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_normalized_probe(
@@ -207,22 +210,31 @@ def test_plan_command_rejects_builtin_hdr_source(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
-    assert result.exit_code != 0
-    assert "does not support HDR input" in result.output
+    assert result.exit_code == 0
+    assert "Plan hash:" in result.output
 
 
-def test_plan_command_rejects_missing_audio_match(tmp_path: Path) -> None:
+def test_plan_command_falls_back_to_available_audio_when_language_does_not_match(
+    tmp_path: Path,
+) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_normalized_probe(
         config_path,
         media_file,
         NormalizedProbe(
+            duration_seconds=600.0,
             video_streams=[
-                VideoStream(index=0, codec="hevc", width=1920, height=1080),
+                VideoStream(
+                    index=0,
+                    codec="hevc",
+                    width=1920,
+                    height=1080,
+                    pix_fmt="yuv420p10le",
+                ),
             ],
             audio_streams=[
                 AudioStream(index=1, codec="eac3", language="jpn", channels=6),
@@ -232,11 +244,41 @@ def test_plan_command_rejects_missing_audio_match(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["plan", str(media_file), "--profile", "av1_1080p_sdr"],
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
-    assert result.exit_code != 0
-    assert "No eligible audio stream matches" in result.output
+    assert result.exit_code == 0
+    assert "Audio: [1] eac3 jpn -> libopus 128k 2ch" in result.output
+
+
+def test_plan_command_allows_sources_without_audio_streams(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
+    _store_normalized_probe(
+        config_path,
+        media_file,
+        NormalizedProbe(
+            duration_seconds=600.0,
+            video_streams=[
+                VideoStream(
+                    index=0,
+                    codec="hevc",
+                    width=1920,
+                    height=1080,
+                    pix_fmt="yuv420p10le",
+                ),
+            ],
+            audio_streams=[],
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Audio: none" in result.output
 
 
 def _init_config(tmp_path: Path) -> Path:

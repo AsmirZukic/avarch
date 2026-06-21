@@ -79,13 +79,38 @@ def test_builtin_script_rejects_unsupported_pixel_format() -> None:
         generate_builtin_script(plan)
 
 
-def test_builtin_script_rejects_hdr_source() -> None:
+def test_builtin_script_converts_hdr_source_when_profile_opts_in() -> None:
+    plan = sample_plan().model_copy(
+        update={
+            "vapoursynth": sample_plan().vapoursynth.model_copy(
+                update={
+                    "source_color_transfer": "smpte2084",
+                    "source_color_primaries": "bt2020",
+                    "source_color_space": "bt2020nc",
+                    "source_hdr_metadata_present": True,
+                }
+            )
+        }
+    )
+
+    script = generate_builtin_script(plan)
+
+    assert "matrix_in_s='2020ncl'" in script
+    assert "transfer_in_s='st2084'" in script
+    assert "primaries_in_s='2020'" in script
+    assert "matrix_s='709'" in script
+    assert "transfer_s='709'" in script
+    assert "primaries_s='709'" in script
+
+
+def test_builtin_script_rejects_hdr_source_without_hdr_to_sdr() -> None:
     plan = sample_plan().model_copy(
         update={
             "vapoursynth": sample_plan().vapoursynth.model_copy(
                 update={
                     "source_color_transfer": "smpte2084",
                     "source_hdr_metadata_present": True,
+                    "hdr_to_sdr": False,
                 }
             )
         }

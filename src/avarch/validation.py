@@ -349,6 +349,33 @@ def validate_audio_streams(
             observed=len(observed.audio_streams),
         )
     ]
+    if policy.expected_audio_stream_count == 0:
+        checks.append(
+            ValidationCheck(
+                name="audio_codec",
+                status=ValidationCheckStatus.SKIPPED,
+                required=False,
+                message="No output audio stream is expected.",
+            )
+        )
+        checks.append(
+            ValidationCheck(
+                name="audio_channels",
+                status=ValidationCheckStatus.SKIPPED,
+                required=False,
+                message="No output audio stream is expected.",
+            )
+        )
+        checks.append(
+            ValidationCheck(
+                name="audio_language",
+                status=ValidationCheckStatus.SKIPPED,
+                required=False,
+                message="No output audio stream is expected.",
+            )
+        )
+        return checks
+
     stream = observed.audio_streams[0] if observed.audio_streams else None
     checks.append(
         _check(

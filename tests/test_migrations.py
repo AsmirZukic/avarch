@@ -7,16 +7,19 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 
-from avarch.contracts import ALEMBIC_BASELINE_REVISION
+from avarch.contracts import ALEMBIC_BASELINE_REVISION, ALEMBIC_HEAD_REVISION
 from avarch.db import create_db_engine
 from avarch.db_migrations import upgrade_database
 
 
-def test_repository_contains_one_migration_revision() -> None:
+def test_repository_contains_migration_revisions() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     revisions = sorted((repo_root / "migrations" / "versions").glob("*.py"))
 
-    assert [revision.name for revision in revisions] == ["0001_initial_schema.py"]
+    assert [revision.name for revision in revisions] == [
+        "0001_initial_schema.py",
+        "0002_media_plan.py",
+    ]
 
 
 def test_initial_revision_has_no_parent() -> None:
@@ -25,6 +28,14 @@ def test_initial_revision_has_no_parent() -> None:
 
     assert revision is not None
     assert revision.down_revision is None
+
+
+def test_media_plan_revision_depends_on_initial_revision() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == ALEMBIC_BASELINE_REVISION
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -41,6 +52,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
         "proberesult",
         "job",
         "jobattempt",
+        "mediaplan",
         "promotionrecord",
         "schedulerstate",
         "validationresult",
@@ -58,6 +70,7 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     job_indexes = {index["name"] for index in inspector.get_indexes("job")}
     validation_indexes = {index["name"] for index in inspector.get_indexes("validationresult")}
     promotion_indexes = {index["name"] for index in inspector.get_indexes("promotionrecord")}
+    media_plan_indexes = {index["name"] for index in inspector.get_indexes("mediaplan")}
 
     assert "ix_mediafile_fs_fingerprint" in media_indexes
     assert "ix_mediafile_latest_probe_id" in media_indexes
@@ -68,6 +81,8 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     assert "ix_validationresult_attempt_id" in validation_indexes
     assert "ix_promotionrecord_operation_id" in promotion_indexes
     assert "ix_promotionrecord_attempt_id" in promotion_indexes
+    assert "ix_mediaplan_plan_hash" in media_plan_indexes
+    assert "ix_mediaplan_media_file_id" in media_plan_indexes
 
 
 def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
@@ -88,6 +103,18 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
         table="proberesult",
         columns=["media_file_id"],
         referred_table="mediafile",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="mediaplan",
+        columns=["media_file_id"],
+        referred_table="mediafile",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="mediaplan",
+        columns=["probe_result_id"],
+        referred_table="proberesult",
     )
     assert _has_foreign_key(
         inspector,
@@ -180,10 +207,24 @@ def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
     assert "mediafile" in tables
 
 
+def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    config = _alembic_config(database_url)
+
+    command.upgrade(config, ALEMBIC_BASELINE_REVISION)
+    tables_before = set(inspect(create_db_engine(database_url)).get_table_names())
+    assert "mediaplan" not in tables_before
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    assert "mediaplan" in set(inspector.get_table_names())
+
+
 def test_alembic_has_one_head() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
 
-    assert script.get_heads() == [ALEMBIC_BASELINE_REVISION]
+    assert script.get_heads() == [ALEMBIC_HEAD_REVISION]
 
 
 def _has_foreign_key(

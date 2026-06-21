@@ -63,6 +63,29 @@ class ProbeResult(SQLModel, table=True):
     created_at: datetime
 
 
+class MediaPlan(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+    media_file_id: int = Field(foreign_key="mediafile.id", index=True)
+    probe_result_id: int = Field(foreign_key="proberesult.id", index=True)
+
+    profile_name: str = Field(index=True)
+    profile_hash: str = Field(index=True)
+    probe_hash: str = Field(index=True)
+    source_fs_fingerprint: str = Field(index=True)
+    execution_identity_hash: str = Field(index=True)
+
+    plan_hash: str = Field(unique=True, index=True)
+    plan_path: str
+    output_path: str
+
+    is_current: bool = Field(default=True, index=True)
+    is_valid: bool = Field(default=True, index=True)
+
+    created_at: datetime
+    superseded_at: datetime | None = None
+
+
 class Job(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 

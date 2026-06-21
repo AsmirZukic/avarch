@@ -117,7 +117,7 @@ def test_vpy_check_generates_and_evaluates_script(
 
     monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
     scan_result = runner.invoke(app, ["scan", "."])
-    probe_result = runner.invoke(app, ["probe", "Movies/Test.mkv"])
+    probe_result = runner.invoke(app, ["probe", "--file", "Movies/Test.mkv"])
 
     result = runner.invoke(app, ["vpy", "check", "--profile", "default", "Movies/Test.mkv"])
 
@@ -161,7 +161,7 @@ api_version = 1
 
     monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
     scan_result = runner.invoke(app, ["scan", "."])
-    probe_result = runner.invoke(app, ["probe", "Movies/Test.mkv"])
+    probe_result = runner.invoke(app, ["probe", "--file", "Movies/Test.mkv"])
 
     result = runner.invoke(app, ["vpy", "check", "--profile", "filtered", "Movies/Test.mkv"])
 

@@ -53,8 +53,8 @@ class ValidationPolicy(BaseModel):
     expected_height: int = Field(gt=0)
 
     expected_audio_stream_count: int = Field(default=1, ge=0)
-    expected_audio_codec: str
-    expected_audio_channels: int = Field(gt=0)
+    expected_audio_codec: str | None = None
+    expected_audio_channels: int | None = Field(default=None, gt=0)
     expected_audio_language: str | None
 
     expected_subtitles: list[ExpectedSubtitlePolicy]

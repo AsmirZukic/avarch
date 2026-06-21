@@ -80,15 +80,51 @@ The current execution contract expects Av1an `0.5.x`.
 
 ```sh
 avarch scan .
-avarch probe Movies/Test.mkv
-avarch profiles copy default --name my_filtered_profile
-avarch vpy scaffold filter --name my_filter
-avarch vpy sync
-avarch vpy check --profile my_filtered_profile Movies/Test.mkv
-avarch workflow preview --profile my_filtered_profile
-avarch workflow enqueue --profile my_filtered_profile
-avarch scheduler run
+avarch probe
+avarch plan --profile av1_1080p_sdr
+avarch enqueue
+avarch scheduler run -d
+avarch scheduler status
+avarch jobs list
 ```
+
+Files enter the workspace through `scan`. After that, pipeline commands consume
+persisted workspace state by default: `probe` selects active scanned files with
+missing or stale probes, `plan` selects current successful probes, and `enqueue`
+selects current valid plans.
+
+Target a specific file when needed:
+
+```sh
+avarch probe --file Movies/Test.mkv --force
+avarch plan --profile av1_1080p_sdr --file Movies/Test.mkv
+avarch enqueue --file Movies/Test.mkv
+```
+
+Inspect persisted resources:
+
+```sh
+avarch files list
+avarch files show --file Movies/Test.mkv
+avarch plans list
+avarch plans show PLAN_ID
+avarch jobs show JOB_ID
+avarch jobs validate JOB_ID
+```
+
+Scheduler lifecycle commands manage the workspace-local scheduler process:
+
+```sh
+avarch scheduler pause
+avarch scheduler resume
+avarch scheduler stop
+avarch scheduler restart
+```
+
+Detached scheduler state and logs live under `.avarch/run/` and `.avarch/logs/`.
+Application-level detachment is for normal host processes. When running avarch
+through a one-shot Docker command, detach the container itself with `docker run
+-d` instead.
 
 ## Configuration
 

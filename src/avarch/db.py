@@ -6,7 +6,7 @@ from sqlalchemy import Engine, event, inspect, text
 from sqlalchemy.engine import make_url
 from sqlmodel import SQLModel, create_engine
 
-from avarch.contracts import ALEMBIC_BASELINE_REVISION
+from avarch.contracts import ALEMBIC_HEAD_REVISION, ALEMBIC_SUPPORTED_REVISIONS
 
 RESET_DATABASE_MESSAGE = """This database cannot be used by this avarch build.
 
@@ -77,7 +77,7 @@ def create_db_schema(engine: Engine) -> None:
 def verify_database_revision(
     engine: Engine,
     *,
-    expected_revision: str = ALEMBIC_BASELINE_REVISION,
+    expected_revision: str = ALEMBIC_HEAD_REVISION,
 ) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -92,7 +92,9 @@ def verify_database_revision(
             for row in connection.execute(text("SELECT version_num FROM alembic_version")).all()
         ]
 
-    if revisions == [expected_revision]:
+    if revisions == [expected_revision] or (
+        len(revisions) == 1 and revisions[0] in ALEMBIC_SUPPORTED_REVISIONS
+    ):
         return
 
     raise UnsupportedDatabaseSchemaError(RESET_DATABASE_MESSAGE)
