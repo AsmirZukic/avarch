@@ -1852,11 +1852,19 @@ def _resolve_retry_stage(
         _verify_job_profile(config, job)
     except StaleJobProfileError as exc:
         raise JobControlError(str(exc)) from exc
+    identity = _planning_identity(_require_profile(config, job.profile_name))
 
     canonical_probe = get_canonical_probe_result(session, media_file)
     if canonical_probe is None or canonical_probe.probe_hash != job.probe_hash:
         return JobStage.PROBE
     if job.plan_path is None or job.plan_hash is None or not _plan_artifact_valid(job):
+        return JobStage.PLAN
+    plan = _load_job_plan(job)
+    if (
+        plan.profile_hash != identity.profile_hash
+        or plan.vapoursynth.identity_hash != identity.vapoursynth_identity_hash
+        or plan.execution_identity.identity_hash != identity.execution_identity_hash
+    ):
         return JobStage.PLAN
     validation = _latest_validation(session, job)
     if _output_exists(job):

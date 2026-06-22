@@ -19,6 +19,13 @@ invoking UID/GID, preserves Docker exit codes, and uses the fixed
 export PATH="$PWD/bin:$PATH"
 ```
 
+On SELinux hosts, the wrapper runs the container with
+`--security-opt label=disable` so Docker can read home-directory bind mounts
+without recursively relabeling large media workspaces. Set
+`AVARCH_DOCKER_SECURITY_OPT` to override that option, or to an empty value to
+disable it. Set `AVARCH_DOCKER_VOLUME_OPTIONS=z` only if you explicitly want
+Docker to relabel the workspace mount.
+
 Initialize local workspace state:
 
 ```sh

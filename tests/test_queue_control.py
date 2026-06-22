@@ -20,12 +20,13 @@ from avarch.models.db import (
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.models.scheduler import JobEventType, JobStage, JobStatus
-from avarch.planner import build_profile_hash
+from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
 from avarch.probe import normalize_probe, store_probe_result
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.scheduler import JobControlError, clear_queue, retry_job, retry_queue
 from avarch.serialization import canonical_json
+from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 
@@ -281,6 +282,49 @@ def test_queue_retry_reports_reenqueue_when_source_identity_changed(tmp_path: Pa
     assert stored.status == JobStatus.FAILED
 
 
+def test_queue_retry_resets_to_plan_when_vapoursynth_identity_changed(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    config = _config(tmp_path)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        job = _retry_job(session, tmp_path, config=config, state="encode", now=now)
+        plan = TranscodePlan.model_validate_json(Path(job.plan_path or "").read_text())
+        stale_plan = finalize_plan_hash(
+            plan.model_copy(
+                update={
+                    "plan_hash": "",
+                    "vapoursynth": plan.vapoursynth.model_copy(
+                        update={
+                            "generator_version": GENERATOR_VERSION - 1,
+                            "identity_hash": "old-vapoursynth-identity",
+                        }
+                    ),
+                }
+            )
+        )
+        _write_plan(stale_plan)
+        job.plan_hash = stale_plan.plan_hash
+        session.add(job)
+        job_id = job.id or 0
+
+    with Session(engine) as session, session.begin():
+        summary = retry_queue(
+            session,
+            config=config,
+            actor="test",
+            now=now,
+            statuses={JobStatus.FAILED},
+            confirm=True,
+        )
+
+    with Session(engine) as session:
+        stored = _get_job(session, job_id)
+
+    assert summary.reset_to_plan == 1
+    assert stored.stage == JobStage.PLAN
+    assert stored.status == JobStatus.PENDING
+
+
 def test_retry_job_rejects_completed_promotion(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     config = _config(tmp_path)
@@ -327,6 +371,32 @@ def _retry_job(
         probe_result_id = probe.id
 
     plan = _localized_plan(tmp_path=tmp_path, state=state)
+    execution_identity = build_execution_identity()
+    vapoursynth_identity_hash = build_vapoursynth_identity_hash(
+        generator_version=GENERATOR_VERSION,
+        mode=plan.vapoursynth.mode,
+        output_format=plan.vapoursynth.output_format,
+        resize_filter=plan.vapoursynth.resize_filter,
+        template_hash=plan.vapoursynth.template_hash,
+        script_hash=plan.vapoursynth.filter_hash,
+        filter_entrypoint=plan.vapoursynth.filter_entrypoint,
+        filter_api_version=plan.vapoursynth.filter_api_version,
+    )
+    plan = finalize_plan_hash(
+        plan.model_copy(
+            update={
+                "plan_hash": "",
+                "profile_hash": profile_hash,
+                "execution_identity": execution_identity,
+                "vapoursynth": plan.vapoursynth.model_copy(
+                    update={
+                        "generator_version": GENERATOR_VERSION,
+                        "identity_hash": vapoursynth_identity_hash,
+                    }
+                ),
+            }
+        )
+    )
     plan_hash: str | None = None
     plan_path: str | None = None
     output_path: str | None = None

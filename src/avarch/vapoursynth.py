@@ -22,7 +22,7 @@ from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
 from avarch.workspace import WorkspaceContext
 
-GENERATOR_VERSION = 3
+GENERATOR_VERSION = 4
 DEFAULT_VSPIPE_TIMEOUT_SECONDS = 600.0
 MAX_VSPIPE_EXCERPT_BYTES = 8192
 _SUPPORTED_PIXEL_FORMATS = {
@@ -224,6 +224,7 @@ def build_vapoursynth_identity_hash(
 def generate_builtin_script(plan: TranscodePlan) -> str:
     _validate_builtin_plan(plan)
     source_path = repr(str(plan.vapoursynth.source_path))
+    index_cache_dir = repr(str(plan.vapoursynth.index_cache_dir))
     resize_arguments = _builtin_resize_arguments(plan)
     bestsource_plugin_path = resolve_bestsource_plugin_path()
     load_bestsource_plugin = ""
@@ -240,14 +241,18 @@ def generate_builtin_script(plan: TranscodePlan) -> str:
         f"# Plan hash: {plan.plan_hash}\n"
         f"# Profile: {plan.profile_name}\n"
         "\n"
+        "from pathlib import Path\n"
+        "\n"
         "import vapoursynth as vs\n"
         "\n"
         "core = vs.core\n"
         "\n"
         f"{load_bestsource_plugin}"
         f"source_path = {source_path}\n"
+        f"index_cache_dir = Path({index_cache_dir})\n"
+        "index_cache_dir.mkdir(parents=True, exist_ok=True)\n"
         "\n"
-        "clip = core.bs.VideoSource(source=source_path)\n"
+        "clip = core.bs.VideoSource(source=source_path, cachepath=str(index_cache_dir))\n"
         "\n"
         "clip = core.resize.Spline36(\n"
         "    clip,\n"
@@ -330,6 +335,7 @@ def generate_custom_filter_script(
         raise VapourSynthTemplateError("resolved filter entrypoint does not match the plan")
 
     source_path = repr(str(plan.vapoursynth.source_path))
+    index_cache_dir = repr(str(plan.vapoursynth.index_cache_dir))
     filter_path = repr(str(plan.vapoursynth.filter_path))
     entrypoint = repr(user_filter.entrypoint)
     bestsource_plugin_path = resolve_bestsource_plugin_path()
@@ -362,9 +368,11 @@ def generate_custom_filter_script(
         "\n"
         f"{load_bestsource_plugin}"
         f"source_path = {source_path}\n"
+        f"index_cache_dir = Path({index_cache_dir})\n"
+        "index_cache_dir.mkdir(parents=True, exist_ok=True)\n"
         f"filter_path = Path({filter_path})\n"
         "\n"
-        "clip = core.bs.VideoSource(source=source_path)\n"
+        "clip = core.bs.VideoSource(source=source_path, cachepath=str(index_cache_dir))\n"
         "\n"
         "context = FilterContext(\n"
         f"    api_version={plan.vapoursynth.filter_api_version or 1},\n"

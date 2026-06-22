@@ -38,23 +38,72 @@ workspace_required() {
   esac
 }
 
+volume_options() {
+  if [ "${AVARCH_DOCKER_VOLUME_OPTIONS+x}" = "x" ]; then
+    printf '%s\n' "$AVARCH_DOCKER_VOLUME_OPTIONS"
+    return 0
+  fi
+
+  printf '%s\n' ""
+}
+
+selinux_enabled() {
+  if [ -r /sys/fs/selinux/enforce ]; then
+    read -r enforcing < /sys/fs/selinux/enforce || enforcing=0
+    if [ "$enforcing" = "1" ]; then
+      return 0
+    fi
+  fi
+
+  if command -v ls >/dev/null 2>&1; then
+    selinux_context=$(ls -Zd "$1" 2>/dev/null || true)
+    case "$selinux_context" in
+      *:object_r:*)
+        return 0
+        ;;
+    esac
+  fi
+
+  return 1
+}
+
+docker_run_args() {
+  printf '%s' "run --rm --user $uid:$gid"
+  if [ "${AVARCH_DOCKER_SECURITY_OPT+x}" = "x" ]; then
+    if [ -n "$AVARCH_DOCKER_SECURITY_OPT" ]; then
+      printf ' %s %s' "--security-opt" "$AVARCH_DOCKER_SECURITY_OPT"
+    fi
+  elif [ -n "${workspace:-}" ] && selinux_enabled "$workspace"; then
+    printf ' %s %s' "--security-opt" "label=disable"
+  fi
+}
+
+workspace_volume() {
+  options=$(volume_options "$1")
+  if [ -n "$options" ]; then
+    printf '%s:%s:%s\n' "$1" "$CONTAINER_WORKSPACE" "$options"
+  else
+    printf '%s:%s\n' "$1" "$CONTAINER_WORKSPACE"
+  fi
+}
+
 uid=$(id -u)
 gid=$(id -g)
 
 set -- "$@"
 workspace=""
 if workspace=$(find_workspace); then
-  docker_args="run --rm --user $uid:$gid -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
+  docker_args="$(docker_run_args) -v $(workspace_volume "$workspace") -w $CONTAINER_WORKSPACE"
 elif workspace_required "${1:-}"; then
   die "No Avarch workspace found. Run 'avarch init' from the workspace root."
 else
   workspace="${PWD:-$(pwd)}"
-  docker_args="run --rm --user $uid:$gid"
+  docker_args="$(docker_run_args)"
   if [ "${1:-}" = "init" ]; then
     if [ ! -w "$workspace" ]; then
       die "Workspace root is not writable: $workspace"
     fi
-    docker_args="$docker_args -v $workspace:$CONTAINER_WORKSPACE -w $CONTAINER_WORKSPACE"
+    docker_args="$docker_args -v $(workspace_volume "$workspace") -w $CONTAINER_WORKSPACE"
   fi
 fi
 

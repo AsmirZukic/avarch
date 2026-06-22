@@ -87,6 +87,84 @@ def test_wrapper_discovers_workspace_and_forwards_exit_code(tmp_path: Path) -> N
     assert "avarch:test version" in command
 
 
+def test_wrapper_adds_selinux_security_option_when_workspace_has_selinux_context(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=workspace,
+        env=_wrapper_env(
+            fake_bin,
+            log,
+            image="avarch:test",
+            ls_zd_result="unconfined_u:object_r:user_home_t:s0",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert "--security-opt label=disable" in command
+    assert f"-v {workspace}:/workspace" in command
+
+
+def test_wrapper_security_opt_env_overrides_selinux_detection(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=workspace,
+        env=_wrapper_env(
+            fake_bin,
+            log,
+            image="avarch:test",
+            security_opt="",
+            ls_zd_result="unconfined_u:object_r:user_home_t:s0",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert "--security-opt label=disable" not in command
+    assert f"-v {workspace}:/workspace " in command
+
+
+def test_wrapper_volume_options_env_can_request_relabel(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=workspace,
+        env=_wrapper_env(
+            fake_bin,
+            log,
+            image="avarch:test",
+            security_opt="",
+            volume_options="z",
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert f"-v {workspace}:/workspace:z" in command
+
+
 def test_wrapper_rejects_running_scheduler_container(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
@@ -197,6 +275,24 @@ exit "${DOCKER_EXIT_CODE:-0}"
         encoding="utf-8",
     )
     docker.chmod(0o755)
+    ls = fake_bin / "ls"
+    ls.write_text(
+        """#!/usr/bin/env sh
+set -eu
+
+if [ "${1:-}" = "-Zd" ]; then
+  if [ -n "${LS_ZD_RESULT:-}" ]; then
+    printf '%s\\n' "$LS_ZD_RESULT"
+    exit 0
+  fi
+  exit 1
+fi
+
+exit 1
+""",
+        encoding="utf-8",
+    )
+    ls.chmod(0o755)
     return fake_bin
 
 
@@ -208,6 +304,9 @@ def _wrapper_env(
     docker_exit_code: str = "0",
     docker_ps_id: str = "",
     docker_inspect_result: str = "false\t\t",
+    ls_zd_result: str = "",
+    security_opt: str | None = None,
+    volume_options: str | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -217,7 +316,12 @@ def _wrapper_env(
             "DOCKER_INSPECT_RESULT": docker_inspect_result,
             "DOCKER_LOG": str(log),
             "DOCKER_PS_ID": docker_ps_id,
+            "LS_ZD_RESULT": ls_zd_result,
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
         }
     )
+    if security_opt is not None:
+        env["AVARCH_DOCKER_SECURITY_OPT"] = security_opt
+    if volume_options is not None:
+        env["AVARCH_DOCKER_VOLUME_OPTIONS"] = volume_options
     return env

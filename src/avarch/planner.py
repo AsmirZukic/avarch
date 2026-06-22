@@ -96,10 +96,31 @@ ACCEPTED_CONTAINER_NAMES = {
 EXPECTED_AUDIO_CODEC_NAMES = {
     "libopus": "opus",
 }
+SVT_AV1_SDR_COLOR_ARGUMENTS = (
+    ("--color-primaries", "1"),
+    ("--transfer-characteristics", "1"),
+    ("--matrix-coefficients", "1"),
+    ("--color-range", "0"),
+    ("--chroma-sample-position", "1"),
+)
 
 
 def parse_encoder_args(value: str) -> list[str]:
     return shlex.split(value)
+
+
+def add_sdr_color_encoder_args(arguments: list[str]) -> list[str]:
+    result = list(arguments)
+    for option, value in SVT_AV1_SDR_COLOR_ARGUMENTS:
+        if _encoder_option_present(result, option):
+            continue
+        result.extend([option, value])
+    return result
+
+
+def _encoder_option_present(arguments: list[str], option: str) -> bool:
+    prefix = f"{option}="
+    return any(argument == option or argument.startswith(prefix) for argument in arguments)
 
 
 def build_profile_hash(
@@ -165,6 +186,13 @@ def build_execution_identity_hash(identity: ExecutionIdentity) -> str:
         "av1an_concat_method": "ffmpeg",
         "av1an_pixel_format": "yuv420p10le",
         "av1an_cache_mode": "temp",
+        "av1an_svt_av1_sdr_color_description": {
+            "color_primaries": "bt709",
+            "transfer_characteristics": "bt709",
+            "matrix_coefficients": "bt709",
+            "color_range": "studio",
+            "chroma_sample_position": "left",
+        },
         "av1an_overwrite_policy": "never-overwrite",
         "av1an_temporary_state_retention": "keep",
         "ffmpeg_mux_policy": {
@@ -202,9 +230,9 @@ def finalize_plan_hash(plan: TranscodePlan) -> TranscodePlan:
 def build_validation_policy_hash(policy: ValidationPolicy) -> str:
     payload_data = policy.model_dump(mode="json")
     payload_data.pop("policy_hash", None)
-    payload = f"{VALIDATION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(
-        payload_data
-    ).encode("utf-8")
+    payload = f"{VALIDATION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(payload_data).encode(
+        "utf-8"
+    )
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -215,9 +243,9 @@ def finalize_validation_policy(policy: ValidationPolicy) -> ValidationPolicy:
 def build_promotion_policy_hash(policy: PromotionPolicy) -> str:
     payload_data = policy.model_dump(mode="json")
     payload_data.pop("policy_hash", None)
-    payload = f"{PROMOTION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(
-        payload_data
-    ).encode("utf-8")
+    payload = f"{PROMOTION_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(payload_data).encode(
+        "utf-8"
+    )
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -576,6 +604,7 @@ def build_plan(
     subtitles = select_subtitles(context.normalized_probe, context.profile)
     vpy_requirements = _vpy_requirements_for_data_dir(data_dir)
     runtime_identity = build_runtime_identity(vpy_requirements)
+    encoder_args = add_sdr_color_encoder_args(parse_encoder_args(context.profile.av1an.video_args))
 
     plan = TranscodePlan(
         plan_hash="",
@@ -638,7 +667,7 @@ def build_plan(
             temp_dir=paths.av1an_temp_dir,
             working_directory=paths.work_dir,
             encoder=context.profile.av1an.encoder,
-            encoder_args=parse_encoder_args(context.profile.av1an.video_args),
+            encoder_args=encoder_args,
             workers=context.profile.av1an.workers,
         ),
         mux=FfmpegMuxSpec(
@@ -867,9 +896,7 @@ def _artifact_dir_matches(payloads: dict[str, str], artifact_dir: Path) -> bool:
     if not artifact_dir.is_dir():
         return False
     existing = {
-        str(path.relative_to(artifact_dir))
-        for path in artifact_dir.rglob("*")
-        if path.is_file()
+        str(path.relative_to(artifact_dir)) for path in artifact_dir.rglob("*") if path.is_file()
     }
     if existing != set(payloads):
         return False

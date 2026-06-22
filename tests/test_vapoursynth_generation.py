@@ -28,7 +28,12 @@ def test_builtin_script_uses_finalized_plan_hash() -> None:
 def test_builtin_script_uses_bestsource_loader() -> None:
     script = generate_builtin_script(sample_plan())
 
-    assert "clip = core.bs.VideoSource(source=source_path)" in script
+    assert "index_cache_dir = Path('/work/bestsource')" in script
+    assert "index_cache_dir.mkdir(parents=True, exist_ok=True)" in script
+    assert (
+        "clip = core.bs.VideoSource(source=source_path, cachepath=str(index_cache_dir))"
+        in script
+    )
     assert "core.lsmas" not in script
     assert "LWLibavSource" not in script
 
@@ -146,6 +151,11 @@ def test_custom_filter_script_loads_snapshot_and_registers_output() -> None:
 
     script = generate_custom_filter_script(plan, user_filter=user_filter)
 
+    assert "index_cache_dir = Path('/work/bestsource')" in script
+    assert (
+        "clip = core.bs.VideoSource(source=source_path, cachepath=str(index_cache_dir))"
+        in script
+    )
     assert "filter_path = Path('/work/vpy/user_filter.py')" in script
     assert "entrypoint = getattr(module, 'apply')" in script
     assert "isinstance(filtered, vs.VideoNode)" in script

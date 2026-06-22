@@ -6,6 +6,7 @@ from pathlib import Path
 from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
 from avarch.planner import (
     PlanningContext,
+    add_sdr_color_encoder_args,
     build_plan,
     build_plan_hash_payload,
     build_work_key,
@@ -30,6 +31,49 @@ def test_build_plan_copies_probe_pixel_and_color_metadata(tmp_path: Path) -> Non
     assert plan.video.source_hdr_metadata_present is False
     assert plan.vapoursynth.source_pix_fmt == plan.video.source_pix_fmt
     assert plan.vapoursynth.source_color_transfer == plan.video.source_color_transfer
+
+
+def test_build_plan_tags_sdr_av1_output_color(tmp_path: Path) -> None:
+    plan = build_plan(_context(tmp_path), data_dir=tmp_path / ".avarch")
+
+    assert plan.av1an.encoder_args[-10:] == [
+        "--color-primaries",
+        "1",
+        "--transfer-characteristics",
+        "1",
+        "--matrix-coefficients",
+        "1",
+        "--color-range",
+        "0",
+        "--chroma-sample-position",
+        "1",
+    ]
+
+
+def test_sdr_color_encoder_args_preserve_user_options() -> None:
+    arguments = add_sdr_color_encoder_args(
+        [
+            "--preset",
+            "6",
+            "--color-primaries=9",
+            "--transfer-characteristics",
+            "18",
+        ]
+    )
+
+    assert arguments == [
+        "--preset",
+        "6",
+        "--color-primaries=9",
+        "--transfer-characteristics",
+        "18",
+        "--matrix-coefficients",
+        "1",
+        "--color-range",
+        "0",
+        "--chroma-sample-position",
+        "1",
+    ]
 
 
 def test_build_plan_populates_target_dimensions(tmp_path: Path) -> None:

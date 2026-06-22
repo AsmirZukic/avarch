@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     AVARCH_LIB_DIR=/opt/avarch/lib \
+    XDG_CONFIG_HOME=/opt/avarch/config \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
@@ -37,6 +38,17 @@ RUN apt-get update \
         pkg-config \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+ARG SVT_AV1_VERSION=2.3.0
+
+RUN git clone --depth 1 --branch "v${SVT_AV1_VERSION}" https://gitlab.com/AOMediaCodec/SVT-AV1.git /tmp/SVT-AV1 \
+    && cmake -S /tmp/SVT-AV1 -B /tmp/SVT-AV1/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_DEC=OFF \
+        -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build /tmp/SVT-AV1/build --target SvtAv1EncApp --parallel "$(nproc)" \
+    && install -m 0755 /tmp/SVT-AV1/Bin/Release/SvtAv1EncApp /usr/local/bin/SvtAv1EncApp \
+    && rm -rf /tmp/SVT-AV1
 
 RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}"
 
@@ -112,6 +124,8 @@ config_path.write_text(
 )
 PY
 
+RUN chmod -R a+rX "${XDG_CONFIG_HOME}"
+
 RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     cargo install av1an --version "${AVARCH_AV1AN_VERSION_REQ}" --locked \
     && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
@@ -120,6 +134,7 @@ RUN avarch --version \
     && ffmpeg -version >/dev/null \
     && ffprobe -version >/dev/null \
     && vspipe --version >/dev/null \
+    && SvtAv1EncApp --version >/dev/null \
     && av1an --version >/dev/null
 
 WORKDIR /work
