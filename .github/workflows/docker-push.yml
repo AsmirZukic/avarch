@@ -1,0 +1,73 @@
+name: Docker Push
+
+on:
+  workflow_call:
+    inputs:
+      dockerhub_tags:
+        required: true
+        type: string
+      image_artifact:
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_TOKEN:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  push:
+    name: Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify Docker Hub credentials
+        shell: bash
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" ]]; then
+            echo "Missing required repository secret: DOCKERHUB_USERNAME" >&2
+            exit 1
+          fi
+          if [[ -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "Missing required repository secret: DOCKERHUB_TOKEN" >&2
+            exit 1
+          fi
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: artifacts
+
+      - name: Load Docker image
+        shell: bash
+        run: gzip -dc artifacts/avarch-image.tar.gz | docker load
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push Docker image
+        shell: bash
+        env:
+          DOCKERHUB_TAGS: ${{ inputs.dockerhub_tags }}
+        run: |
+          if [[ -z "$DOCKERHUB_TAGS" ]]; then
+            echo "No Docker Hub tags were provided." >&2
+            exit 1
+          fi
+
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then
+              docker tag avarch:test "$tag"
+              docker push "$tag"
+            fi
+          done <<< "$DOCKERHUB_TAGS"
