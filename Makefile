@@ -1,4 +1,4 @@
-.PHONY: doctor scan test lint format typecheck check docker-build wrapper-init wrapper-doctor clean clean-cache clean-all clean-env clean-preview
+.PHONY: doctor scan test lint format typecheck check docker-build docker-test wrapper-init wrapper-doctor clean clean-cache clean-all clean-env clean-preview
 
 DOCKER_USER := $(shell id -u):$(shell id -g)
 
@@ -27,6 +27,9 @@ check:
 
 docker-build:
 	docker build -t avarch:latest .
+
+docker-test:
+	scripts/test-container.sh avarch:latest
 
 wrapper-init:
 	./bin/avarch init

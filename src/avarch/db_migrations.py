@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from alembic import command
@@ -36,12 +37,20 @@ def get_current_revision(database_url: str) -> str | None:
 
 
 def _alembic_config(database_url: str) -> Config:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = migration_project_root()
     config = Config(str(project_root / "alembic.ini"))
     config.attributes["configure_logger"] = False
     config.set_main_option("script_location", str(project_root / "migrations"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
+
+
+def migration_project_root() -> Path:
+    configured_root = os.environ.get("AVARCH_MIGRATIONS_ROOT")
+    if configured_root:
+        return Path(configured_root)
+
+    return Path(__file__).resolve().parents[2]
 
 
 def _ensure_sqlite_parent(database_url: str) -> None:
