@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-DEFAULT_REPOSITORY="docker.io/asmirzukic/avarch"
+DEFAULT_REPOSITORY="docker.io/asmir100/avarch"
 DEFAULT_WRAPPER_URL="https://raw.githubusercontent.com/AsmirZukic/avarch/main/bin/avarch"
 
 INSTALL_DIR="${AVARCH_INSTALL_DIR:-$HOME/.local/bin}"
@@ -22,7 +22,7 @@ Install Avarch's Docker-backed CLI wrapper.
 Environment variables:
   AVARCH_INSTALL_DIR   Install directory for the avarch command. Default: $HOME/.local/bin
   AVARCH_VERSION       Docker image tag to install. Default: alpha
-  AVARCH_IMAGE         Full runtime image override. Default: docker.io/asmirzukic/avarch:alpha
+  AVARCH_IMAGE         Full runtime image override. Default: docker.io/asmir100/avarch:alpha
   AVARCH_WRAPPER_URL   URL for the wrapper script. Default: the main branch wrapper
   AVARCH_SKIP_PULL     Set to 1 to skip docker pull during installation.
 
