@@ -154,7 +154,7 @@ jobs:
           docker buildx imagetools inspect rust:1.88-slim > artifacts/base-rust-image.txt
           docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.10.7 > artifacts/base-uv-image.txt
           docker run --rm --entrypoint sh avarch:test -c \
-            'dpkg-query -W -f="${db:Status-Abbrev}\t${binary:Package}\t${Version}\n" perl perl-base "perl-modules-*" libio-compress-perl libhttp-tiny-perl libsocket-perl libexpat1 expat 2>/dev/null || true' \
+            'dpkg-query -W -f="\${db:Status-Abbrev}\t\${binary:Package}\t\${Version}\n" perl perl-base "perl-modules-*" libio-compress-perl libhttp-tiny-perl libsocket-perl libexpat1 expat 2>/dev/null || true' \
             > artifacts/runtime-vulnerability-packages.txt
           docker run --rm --entrypoint sh avarch:test -c \
             'apt-cache rdepends --installed perl 2>/dev/null || true' \
