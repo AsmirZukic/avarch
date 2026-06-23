@@ -143,9 +143,8 @@ sh bin/avarch --version
 
 ## 5-Minute Quick Start
 
-The shortest implemented route still requires explicit scan, probe, plan,
-enqueue, and scheduler steps. There is no `avarch encode` convenience command
-yet, and `avarch init` does not scan automatically.
+The one-shot workflow command runs the normal scan, probe, plan, enqueue,
+scheduler, validation, and promotion sequence for a workspace.
 
 From the media directory you want Avarch to manage:
 
@@ -153,6 +152,24 @@ From the media directory you want Avarch to manage:
 cd /path/to/media
 avarch init
 avarch doctor
+avarch workflow run --profile av1_1080p_sdr --mode keep-original .
+```
+
+Without `--confirm`, promotion is previewed after validation so you can inspect
+the final filesystem action. To promote in the same run, pass `--confirm` and
+choose the promotion mode explicitly:
+
+```sh
+avarch workflow run --profile av1_1080p_sdr --mode replace-atomic --confirm .
+```
+
+Promotion modes are `keep-original`, `move-original-to-backup`, and
+`replace-atomic`. The source file is not encoded in place; promotion happens only
+after validation passes.
+
+For manual control, run the individual stages directly:
+
+```sh
 avarch scan .
 avarch probe
 avarch plan --profile av1_1080p_sdr
@@ -202,10 +219,6 @@ latest stored attempt logs.
 That is enough to start using Avarch. The following sections explain what Avarch
 created, how the encoding pipeline is controlled, and how completed output is
 validated and promoted.
-
-Quick Start usability gap: casual onboarding currently requires too many
-explicit stages. A future command such as `avarch encode` should combine scan,
-probe, plan, enqueue, and scheduler startup for the common case.
 
 ## How Avarch Works
 
