@@ -54,16 +54,41 @@ For the current alpha, users need:
 - Enough storage for source media, temporary encode output, validation reports,
 	and promoted output.
 
-Avarch does not currently ship a public one-command installer in this repository.
-The implemented alpha path is a checked-out source tree plus the provided CLI
-wrapper.
+Avarch ships a Docker-backed CLI wrapper. The one-command installer downloads
+that wrapper, configures it to use the published runtime image, and installs an
+`avarch` command locally.
 
 ### One-Command Installation
 
-Not implemented yet. There is no verified installer URL in this repository, so
-do not pipe a guessed URL into a shell.
+Install the Docker-backed wrapper:
 
-Current alpha setup from a checked-out copy of this repository:
+```sh
+curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | sh
+```
+
+The installer writes `avarch` to `$HOME/.local/bin` by default and pulls the
+runtime image `docker.io/asmirzukic/avarch:alpha`. If `$HOME/.local/bin` is not
+on your `PATH`, add it before running Avarch.
+
+The installer does not build Avarch from source on the user's machine. It only
+downloads the wrapper, pulls the selected Docker image, and configures the
+installed command to run that image.
+
+Install a semver-tagged image by setting `AVARCH_VERSION`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | \
+	AVARCH_VERSION=0.1.0 sh
+```
+
+Use a full custom image by setting `AVARCH_IMAGE` for the install command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | \
+	AVARCH_IMAGE=docker.io/YOUR_DOCKERHUB_USERNAME/avarch:latest sh
+```
+
+Current alpha setup from a checked-out copy of this repository still works:
 
 ```sh
 docker build -t avarch:latest .
@@ -79,11 +104,10 @@ avarch --version
 
 ### What Gets Installed
 
-The current alpha setup does not install files globally unless you add the repo's
-`bin/` directory to your `PATH`. The implemented wrapper:
+The installer writes only the wrapper command. The wrapper:
 
 - Provides the `avarch` command from `bin/avarch`.
-- Uses the local `avarch:latest` runtime image by default.
+- Uses the installed default runtime image unless `AVARCH_IMAGE` overrides it.
 - Preserves user files and existing workspaces when the wrapper or runtime image
 	is rebuilt.
 - Leaves workspace data under each project's `.avarch` directory.
@@ -93,24 +117,26 @@ workspace's `.avarch` directory.
 
 ### Updating, Version Selection, and Uninstalling
 
-Automated update and uninstall commands are not implemented yet.
+Automated update and uninstall commands are not implemented yet. Re-run the
+installer to refresh the wrapper and pull the configured image again.
 
 Implemented version selection uses `AVARCH_IMAGE`:
 
 ```sh
-AVARCH_IMAGE=avarch:latest avarch --version
+AVARCH_IMAGE=docker.io/asmirzukic/avarch:0.1.0 avarch --version
 ```
 
-To stop using the wrapper, remove the repository `bin/` directory from `PATH` or
-remove your copied wrapper. Existing `.avarch` workspaces and media files are not
+To stop using the wrapper, remove the installed `avarch` command from your
+install directory, or remove the repository `bin/` directory from `PATH` when
+using a checked-out copy. Existing `.avarch` workspaces and media files are not
 removed by that action.
 
 ### Inspect-Before-Running Alternative
 
-There is no verified remote installer script yet. To inspect the implemented
-launcher before using it:
+To inspect the installer and launcher before using them:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | less
 less bin/avarch
 sh bin/avarch --version
 ```
@@ -1399,7 +1425,8 @@ Schema and compatibility:
 
 Practical alpha limitations:
 
-- No public one-command installer is implemented.
+- The public one-command installer installs the Docker-backed wrapper only; it
+	does not install Docker itself.
 - No single casual `encode` command combines scan, probe, plan, enqueue, and
 	scheduler startup.
 - `avarch init` does not scan automatically.
@@ -1437,6 +1464,24 @@ make format
 make typecheck
 make check
 ```
+
+CI runs the same checks on GitHub Actions: Ruff, Pyright, Pytest, and Docker
+image build. Pull requests build the container without publishing it. Pushes to
+the default branch and matching `v*` tags publish to Docker Hub when the Docker
+Hub credentials are configured.
+
+Docker image tags are generated from the version in `pyproject.toml`. For
+version `0.1.0`, CI publishes `0.1.0`, `0.1`, `0.1.0-alpha`, `0.1-alpha`, and
+`alpha`; the default branch also publishes `latest`. Release tag pushes must
+match the project version, such as `v0.1.0` or `v0.1.0-alpha`.
+
+Configure these repository settings to enable Docker Hub publishing on
+default-branch and tag builds:
+
+- Secret `DOCKERHUB_USERNAME`: Docker Hub username.
+- Secret `DOCKERHUB_TOKEN`: Docker Hub access token.
+- Variable `DOCKERHUB_REPOSITORY`: optional image repository such as
+	`yourname/avarch`; defaults to `asmirzukic/avarch`.
 
 Equivalent direct commands:
 
@@ -1521,6 +1566,8 @@ docker run -d --rm \
 Wrapper environment variables:
 
 - `AVARCH_IMAGE`: image reference, default `avarch:latest`.
+- `AVARCH_DEFAULT_IMAGE`: fallback image reference used by installed wrappers
+	when `AVARCH_IMAGE` is not set.
 - `AVARCH_DOCKER_SECURITY_OPT`: override Docker `--security-opt`; on SELinux
 	hosts the wrapper defaults to `label=disable` when needed.
 - `AVARCH_DOCKER_VOLUME_OPTIONS`: mount options appended to the workspace volume.

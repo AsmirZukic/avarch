@@ -28,12 +28,13 @@ from avarch.models.validation import (
     ValidationCheckStatus,
     ValidationReport,
 )
-from avarch.planner import build_profile_hash
+from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
 from avarch.probe import normalize_probe, store_probe_result
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from avarch.validation import validate_output
+from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 
@@ -279,12 +280,12 @@ def test_existing_passing_validation_is_reused_without_running_worker(
 
     result = runner.invoke(
         app,
-            [
-                "jobs",
-                "validate",
-                str(job_id),
-            ],
-        )
+        [
+            "jobs",
+            "validate",
+            str(job_id),
+        ],
+    )
 
     assert result.exit_code == 0
     assert "Validation PASS" in result.output
@@ -303,7 +304,7 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
         media_file = _store_media_file(session, tmp_path / "movie.mkv", now)
         probe_result = session.get(ProbeResult, media_file.latest_probe_id)
         assert probe_result is not None
-        plan = _localized_plan(tmp_path=tmp_path, media_file=media_file)
+        plan = _localized_plan(tmp_path=tmp_path, media_file=media_file, config=app_config)
         _write_plan(plan)
         plan.output_path.parent.mkdir(parents=True, exist_ok=True)
         plan.output_path.write_bytes(b"encoded")
@@ -400,21 +401,25 @@ def test_validation_report_workflow_for_missing_output_fails_required_checks(
 
 @pytest.mark.skip(reason="requires external NAS or network filesystem metadata behavior")
 def test_network_filesystem_metadata_refresh_workflow() -> None:
+    # Placeholder for an environment-dependent workflow test.
     pass
 
 
 @pytest.mark.skip(reason="requires root-level or machine-wide filesystem traversal")
 def test_user_points_scanner_at_filesystem_root_workflow() -> None:
+    # Placeholder for an environment-dependent workflow test.
     pass
 
 
 @pytest.mark.skip(reason="requires real memory pressure and would be hostile in CI")
 def test_low_memory_oom_encode_workflow() -> None:
+    # Placeholder for an environment-dependent workflow test.
     pass
 
 
 @pytest.mark.skip(reason="requires systemd or a long-running host scheduler")
 def test_headless_systemd_scheduler_workflow() -> None:
+    # Placeholder for an environment-dependent workflow test.
     pass
 
 
@@ -551,7 +556,12 @@ def _store_completed_validation_job(
     return job
 
 
-def _localized_plan(*, tmp_path: Path, media_file: MediaFile) -> TranscodePlan:
+def _localized_plan(
+    *,
+    tmp_path: Path,
+    media_file: MediaFile,
+    config: AppConfig | None = None,
+) -> TranscodePlan:
     base = sample_plan()
     work_dir = tmp_path / ".avarch" / "work" / "workflow"
     artifact_dir = tmp_path / ".avarch" / "plans" / "workflow"
@@ -559,55 +569,80 @@ def _localized_plan(*, tmp_path: Path, media_file: MediaFile) -> TranscodePlan:
     script_path = artifact_dir / "movie.vpy"
     output_path = work_dir / "movie.av1.mkv"
     video_output_path = work_dir / "video-only.mkv"
-    return base.model_copy(
-        update={
-            "input_path": Path(media_file.path),
-            "output_path": output_path,
-            "temp_dir": work_dir,
-            "media_file_id": media_file.id or 1,
-            "source_fs_fingerprint": media_file.fs_fingerprint,
-            "vapoursynth": base.vapoursynth.model_copy(
-                update={
-                    "script_path": script_path,
-                    "source_path": Path(media_file.path),
-                    "index_cache_dir": work_dir / "bestsource",
-                }
-            ),
-            "av1an": base.av1an.model_copy(
-                update={
-                    "input_path": script_path,
-                    "video_output_path": video_output_path,
-                    "temp_dir": work_dir / "av1an",
-                    "working_directory": work_dir,
-                }
-            ),
-            "mux": base.mux.model_copy(
-                update={
-                    "video_input_path": video_output_path,
-                    "source_input_path": Path(media_file.path),
-                    "output_path": output_path,
-                }
-            ),
-            "runtime": ExecutionRuntimePaths(
-                runtime_dir=runtime_dir,
-                av1an_stdout_log=runtime_dir / "av1an.stdout.log",
-                av1an_stderr_log=runtime_dir / "av1an.stderr.log",
-                mux_stdout_log=runtime_dir / "mux.stdout.log",
-                mux_stderr_log=runtime_dir / "mux.stderr.log",
-                av1an_stage_marker=runtime_dir / "av1an-stage.json",
-                encode_result=runtime_dir / "encode-result.json",
-                validation_report=runtime_dir / "validation-report.json",
-                validation_decode_stdout_log=runtime_dir / "validation.decode.stdout.log",
-                validation_decode_stderr_log=runtime_dir / "validation.decode.stderr.log",
-            ),
-            "artifacts": PlanArtifactPaths(
-                artifact_dir=artifact_dir,
-                plan_json=artifact_dir / "plan.json",
-                vapoursynth_script=script_path,
-                av1an_command_json=artifact_dir / "av1an.command.json",
-                validation_policy_json=artifact_dir / "validation-policy.json",
-            ),
-        }
+    profile_hash = base.profile_hash
+    execution_identity = base.execution_identity
+    vapoursynth_identity_hash = base.vapoursynth.identity_hash
+    if config is not None:
+        profile = ProfileRegistry.from_config(config).get(base.profile_name).profile
+        profile_hash = build_profile_hash(profile)
+        execution_identity = build_execution_identity()
+        vapoursynth_identity_hash = build_vapoursynth_identity_hash(
+            generator_version=GENERATOR_VERSION,
+            mode=base.vapoursynth.mode,
+            output_format=base.vapoursynth.output_format,
+            resize_filter=base.vapoursynth.resize_filter,
+            template_hash=base.vapoursynth.template_hash,
+            script_hash=base.vapoursynth.filter_hash,
+            filter_entrypoint=base.vapoursynth.filter_entrypoint,
+            filter_api_version=base.vapoursynth.filter_api_version,
+        )
+
+    return finalize_plan_hash(
+        base.model_copy(
+            update={
+                "plan_hash": "",
+                "input_path": Path(media_file.path),
+                "output_path": output_path,
+                "temp_dir": work_dir,
+                "media_file_id": media_file.id or 1,
+                "source_fs_fingerprint": media_file.fs_fingerprint,
+                "profile_hash": profile_hash,
+                "execution_identity": execution_identity,
+                "vapoursynth": base.vapoursynth.model_copy(
+                    update={
+                        "generator_version": GENERATOR_VERSION,
+                        "identity_hash": vapoursynth_identity_hash,
+                        "script_path": script_path,
+                        "source_path": Path(media_file.path),
+                        "index_cache_dir": work_dir / "bestsource",
+                    }
+                ),
+                "av1an": base.av1an.model_copy(
+                    update={
+                        "input_path": script_path,
+                        "video_output_path": video_output_path,
+                        "temp_dir": work_dir / "av1an",
+                        "working_directory": work_dir,
+                    }
+                ),
+                "mux": base.mux.model_copy(
+                    update={
+                        "video_input_path": video_output_path,
+                        "source_input_path": Path(media_file.path),
+                        "output_path": output_path,
+                    }
+                ),
+                "runtime": ExecutionRuntimePaths(
+                    runtime_dir=runtime_dir,
+                    av1an_stdout_log=runtime_dir / "av1an.stdout.log",
+                    av1an_stderr_log=runtime_dir / "av1an.stderr.log",
+                    mux_stdout_log=runtime_dir / "mux.stdout.log",
+                    mux_stderr_log=runtime_dir / "mux.stderr.log",
+                    av1an_stage_marker=runtime_dir / "av1an-stage.json",
+                    encode_result=runtime_dir / "encode-result.json",
+                    validation_report=runtime_dir / "validation-report.json",
+                    validation_decode_stdout_log=runtime_dir / "validation.decode.stdout.log",
+                    validation_decode_stderr_log=runtime_dir / "validation.decode.stderr.log",
+                ),
+                "artifacts": PlanArtifactPaths(
+                    artifact_dir=artifact_dir,
+                    plan_json=artifact_dir / "plan.json",
+                    vapoursynth_script=script_path,
+                    av1an_command_json=artifact_dir / "av1an.command.json",
+                    validation_policy_json=artifact_dir / "validation-policy.json",
+                ),
+            }
+        )
     )
 
 
