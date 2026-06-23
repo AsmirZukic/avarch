@@ -1,9 +1,16 @@
-FROM rust:1.88-slim AS rust-toolchain
-
-FROM python:3.12-slim
-
+ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.10.7
 ARG AVARCH_AV1AN_VERSION_REQ=">=0.5,<0.6"
+ARG SVT_AV1_VERSION=2.3.0
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM rust:1.88-slim AS rust-toolchain
+
+FROM python:${PYTHON_VERSION}-slim AS python-builder
+
+ARG AVARCH_AV1AN_VERSION_REQ
+ARG SVT_AV1_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_PROJECT_ENVIRONMENT=/opt/avarch/venv \
@@ -20,10 +27,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LIBRARY_PATH=/opt/avarch/lib \
     LD_LIBRARY_PATH="/opt/avarch/lib:/opt/avarch/venv/lib/python3.12/site-packages/vapoursynth:/usr/local/lib:/usr/lib/x86_64-linux-gnu"
 
+COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -39,8 +48,6 @@ RUN apt-get update \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG SVT_AV1_VERSION=2.3.0
-
 RUN git clone --depth 1 --branch "v${SVT_AV1_VERSION}" https://gitlab.com/AOMediaCodec/SVT-AV1.git /tmp/SVT-AV1 \
     && cmake -S /tmp/SVT-AV1 -B /tmp/SVT-AV1/build \
         -DCMAKE_BUILD_TYPE=Release \
@@ -50,15 +57,13 @@ RUN git clone --depth 1 --branch "v${SVT_AV1_VERSION}" https://gitlab.com/AOMedi
     && install -m 0755 /tmp/SVT-AV1/Bin/Release/SvtAv1EncApp /usr/local/bin/SvtAv1EncApp \
     && rm -rf /tmp/SVT-AV1
 
-RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}"
-
 WORKDIR /app
 
 COPY pyproject.toml uv.lock alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
 
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --no-editable
 
 RUN uv pip install "git+https://github.com/vapoursynth/vsrepo.git"
 
@@ -136,6 +141,88 @@ RUN avarch --version \
     && vspipe --version >/dev/null \
     && SvtAv1EncApp --version >/dev/null \
     && av1an --version >/dev/null
+
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    VIRTUAL_ENV=/opt/avarch/venv \
+    AVARCH_LIB_DIR=/opt/avarch/lib \
+    AVARCH_MIGRATIONS_ROOT=/opt/avarch/app \
+    XDG_CONFIG_HOME=/opt/avarch/config \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PATH="/opt/avarch/venv/bin:${PATH}" \
+    VS_SITE_PACKAGES=/opt/avarch/venv/lib/python3.12/site-packages/vapoursynth \
+    LD_LIBRARY_PATH="/opt/avarch/lib:/opt/avarch/venv/lib/python3.12/site-packages/vapoursynth:/usr/local/lib:/usr/lib/x86_64-linux-gnu"
+
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+    && apt-get purge -y --auto-remove perl \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-builder /opt/avarch/venv /opt/avarch/venv
+COPY --from=python-builder /opt/avarch/lib /opt/avarch/lib
+COPY --from=python-builder /opt/avarch/config /opt/avarch/config
+COPY --from=python-builder /app/alembic.ini /opt/avarch/app/alembic.ini
+COPY --from=python-builder /app/migrations /opt/avarch/app/migrations
+COPY --from=python-builder /usr/local/bin/SvtAv1EncApp /usr/local/bin/SvtAv1EncApp
+COPY --from=python-builder /usr/local/cargo/bin/av1an /usr/local/bin/av1an
+
+RUN set -eu; \
+    rm -rf \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.* \
+        /usr/local/lib/python*/ensurepip \
+        /usr/local/lib/python*/site-packages/pip \
+        /usr/local/lib/python*/site-packages/pip-* \
+        /usr/local/lib/python*/site-packages/setuptools \
+        /usr/local/lib/python*/site-packages/setuptools-* \
+        /usr/local/lib/python*/site-packages/wheel \
+        /usr/local/lib/python*/site-packages/wheel-* \
+        /opt/avarch/venv/bin/pip \
+        /opt/avarch/venv/bin/pip3 \
+        /opt/avarch/venv/bin/pip3.* \
+        /opt/avarch/venv/lib/python*/site-packages/pip \
+        /opt/avarch/venv/lib/python*/site-packages/pip-* \
+        /opt/avarch/venv/lib/python*/site-packages/setuptools \
+        /opt/avarch/venv/lib/python*/site-packages/setuptools-* \
+        /opt/avarch/venv/lib/python*/site-packages/wheel \
+        /opt/avarch/venv/lib/python*/site-packages/wheel-*; \
+    for package in perl 'perl-modules-*' libio-compress-perl libhttp-tiny-perl libsocket-perl; do \
+        installed="$( \
+            dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' "$package" 2>/dev/null \
+                | awk '$1 == "ii" { print $2 }' \
+                || true \
+        )"; \
+        if [ -n "$installed" ]; then \
+            printf 'Runtime image must not contain %s package(s):\n%s\n' "$package" "$installed" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    if python -m pip --version; then \
+        echo "pip must not exist in the runtime image" >&2; \
+        exit 1; \
+    fi; \
+    avarch --version; \
+    ffmpeg -version >/dev/null; \
+    ffprobe -version >/dev/null; \
+    vspipe --version >/dev/null; \
+    SvtAv1EncApp --version >/dev/null; \
+    av1an --version >/dev/null; \
+    python - <<'PY'
+from __future__ import annotations
+
+import pydantic_settings
+import vapoursynth
+
+print(pydantic_settings.__version__)
+print(vapoursynth.__version__)
+PY
 
 WORKDIR /work
 

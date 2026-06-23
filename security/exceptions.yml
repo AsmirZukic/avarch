@@ -1,0 +1,11 @@
+exceptions:
+  - id: CVE-2026-50219
+    package: Debian expat/libexpat1
+    affected_version: 2.7.1-2
+    required_fix: Expat 2.8.2 or a Debian security backport
+    reason: No fixed Debian Trixie, testing, or unstable package was available on 2026-06-23.
+    compensating_control: Avarch does not intentionally expose an XML parsing service; source search found no application XML parser use.
+    owner: Avarch maintainers
+    reviewed_at: 2026-06-23
+    expires_at: 2026-07-23
+    action: Recheck Debian package status on every image build and remove this exception once Debian publishes a fixed package.

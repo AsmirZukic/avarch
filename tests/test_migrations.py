@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -9,7 +10,7 @@ from sqlalchemy import inspect
 
 from avarch.contracts import ALEMBIC_BASELINE_REVISION, ALEMBIC_HEAD_REVISION
 from avarch.db import create_db_engine
-from avarch.db_migrations import upgrade_database
+from avarch.db_migrations import migration_project_root, upgrade_database
 
 
 def test_repository_contains_migration_revisions() -> None:
@@ -20,6 +21,15 @@ def test_repository_contains_migration_revisions() -> None:
         "0001_initial_schema.py",
         "0002_media_plan.py",
     ]
+
+
+def test_migration_project_root_can_be_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVARCH_MIGRATIONS_ROOT", str(tmp_path))
+
+    assert migration_project_root() == tmp_path
 
 
 def test_initial_revision_has_no_parent() -> None:
