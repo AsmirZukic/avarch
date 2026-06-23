@@ -65,9 +65,10 @@ jobs:
         id: publish
         shell: bash
         run: |
+          default_branch="${{ github.event.repository.default_branch }}"
           push_image=false
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            if [[ "$GITHUB_REF" == "refs/heads/$GITHUB_DEFAULT_BRANCH" || "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ "$GITHUB_REF" == "refs/heads/$default_branch" || "$GITHUB_REF" == refs/tags/v* ]]; then
               push_image=true
             fi
           fi
@@ -152,13 +153,25 @@ jobs:
             type=raw,value=${{ steps.version.outputs.channel }}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and publish or load Docker image
+      - name: Build validation Docker image
+        if: steps.publish.outputs.push_image != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ steps.publish.outputs.push_image == 'true' }}
-          load: ${{ steps.publish.outputs.push_image != 'true' }}
+          load: true
+          tags: ${{ steps.dockerhub-meta.outputs.tags }}
+          labels: ${{ steps.dockerhub-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Docker image
+        if: steps.publish.outputs.push_image == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
           tags: ${{ steps.dockerhub-meta.outputs.tags }}
           labels: ${{ steps.dockerhub-meta.outputs.labels }}
           cache-from: type=gha
