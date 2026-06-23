@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/inst
 ```
 
 The installer writes `avarch` to `$HOME/.local/bin` by default and pulls the
-runtime image `docker.io/asmirzukic/avarch:alpha`. If `$HOME/.local/bin` is not
+runtime image `docker.io/asmir100/avarch:alpha`. If `$HOME/.local/bin` is not
 on your `PATH`, add it before running Avarch.
 
 The installer does not build Avarch from source on the user's machine. It only
@@ -123,7 +123,7 @@ installer to refresh the wrapper and pull the configured image again.
 Implemented version selection uses `AVARCH_IMAGE`:
 
 ```sh
-AVARCH_IMAGE=docker.io/asmirzukic/avarch:0.1.0 avarch --version
+AVARCH_IMAGE=docker.io/asmir100/avarch:0.1.0 avarch --version
 ```
 
 To stop using the wrapper, remove the installed `avarch` command from your
@@ -1485,7 +1485,7 @@ default-branch and tag builds:
 - Secret `DOCKERHUB_USERNAME`: Docker Hub username.
 - Secret `DOCKERHUB_TOKEN`: Docker Hub access token.
 - Variable `DOCKERHUB_REPOSITORY`: optional image repository such as
-	`yourname/avarch`; defaults to `asmirzukic/avarch`.
+	`yourname/avarch`; defaults to `asmir100/avarch`.
 
 Equivalent direct commands:
 

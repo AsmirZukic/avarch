@@ -80,7 +80,7 @@ jobs:
         id: images
         shell: bash
         run: |
-          dockerhub_image="${DOCKERHUB_REPOSITORY:-asmirzukic/avarch}"
+          dockerhub_image="${DOCKERHUB_REPOSITORY:-asmir100/avarch}"
           echo "dockerhub_image=${dockerhub_image,,}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare image tags
