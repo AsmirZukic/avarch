@@ -26,6 +26,24 @@ def test_wrapper_runs_version_without_workspace(tmp_path: Path) -> None:
     assert "avarch:test version" in command
 
 
+def test_wrapper_uses_installed_default_image_when_env_image_is_not_set(tmp_path: Path) -> None:
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=tmp_path,
+        env=_wrapper_env(fake_bin, log, image=None, default_image="docker.io/example/avarch:test"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    command = log.read_text(encoding="utf-8")
+    assert result.returncode == 0
+    assert "docker.io/example/avarch:test version" in command
+
+
 def test_wrapper_mounts_current_directory_for_init_without_workspace(tmp_path: Path) -> None:
     log = tmp_path / "docker.log"
     fake_bin = _fake_docker(tmp_path)
@@ -300,7 +318,8 @@ def _wrapper_env(
     fake_bin: Path,
     log: Path,
     *,
-    image: str = "avarch:test",
+    image: str | None = "avarch:test",
+    default_image: str | None = None,
     docker_exit_code: str = "0",
     docker_ps_id: str = "",
     docker_inspect_result: str = "false\t\t",
@@ -311,7 +330,6 @@ def _wrapper_env(
     env = os.environ.copy()
     env.update(
         {
-            "AVARCH_IMAGE": image,
             "DOCKER_EXIT_CODE": docker_exit_code,
             "DOCKER_INSPECT_RESULT": docker_inspect_result,
             "DOCKER_LOG": str(log),
@@ -320,6 +338,12 @@ def _wrapper_env(
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
         }
     )
+    if image is not None:
+        env["AVARCH_IMAGE"] = image
+    else:
+        env.pop("AVARCH_IMAGE", None)
+    if default_image is not None:
+        env["AVARCH_DEFAULT_IMAGE"] = default_image
     if security_opt is not None:
         env["AVARCH_DOCKER_SECURITY_OPT"] = security_opt
     if volume_options is not None:

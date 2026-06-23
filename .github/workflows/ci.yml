@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.10.7"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest
+
+  docker:
+    name: Build and publish Docker image
+    runs-on: ubuntu-latest
+    needs: test
+
+    env:
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare publish settings
+        id: publish
+        shell: bash
+        run: |
+          push_image=false
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            if [[ "$GITHUB_REF" == "refs/heads/$GITHUB_DEFAULT_BRANCH" || "$GITHUB_REF" == refs/tags/* ]]; then
+              push_image=true
+            fi
+          fi
+          echo "push_image=$push_image" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare image names
+        id: images
+        shell: bash
+        run: |
+          dockerhub_image="${DOCKERHUB_REPOSITORY:-asmirzukic/avarch}"
+          echo "dockerhub_image=${dockerhub_image,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare image tags
+        id: version
+        shell: bash
+        run: |
+          version=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(pyproject["project"]["version"])
+          PY
+          )
+          major_minor="${version%.*}"
+          channel="alpha"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$major_minor" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version_channel=$version-$channel" >> "$GITHUB_OUTPUT"
+          echo "major_minor_channel=$major_minor-$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          release_tag="${GITHUB_REF_NAME#v}"
+          expected_version="${{ steps.version.outputs.version }}"
+          expected_channel="${{ steps.version.outputs.version_channel }}"
+          if [[ "$release_tag" != "$expected_version" && "$release_tag" != "$expected_channel" ]]; then
+            echo "Release tag v$release_tag does not match project version $expected_version or $expected_channel." >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.publish.outputs.push_image == 'true' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' && steps.images.outputs.dockerhub_image != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Generate Docker metadata
+        id: dockerhub-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.dockerhub_image }}
+          tags: |
+            type=ref,event=pr
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
+            type=raw,value=${{ steps.version.outputs.version_channel }}
+            type=raw,value=${{ steps.version.outputs.major_minor_channel }}
+            type=raw,value=${{ steps.version.outputs.channel }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and optionally publish Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ steps.publish.outputs.push_image == 'true' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' && steps.images.outputs.dockerhub_image != '' }}
+          tags: ${{ steps.dockerhub-meta.outputs.tags }}
+          labels: ${{ steps.dockerhub-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

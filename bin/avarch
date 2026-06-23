@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-IMAGE="${AVARCH_IMAGE:-avarch:latest}"
+DEFAULT_IMAGE="${AVARCH_DEFAULT_IMAGE:-avarch:latest}"
+IMAGE="${AVARCH_IMAGE:-$DEFAULT_IMAGE}"
 CONTAINER_WORKSPACE="/workspace"
 ENCODER_CONTAINER_NAME="avarch-encoder"
 AVARCH_LABEL="org.avarch.container"
