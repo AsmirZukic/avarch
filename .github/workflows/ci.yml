@@ -17,224 +17,40 @@ permissions:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/test.yml
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "0.10.7"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Type check
-        run: uv run pyright
-
-      - name: Test
-        run: uv run pytest
-
-  docker:
-    name: Build and publish Docker image
-    runs-on: ubuntu-latest
+  build:
+    name: Build
     needs: test
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerhub_repository: ${{ vars.DOCKERHUB_REPOSITORY }}
 
-    env:
-      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+  sbom:
+    name: SBOM
+    needs: build
+    uses: ./.github/workflows/sbom.yml
+    with:
+      image_artifact: ${{ needs.build.outputs.image_artifact }}
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+  security:
+    name: Security
+    needs: build
+    uses: ./.github/workflows/security.yml
+    with:
+      image_artifact: ${{ needs.build.outputs.image_artifact }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Prepare publish settings
-        id: publish
-        shell: bash
-        run: |
-          default_branch="${{ github.event.repository.default_branch }}"
-          push_image=false
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            if [[ "$GITHUB_REF" == "refs/heads/$default_branch" || "$GITHUB_REF" == refs/tags/v* ]]; then
-              push_image=true
-            fi
-          fi
-          echo "push_image=$push_image" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare image names
-        id: images
-        shell: bash
-        run: |
-          dockerhub_image="${DOCKERHUB_REPOSITORY:-asmir100/avarch}"
-          echo "dockerhub_image=${dockerhub_image,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare image tags
-        id: version
-        shell: bash
-        run: |
-          version=$(python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          print(pyproject["project"]["version"])
-          PY
-          )
-          major_minor="${version%.*}"
-          channel="alpha"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "major_minor=$major_minor" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "version_channel=$version-$channel" >> "$GITHUB_OUTPUT"
-          echo "major_minor_channel=$major_minor-$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Verify release tag matches project version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          release_tag="${GITHUB_REF_NAME#v}"
-          expected_version="${{ steps.version.outputs.version }}"
-          expected_channel="${{ steps.version.outputs.version_channel }}"
-          if [[ "$release_tag" != "$expected_version" && "$release_tag" != "$expected_channel" ]]; then
-            echo "Release tag v$release_tag does not match project version $expected_version or $expected_channel." >&2
-            exit 1
-          fi
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Generate Docker metadata
-        id: dockerhub-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.images.outputs.dockerhub_image }}
-          tags: |
-            type=ref,event=pr
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}
-            type=raw,value=${{ steps.version.outputs.version_channel }}
-            type=raw,value=${{ steps.version.outputs.major_minor_channel }}
-            type=raw,value=${{ steps.version.outputs.channel }}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          pull: true
-          no-cache: true
-          load: true
-          tags: |
-            avarch:test
-            ${{ steps.dockerhub-meta.outputs.tags }}
-          labels: ${{ steps.dockerhub-meta.outputs.labels }}
-
-      - name: Capture image baseline
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          docker image inspect avarch:test > artifacts/image-inspect.json
-          docker buildx imagetools inspect python:3.12-slim > artifacts/base-python-image.txt
-          docker buildx imagetools inspect rust:1.88-slim > artifacts/base-rust-image.txt
-          docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.10.7 > artifacts/base-uv-image.txt
-          docker run --rm --entrypoint sh avarch:test -c \
-            'dpkg-query -W -f="\${db:Status-Abbrev}\t\${binary:Package}\t\${Version}\n" perl perl-base "perl-modules-*" libio-compress-perl libhttp-tiny-perl libsocket-perl libexpat1 expat 2>/dev/null || true' \
-            > artifacts/runtime-vulnerability-packages.txt
-          docker run --rm --entrypoint sh avarch:test -c \
-            'apt-cache rdepends --installed perl 2>/dev/null || true' \
-            > artifacts/perl-rdepends.txt
-          docker run --rm --entrypoint sh avarch:test -c \
-            'apt-mark showmanual 2>/dev/null || true' \
-            > artifacts/apt-manual.txt
-
-      - name: Test Docker image
-        run: scripts/test-container.sh avarch:test
-
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: avarch:test
-          format: spdx-json
-          output-file: artifacts/sbom.spdx.json
-          upload-artifact: false
-
-      - name: Generate vulnerability report
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: avarch:test
-          scanners: vuln
-          vuln-type: os,library
-          format: json
-          output: artifacts/trivy-image.json
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore.yaml
-
-      - name: Gate image vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: avarch:test
-          scanners: vuln
-          vuln-type: os,library
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore.yaml
-
-      - name: Upload image security artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-security-${{ github.run_id }}
-          path: artifacts/
-
-      - name: Verify Docker Hub credentials
-        if: steps.publish.outputs.push_image == 'true'
-        shell: bash
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          if [[ -z "$DOCKERHUB_USERNAME" ]]; then
-            echo "Missing required repository secret: DOCKERHUB_USERNAME" >&2
-            exit 1
-          fi
-          if [[ -z "$DOCKERHUB_TOKEN" ]]; then
-            echo "Missing required repository secret: DOCKERHUB_TOKEN" >&2
-            exit 1
-          fi
-
-      - name: Log in to Docker Hub
-        if: steps.publish.outputs.push_image == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push Docker image
-        if: steps.publish.outputs.push_image == 'true'
-        shell: bash
-        run: |
-          while IFS= read -r tag; do
-            if [[ -n "$tag" ]]; then
-              docker push "$tag"
-            fi
-          done <<< "${{ steps.dockerhub-meta.outputs.tags }}"
+  docker-push:
+    name: Docker Push
+    if: needs.build.outputs.push_image == 'true'
+    needs:
+      - build
+      - sbom
+      - security
+    uses: ./.github/workflows/docker-push.yml
+    with:
+      dockerhub_tags: ${{ needs.build.outputs.dockerhub_tags }}
+      image_artifact: ${{ needs.build.outputs.image_artifact }}
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}

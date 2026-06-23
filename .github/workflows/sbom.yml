@@ -1,0 +1,42 @@
+name: SBOM
+
+on:
+  workflow_call:
+    inputs:
+      image_artifact:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: artifacts
+
+      - name: Load Docker image
+        shell: bash
+        run: gzip -dc artifacts/avarch-image.tar.gz | docker load
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: avarch:test
+          format: spdx-json
+          output-file: artifacts/sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-sbom-${{ github.run_number }}-${{ github.run_attempt }}
+          path: artifacts/sbom.spdx.json
+          retention-days: 14

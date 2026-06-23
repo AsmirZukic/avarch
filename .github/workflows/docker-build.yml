@@ -1,0 +1,169 @@
+name: Docker Build
+
+on:
+  workflow_call:
+    inputs:
+      dockerhub_repository:
+        required: false
+        type: string
+        default: ""
+    outputs:
+      dockerhub_tags:
+        description: Docker Hub tags generated for this build.
+        value: ${{ jobs.build.outputs.dockerhub_tags }}
+      image_artifact:
+        description: Uploaded artifact containing the built Docker image.
+        value: ${{ jobs.build.outputs.image_artifact }}
+      push_image:
+        description: Whether this ref should publish the image.
+        value: ${{ jobs.build.outputs.push_image }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository }}
+
+    outputs:
+      dockerhub_tags: ${{ steps.dockerhub-meta.outputs.tags }}
+      image_artifact: ${{ steps.artifact.outputs.image_artifact }}
+      push_image: ${{ steps.publish.outputs.push_image }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare publish settings
+        id: publish
+        shell: bash
+        run: |
+          default_branch="${{ github.event.repository.default_branch }}"
+          push_image=false
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            if [[ "$GITHUB_REF" == "refs/heads/$default_branch" || "$GITHUB_REF" == refs/tags/v* ]]; then
+              push_image=true
+            fi
+          fi
+          echo "push_image=$push_image" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare image names
+        id: images
+        shell: bash
+        run: |
+          dockerhub_image="${DOCKERHUB_REPOSITORY:-asmir100/avarch}"
+          echo "dockerhub_image=${dockerhub_image,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare image tags
+        id: version
+        shell: bash
+        run: |
+          version=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(pyproject["project"]["version"])
+          PY
+          )
+          major_minor="${version%.*}"
+          channel="alpha"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$major_minor" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version_channel=$version-$channel" >> "$GITHUB_OUTPUT"
+          echo "major_minor_channel=$major_minor-$channel" >> "$GITHUB_OUTPUT"
+          echo "build_number=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          release_tag="${GITHUB_REF_NAME#v}"
+          expected_version="${{ steps.version.outputs.version }}"
+          expected_channel="${{ steps.version.outputs.version_channel }}"
+          if [[ "$release_tag" != "$expected_version" && "$release_tag" != "$expected_channel" ]]; then
+            echo "Release tag v$release_tag does not match project version $expected_version or $expected_channel." >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Docker metadata
+        id: dockerhub-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.dockerhub_image }}
+          tags: |
+            type=ref,event=pr,suffix=-${{ steps.version.outputs.build_number }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
+            type=raw,value=${{ steps.version.outputs.version_channel }}
+            type=raw,value=${{ steps.version.outputs.major_minor_channel }}
+            type=raw,value=${{ steps.version.outputs.channel }}
+            type=raw,value=${{ steps.version.outputs.version }}-${{ steps.version.outputs.build_number }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}-${{ steps.version.outputs.build_number }}
+            type=raw,value=${{ steps.version.outputs.version_channel }}-${{ steps.version.outputs.build_number }}
+            type=raw,value=${{ steps.version.outputs.major_minor_channel }}-${{ steps.version.outputs.build_number }}
+            type=raw,value=${{ steps.version.outputs.channel }}-${{ steps.version.outputs.build_number }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest-${{ steps.version.outputs.build_number }},enable={{is_default_branch}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          no-cache: true
+          load: true
+          tags: |
+            avarch:test
+            ${{ steps.dockerhub-meta.outputs.tags }}
+          labels: ${{ steps.dockerhub-meta.outputs.labels }}
+
+      - name: Test Docker image
+        run: scripts/test-container.sh avarch:test
+
+      - name: Capture build artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker image inspect avarch:test > artifacts/image-inspect.json
+          docker buildx imagetools inspect python:3.12-slim > artifacts/base-python-image.txt
+          docker buildx imagetools inspect rust:1.88-slim > artifacts/base-rust-image.txt
+          docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.10.7 > artifacts/base-uv-image.txt
+          docker save avarch:test | gzip > artifacts/avarch-image.tar.gz
+
+      - name: Prepare image artifact name
+        id: artifact
+        shell: bash
+        run: echo "image_artifact=avarch-image-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.image_artifact }}
+          path: artifacts/avarch-image.tar.gz
+          retention-days: 7
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-build-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            artifacts/image-inspect.json
+            artifacts/base-python-image.txt
+            artifacts/base-rust-image.txt
+            artifacts/base-uv-image.txt
+          retention-days: 14

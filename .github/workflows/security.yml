@@ -1,0 +1,80 @@
+name: Security
+
+on:
+  workflow_call:
+    inputs:
+      image_artifact:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Scan Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: artifacts
+
+      - name: Load Docker image
+        shell: bash
+        run: gzip -dc artifacts/avarch-image.tar.gz | docker load
+
+      - name: Capture vulnerability package baseline
+        shell: bash
+        run: |
+          docker run --rm --entrypoint sh avarch:test -c \
+            'dpkg-query -W -f="\${db:Status-Abbrev}\t\${binary:Package}\t\${Version}\n" perl perl-base "perl-modules-*" libio-compress-perl libhttp-tiny-perl libsocket-perl libexpat1 expat 2>/dev/null || true' \
+            > artifacts/runtime-vulnerability-packages.txt
+          docker run --rm --entrypoint sh avarch:test -c \
+            'apt-cache rdepends --installed perl 2>/dev/null || true' \
+            > artifacts/perl-rdepends.txt
+          docker run --rm --entrypoint sh avarch:test -c \
+            'apt-mark showmanual 2>/dev/null || true' \
+            > artifacts/apt-manual.txt
+
+      - name: Generate vulnerability report
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: avarch:test
+          scanners: vuln
+          vuln-type: os,library
+          format: json
+          output: artifacts/trivy-image.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+
+      - name: Gate image vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: avarch:test
+          scanners: vuln
+          vuln-type: os,library
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+
+      - name: Upload security artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-security-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            artifacts/runtime-vulnerability-packages.txt
+            artifacts/perl-rdepends.txt
+            artifacts/apt-manual.txt
+            artifacts/trivy-image.json
+          retention-days: 14
