@@ -64,6 +64,32 @@ def test_wrapper_mounts_current_directory_for_init_without_workspace(tmp_path: P
     assert "avarch:test init" in command
 
 
+def test_wrapper_preserves_workspace_path_with_spaces_for_init(tmp_path: Path) -> None:
+    workspace = tmp_path / "movies and shows"
+    workspace.mkdir()
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = subprocess.run(
+        [str(WRAPPER), "init"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert f"{workspace}:/workspace" in args
+    assert "and" not in args
+    assert "avarch:test" in args
+
+
 def test_wrapper_still_requires_workspace_for_workspace_commands(tmp_path: Path) -> None:
     log = tmp_path / "docker.log"
     fake_bin = _fake_docker(tmp_path)
@@ -288,6 +314,11 @@ if [ "$1" = "inspect" ]; then
 fi
 
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
+if [ -n "${DOCKER_ARG_LOG:-}" ]; then
+    for arg do
+        printf '%s\n' "$arg" >> "$DOCKER_ARG_LOG"
+    done
+fi
 exit "${DOCKER_EXIT_CODE:-0}"
 """,
         encoding="utf-8",
