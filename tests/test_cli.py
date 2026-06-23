@@ -38,6 +38,8 @@ def test_cli_version_command_exits_successfully() -> None:
         ["files", "show"],
         ["plan"],
         ["promote"],
+        ["workflow"],
+        ["workflow", "run"],
         ["db"],
         ["db", "current"],
         ["db", "upgrade"],

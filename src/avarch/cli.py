@@ -510,23 +510,15 @@ def enqueue(
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
 
-    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
-    engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
-        try:
-            selected_plans = _select_plans_for_enqueue(
-                session,
-                file_selectors=files,
-                plan_selectors=plans,
-                workspace_root=workspace_root,
-            )
-        except ValueError as exc:
-            typer.echo(str(exc))
-            raise typer.Exit(1) from exc
-        summary = _enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
-
+    selected, summary, _plan_hashes = _enqueue_selected_plans(
+        config=config,
+        database_url=database_url,
+        file_selectors=files,
+        plan_selectors=plans,
+        priority=priority,
+    )
     _echo_pipeline_summary(
-        selected=len(selected_plans),
+        selected=selected,
         processed=summary["created"],
         skipped=summary["skipped"],
         failed=0,
@@ -1882,6 +1874,121 @@ def plan_file(
         raise typer.Exit(1)
 
 
+@workflow_app.command("run")
+def workflow_run(
+    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
+    roots: RootsArgument = None,
+    files: Annotated[
+        list[Path] | None,
+        typer.Option("--file", help="Restrict the workflow to a tracked media file."),
+    ] = None,
+    priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
+    mode: Annotated[
+        PromotionMode,
+        typer.Option("--mode", help="Promotion filesystem mode."),
+    ] = PromotionMode.KEEP_ORIGINAL,
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Execute promotion instead of previewing it."),
+    ] = False,
+    force_probe: Annotated[
+        bool,
+        typer.Option("--force-probe", help="Probe selected files even if current."),
+    ] = False,
+    force_plan: Annotated[
+        bool,
+        typer.Option("--force-plan", help="Create new plans even if current plans exist."),
+    ] = False,
+    check_vpy: Annotated[
+        bool,
+        typer.Option(
+            "--check-vpy/--no-check-vpy",
+            help="Run vspipe --info after writing generated scripts.",
+        ),
+    ] = False,
+) -> None:
+    _echo_workflow_stage("scan")
+    scan(roots=roots)
+
+    _echo_workflow_stage("probe")
+    probe_file(files=files, force=force_probe)
+
+    _echo_workflow_stage("plan")
+    plan_file(profile=profile, files=files, force=force_plan, check_vpy=check_vpy)
+
+    _echo_workflow_stage("enqueue")
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = resolve_database_url(app_config, config)
+    _upgrade_database_or_exit(database_url)
+    selected, summary, plan_hashes = _enqueue_selected_plans(
+        config=config,
+        database_url=database_url,
+        file_selectors=files,
+        plan_selectors=None,
+        priority=priority,
+    )
+    _echo_pipeline_summary(
+        selected=selected,
+        processed=summary["created"],
+        skipped=summary["skipped"],
+        failed=0,
+    )
+    if summary["already_done"]:
+        typer.echo(f"already-completed: {summary['already_done']}")
+    if summary["already_queued"]:
+        typer.echo(f"already-queued: {summary['already_queued']}")
+
+    if not plan_hashes:
+        typer.echo("No plans were selected for the workflow.")
+        return
+
+    _echo_workflow_stage("run")
+    run_queue(resume=True, detached=False, managed_child=False, mode="foreground")
+
+    _echo_workflow_stage("verify")
+    jobs = _workflow_jobs_for_plan_hashes(database_url, plan_hashes)
+    promotable_jobs = [
+        job
+        for job in jobs
+        if job.status == JobStatus.VALIDATED
+        and job.stage == JobStage.PROMOTE
+        and job.id is not None
+    ]
+    failed_jobs = [job for job in jobs if job.status == JobStatus.FAILED]
+    blocked_jobs = [
+        job
+        for job in jobs
+        if job.status not in {JobStatus.VALIDATED, JobStatus.COMPLETED}
+        and job.status != JobStatus.FAILED
+    ]
+
+    if failed_jobs:
+        typer.echo("Workflow stopped before promotion because jobs failed.")
+        _echo_workflow_jobs(failed_jobs)
+        raise typer.Exit(1)
+    if blocked_jobs:
+        typer.echo("Workflow stopped before promotion because jobs are not validated yet.")
+        _echo_workflow_jobs(blocked_jobs)
+        raise typer.Exit(1)
+    if not promotable_jobs:
+        typer.echo("No validated jobs are ready for promotion.")
+        return
+    typer.echo(f"Validated jobs ready for promotion: {len(promotable_jobs)}")
+
+    _echo_workflow_stage("promote")
+    for job in promotable_jobs:
+        if job.id is None:
+            continue
+        promote_job(
+            job_id=job.id,
+            mode=mode,
+            dry_run=not confirm,
+            confirm=confirm,
+            recover=False,
+        )
+
+
 def _doctor_pass(check: str) -> None:
     log.info("doctor_check_passed", check=check)
 
@@ -2231,6 +2338,33 @@ def _select_plans_for_enqueue(
     )
 
 
+def _enqueue_selected_plans(
+    *,
+    config: Path,
+    database_url: str,
+    file_selectors: list[Path] | None,
+    plan_selectors: list[str] | None,
+    priority: int,
+) -> tuple[int, dict[str, int], list[str]]:
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
+    engine = create_db_engine(database_url)
+    with Session(engine) as session, session.begin():
+        try:
+            selected_plans = _select_plans_for_enqueue(
+                session,
+                file_selectors=file_selectors,
+                plan_selectors=plan_selectors,
+                workspace_root=workspace_root,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        plan_hashes = [plan.plan_hash for plan in selected_plans]
+        summary = _enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
+
+    return len(selected_plans), summary, plan_hashes
+
+
 def _find_plan(session: Session, selector: str) -> MediaPlan | None:
     if selector.isdecimal():
         plan = session.get(MediaPlan, int(selector))
@@ -2308,6 +2442,33 @@ def _echo_pipeline_summary(
     typer.echo(f"Processed: {processed}")
     typer.echo(f"Skipped: {skipped}")
     typer.echo(f"Failed: {failed}")
+
+
+def _echo_workflow_stage(name: str) -> None:
+    typer.echo("")
+    typer.echo(f"== {name} ==")
+
+
+def _workflow_jobs_for_plan_hashes(database_url: str, plan_hashes: list[str]) -> list[Job]:
+    if not plan_hashes:
+        return []
+    engine = create_db_engine(database_url)
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(Job)
+                .where(col(Job.plan_hash).in_(plan_hashes))
+                .order_by(col(Job.created_at).asc(), col(Job.id).asc())
+            ).all()
+        )
+
+
+def _echo_workflow_jobs(jobs: list[Job]) -> None:
+    for job in jobs:
+        typer.echo(
+            f"  {job.id or '-'} {_job_status_value(job.status):<10} "
+            f"{_job_stage_value(job.stage):<9} {job.output_path or job.plan_hash or '-'}"
+        )
 
 
 def _echo_untracked_file() -> None:
@@ -3350,6 +3511,7 @@ app.add_typer(files_app, name="files")
 app.add_typer(plans_app, name="plans")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(config_app, name="config")
+app.add_typer(workflow_app, name="workflow")
 app.add_typer(profiles_app, name="profiles")
 vpy_app.add_typer(vpy_scaffold_app, name="scaffold")
 vpy_app.add_typer(vpy_env_app, name="env")
