@@ -1470,6 +1470,10 @@ image build. Pull requests build the container without publishing it. Pushes to
 the default branch and matching `v*` tags publish to Docker Hub when the Docker
 Hub credentials are configured.
 
+Publish runs fail CI if Docker Hub credentials are missing, login fails, or the
+image push is rejected. Pull request builds are validation-only and load the
+built image into the runner instead of pushing it.
+
 Docker image tags are generated from the version in `pyproject.toml`. For
 version `0.1.0`, CI publishes `0.1.0`, `0.1`, `0.1.0-alpha`, `0.1-alpha`, and
 `alpha`; the default branch also publishes `latest`. Release tag pushes must
