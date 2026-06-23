@@ -175,7 +175,7 @@ jobs:
           upload-artifact: false
 
       - name: Generate vulnerability report
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: avarch:test
@@ -187,7 +187,7 @@ jobs:
           trivyignores: .trivyignore.yaml
 
       - name: Gate image vulnerabilities
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: avarch:test
