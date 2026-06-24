@@ -18,8 +18,14 @@ from avarch.models.db import (
     ValidationResult,
 )
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import AttemptStatus, JobOutcomeReason, JobStage, JobStatus, ResourceClass
-from avarch.promoter import _mark_promotion_failed_or_validated, claim_promotion, promote_job
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+)
+from avarch.promoter import claim_promotion, mark_promotion_failed_or_validated, promote_job
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from tests.test_plan_models import sample_plan
@@ -116,7 +122,7 @@ def test_failed_promotion_releases_lock(tmp_path: Path) -> None:
             now=now,
         )
         promotion_id = record.id or 0
-        _mark_promotion_failed_or_validated(
+        mark_promotion_failed_or_validated(
             session,
             promotion_id=promotion_id,
             error=RuntimeError("promotion failed"),

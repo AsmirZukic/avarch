@@ -402,15 +402,14 @@ def _duration_close_check(
     output_duration: float | None,
     tolerance_seconds: float,
 ) -> ValidationCheck:
-    valid = (
-        source_duration is not None
-        and output_duration is not None
-        and math.isfinite(source_duration)
-        and math.isfinite(output_duration)
-        and source_duration > 0
-        and output_duration > 0
-    )
-    if not valid:
+    if (
+        source_duration is None
+        or output_duration is None
+        or not math.isfinite(source_duration)
+        or not math.isfinite(output_duration)
+        or source_duration <= 0
+        or output_duration <= 0
+    ):
         return _failed(
             "duration_close",
             expected={"source": source_duration, "tolerance": tolerance_seconds},

@@ -34,7 +34,13 @@ from avarch.models.promotion import (
     PromotionPhase,
     PromotionStatus,
 )
-from avarch.models.scheduler import AttemptStatus, JobOutcomeReason, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+)
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
@@ -545,7 +551,7 @@ async def execute_promotion(
         )
     except Exception as exc:
         with Session(engine) as session, session.begin():
-            _mark_promotion_failed_or_validated(
+            mark_promotion_failed_or_validated(
                 session,
                 promotion_id=promotion_id,
                 error=exc,
@@ -938,7 +944,7 @@ def write_promotion_journal(path: Path, journal: PromotionJournal) -> None:
     _fsync_directory(path.parent)
 
 
-def _mark_promotion_failed_or_validated(
+def mark_promotion_failed_or_validated(
     session: Session,
     *,
     promotion_id: int,
