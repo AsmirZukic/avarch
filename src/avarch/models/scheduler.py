@@ -11,14 +11,46 @@ class SchedulerMode(StrEnum):
 
 
 class JobStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    HELD = "held"
-    VALIDATED = "validated"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELED = "canceled"
+    QUEUED = "queued"
+    ENCODING = "encoding"
+    ENCODED = "encoded"
+    VALIDATING = "validating"
+    VALIDATION_FAILED = "validation_failed"
+    SIZE_REJECTED = "size_rejected"
+    READY_TO_PROMOTE = "ready_to_promote"
+    PROMOTING = "promoting"
+    PROMOTED = "promoted"
     SKIPPED = "skipped"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    PENDING = "queued"
+    RUNNING = "encoding"
+    HELD = "held"
+    VALIDATED = "ready_to_promote"
+    COMPLETED = "promoted"
+    CANCELED = "cancelled"
+
+    @classmethod
+    def _missing_(cls, value: object) -> JobStatus | None:
+        legacy = {
+            "pending": cls.QUEUED,
+            "running": cls.ENCODING,
+            "validated": cls.READY_TO_PROMOTE,
+            "completed": cls.PROMOTED,
+            "canceled": cls.CANCELLED,
+        }
+        return legacy.get(value) if isinstance(value, str) else None
+
+
+class JobOutcomeReason(StrEnum):
+    SUCCESS = "success"
+    SKIPPED_SIZE_NOT_SMALLER = "skipped_size_not_smaller"
+    SKIPPED_MINIMUM_SAVINGS_NOT_MET = "skipped_minimum_savings_not_met"
+    FAILED_VALIDATION = "failed_validation"
+    FAILED_PROMOTION = "failed_promotion"
+    FAILED_ENCODING = "failed_encoding"
+    CANCELLED_BY_USER = "cancelled_by_user"
 
 
 class JobStage(StrEnum):

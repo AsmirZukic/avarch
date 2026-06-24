@@ -9,7 +9,14 @@ from sqlmodel import Session, select
 
 from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.job_lifecycle import JobTransitionError, transition_job
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+)
 from avarch.scheduler import (
     JobClaimError,
     claim_job_stage,
@@ -188,6 +195,60 @@ def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
     assert stored_attempt is not None
     assert stored_attempt.status == AttemptStatus.INTERRUPTED
     assert stored_attempt.exit_code == 130
+
+
+def test_job_can_transition_from_encoded_to_validating(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.ENCODED, stage=JobStage.VALIDATE)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.VALIDATING, now=now)
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.VALIDATING
+
+
+def test_job_cannot_promote_from_encoding(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.ENCODING, stage=JobStage.ENCODE)
+
+    with Session(engine) as session, session.begin(), pytest.raises(JobTransitionError):
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.PROMOTING)
+
+
+def test_job_records_outcome_reason(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.VALIDATING, stage=JobStage.VALIDATE)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(
+            job,
+            JobStatus.VALIDATION_FAILED,
+            reason=JobOutcomeReason.FAILED_VALIDATION,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.VALIDATION_FAILED
+    assert job.outcome_reason == JobOutcomeReason.FAILED_VALIDATION
+
+
+def test_invalid_transition_is_rejected(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
+
+    with Session(engine) as session, session.begin(), pytest.raises(JobTransitionError):
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.PROMOTED)
 
 
 def _stored_job(

@@ -10,6 +10,7 @@ from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStat
 from avarch.models.scheduler import (
     AttemptStatus,
     JobEventType,
+    JobOutcomeReason,
     JobStage,
     JobStatus,
     ResourceClass,
@@ -130,6 +131,10 @@ class Job(SQLModel, table=True):
     last_error_type: str | None = None
     last_error_message: str | None = None
     skip_reason: str | None = None
+    outcome_reason: JobOutcomeReason | None = Field(
+        default=None,
+        sa_column=Column(String(), nullable=True),
+    )
 
     cancel_requested_at: datetime | None = None
     cancel_requested_by: str | None = None
