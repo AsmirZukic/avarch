@@ -40,3 +40,8 @@ minimum_output_bytes = 1024
 minimum_output_source_ratio = 0.01
 decode_sample = false
 decode_sample_seconds = 5.0
+
+[promotion]
+require_smaller = true
+minimum_savings_percent = 5
+delete_rejected_output = true
