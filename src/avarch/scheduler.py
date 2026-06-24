@@ -36,6 +36,7 @@ from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import (
     QueueSelectionError,
     claimable_jobs,
+    failed_jobs_for_retry,
     find_existing_queue_job,
     select_queue_jobs,
 )
@@ -43,7 +44,13 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     RejectedOutputCleanupError,
     cleanup_rejected_output,
 )
-from avarch.adapters.sqlite.scheduler_state import get_or_create_scheduler_state
+from avarch.adapters.sqlite.scheduler_state import (
+    active_scheduler_jobs,
+    get_or_create_scheduler_state,
+    job_counts_by_status,
+    pending_cancel_count,
+    pending_hold_count,
+)
 from avarch.adapters.sqlite.validations import (
     latest_validation,
     persist_validation_result,
@@ -1234,33 +1241,10 @@ def stop_scheduler(session: Session, *, now: datetime, reason: str | None = None
 
 def scheduler_status(session: Session, *, now: datetime) -> SchedulerStatus:
     state = get_or_create_scheduler_state(session, now=now)
-    counts_by_status = {
-        status: len(session.exec(select(Job).where(Job.status == status)).all())
-        for status in JobStatus
-    }
-    active_jobs = list(
-        session.exec(
-            select(Job)
-            .where(Job.status == JobStatus.RUNNING)
-            .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
-        ).all()
-    )
-    cancel_pending = len(
-        session.exec(
-            select(Job).where(
-                col(Job.cancel_requested_at).is_not(None),
-                Job.status == JobStatus.RUNNING,
-            )
-        ).all()
-    )
-    hold_pending = len(
-        session.exec(
-            select(Job).where(
-                col(Job.hold_requested_at).is_not(None),
-                Job.status == JobStatus.RUNNING,
-            )
-        ).all()
-    )
+    counts_by_status = job_counts_by_status(session)
+    active_jobs = active_scheduler_jobs(session)
+    cancel_pending = pending_cancel_count(session)
+    hold_pending = pending_hold_count(session)
     lease_state = "inactive"
     if state.runner_id is not None:
         lease_state = "active" if _lease_active(state, now=now) else "stale"
@@ -1461,7 +1445,7 @@ def retry_failed_jobs(
     config: AppConfig,
     now: datetime,
 ) -> RetrySummary:
-    jobs = list(session.exec(select(Job).where(Job.status == JobStatus.FAILED)).all())
+    jobs = failed_jobs_for_retry(session)
     eligible = 0
     reset_to_probe = 0
     reset_to_plan = 0

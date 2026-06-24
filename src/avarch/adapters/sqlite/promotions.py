@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sqlmodel import Session, col, select
 
-from avarch.adapters.sqlite.models import Job, PromotionRecord
+from avarch.adapters.sqlite.models import Job, JobAttempt, PromotionRecord
 from avarch.models.promotion import PromotionStatus
 
 
@@ -60,6 +60,18 @@ def recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> Pr
     ):
         raise PromotionActiveLeaseError("Promotion lease is still active.")
     return record
+
+
+def next_promotion_attempt_number(session: Session, *, job: Job, job_id: int) -> int:
+    latest_attempt = session.exec(
+        select(JobAttempt)
+        .where(JobAttempt.job_id == job_id)
+        .order_by(col(JobAttempt.attempt_number).desc())
+    ).first()
+    return max(
+        job.attempts,
+        latest_attempt.attempt_number if latest_attempt is not None else 0,
+    ) + 1
 
 
 def renew_promotion_lease(
