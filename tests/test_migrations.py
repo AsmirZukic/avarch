@@ -21,6 +21,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0001_initial_schema.py",
         "0002_media_plan.py",
         "0003_job_outcome_reason.py",
+        "0004_promotion_target_lock.py",
     ]
 
 
@@ -51,10 +52,18 @@ def test_media_plan_revision_depends_on_initial_revision() -> None:
 
 def test_job_outcome_reason_revision_depends_on_media_plan() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0003_job_outcome_reason")
 
     assert revision is not None
     assert revision.down_revision == "0002_media_plan"
+
+
+def test_promotion_target_lock_revision_depends_on_job_outcome_reason() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0003_job_outcome_reason"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -100,6 +109,7 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     assert "ix_validationresult_attempt_id" in validation_indexes
     assert "ix_promotionrecord_operation_id" in promotion_indexes
     assert "ix_promotionrecord_attempt_id" in promotion_indexes
+    assert "ix_promotionrecord_promotion_target_path" in promotion_indexes
     assert "ix_mediaplan_plan_hash" in media_plan_indexes
     assert "ix_mediaplan_media_file_id" in media_plan_indexes
 
@@ -249,6 +259,18 @@ def test_upgrade_adds_job_outcome_reason(tmp_path: Path) -> None:
         column["name"] for column in inspect(create_db_engine(database_url)).get_columns("job")
     }
     assert "outcome_reason" in columns
+
+
+def test_upgrade_adds_promotion_target_lock_key(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]
+        for column in inspect(create_db_engine(database_url)).get_columns("promotionrecord")
+    }
+    assert "promotion_target_path" in columns
 
 
 def test_alembic_has_one_head() -> None:

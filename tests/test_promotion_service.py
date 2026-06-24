@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlmodel import Session
 
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus, ValidationResult
-from avarch.models.promotion import PromotionMode, PromotionStatus
+from avarch.job_lifecycle import JobTransitionError, transition_job
+from avarch.models.db import (
+    Job,
+    JobAttempt,
+    MediaFile,
+    MediaFileStatus,
+    PromotionRecord,
+    ValidationResult,
+)
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.models.scheduler import AttemptStatus, JobOutcomeReason, JobStage, JobStatus, ResourceClass
-from avarch.promoter import promote_job
+from avarch.promoter import _mark_promotion_failed_or_validated, claim_promotion, promote_job
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from tests.test_plan_models import sample_plan
@@ -70,6 +78,78 @@ def test_promotion_is_retry_safe_after_partial_move(tmp_path: Path) -> None:
     assert result.promoted is False
     assert source.read_bytes() == b"original"
     assert encoded.read_bytes() == b"encoded"
+
+
+def test_two_jobs_cannot_promote_same_target(tmp_path: Path) -> None:
+    config, job_id, source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        _insert_active_target_lock(session, target=source, now=now)
+        try:
+            claim_promotion(
+                session,
+                job_id=job_id,
+                mode=PromotionMode.REPLACE_ATOMIC,
+                owner_token="owner",
+                now=now,
+            )
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+
+    assert error is not None
+    assert "already locked" in str(error)
+
+
+def test_failed_promotion_releases_lock(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        record = claim_promotion(
+            session,
+            job_id=job_id,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            owner_token="owner",
+            now=now,
+        )
+        promotion_id = record.id or 0
+        _mark_promotion_failed_or_validated(
+            session,
+            promotion_id=promotion_id,
+            error=RuntimeError("promotion failed"),
+            now=now,
+        )
+
+    with Session(engine) as session:
+        record = session.get(PromotionRecord, promotion_id)
+
+    assert record is not None
+    assert record.owner_token is None
+    assert record.lease_expires_at is None
+    assert record.status == PromotionStatus.FAILED
+
+
+def test_promoted_job_keeps_terminal_state(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    asyncio.run(promote_job(job_id, config=config, mode=PromotionMode.REPLACE_ATOMIC))
+    engine = create_db_engine(config.database.url)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == JobStatus.PROMOTED
+        assert job.outcome_reason == JobOutcomeReason.SUCCESS
+        try:
+            transition_job(job, JobStatus.READY_TO_PROMOTE)
+        except JobTransitionError as exc:
+            error = exc
+        else:
+            error = None
+
+    assert error is not None
 
 
 def _ready_job(
@@ -201,3 +281,75 @@ def _ready_job(
         job_id = job.id or 0
 
     return config, job_id, source, encoded
+
+
+def _insert_active_target_lock(session: Session, *, target: Path, now: datetime) -> None:
+    job = Job(
+        media_file_id=1,
+        profile_name="av1_1080p_sdr",
+        profile_hash="profile-hash",
+        source_fs_fingerprint="other-fingerprint",
+        queue_key=f"lock-{now.timestamp()}",
+        plan_hash="lock-plan",
+        status=JobStatus.PROMOTING,
+        stage=JobStage.PROMOTE,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(job)
+    session.flush()
+    attempt = JobAttempt(
+        job_id=job.id or 0,
+        attempt_number=1,
+        stage=JobStage.PROMOTE,
+        resource_class=ResourceClass.FILE_OP,
+        status=AttemptStatus.RUNNING,
+        runner_id="other-owner",
+        started_at=now,
+    )
+    session.add(attempt)
+    session.flush()
+    validation = ValidationResult(
+        job_id=job.id or 0,
+        attempt_id=attempt.id or 0,
+        plan_hash="lock-plan",
+        policy_hash="policy-hash",
+        output_path=str(target.with_name("other-output.mkv")),
+        output_fs_fingerprint="output-fingerprint",
+        passed=True,
+        details_json="{}",
+        created_at=now,
+    )
+    session.add(validation)
+    session.flush()
+    session.add(
+        PromotionRecord(
+            operation_id="locked-target",
+            job_id=job.id or 0,
+            attempt_id=attempt.id or 0,
+            validation_result_id=validation.id or 0,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            status=PromotionStatus.RUNNING,
+            phase=PromotionPhase.PREPARED,
+            source_path=str(target.with_name("other-source.mkv")),
+            validated_output_path=str(target.with_name("other-output.mkv")),
+            final_path=str(target),
+            promotion_target_path=str(target),
+            staging_path=str(target.with_name(".other.tmp")),
+            backup_path=str(target.with_name("other.backup")),
+            source_fingerprint_before="source-fingerprint",
+            source_stat_json="{}",
+            validated_output_fingerprint="output-fingerprint",
+            validated_output_digest=None,
+            staging_digest=None,
+            final_fingerprint=None,
+            final_digest=None,
+            journal_path=str(target.with_name("journal.json")),
+            owner_token="other-owner",
+            heartbeat_at=now,
+            lease_expires_at=now + timedelta(seconds=30),
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+        )
+    )
