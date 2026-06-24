@@ -20,6 +20,7 @@ def test_repository_contains_migration_revisions() -> None:
     assert [revision.name for revision in revisions] == [
         "0001_initial_schema.py",
         "0002_media_plan.py",
+        "0003_job_outcome_reason.py",
     ]
 
 
@@ -42,10 +43,18 @@ def test_initial_revision_has_no_parent() -> None:
 
 def test_media_plan_revision_depends_on_initial_revision() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0002_media_plan")
 
     assert revision is not None
     assert revision.down_revision == ALEMBIC_BASELINE_REVISION
+
+
+def test_job_outcome_reason_revision_depends_on_media_plan() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0002_media_plan"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -229,6 +238,17 @@ def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
 
     inspector = inspect(create_db_engine(database_url))
     assert "mediaplan" in set(inspector.get_table_names())
+
+
+def test_upgrade_adds_job_outcome_reason(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"] for column in inspect(create_db_engine(database_url)).get_columns("job")
+    }
+    assert "outcome_reason" in columns
 
 
 def test_alembic_has_one_head() -> None:
