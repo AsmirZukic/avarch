@@ -197,19 +197,24 @@ State:     running
 Lease:     active
 
 Queue:
-	pending    0
-	running    1
-	validated  0
-	completed  0
-	failed     0
+	queued:              0
+	encoding:            1
+	encoded:             0
+	validating:          0
+	ready to promote:    0
+	promoting:           0
+	promoted:            0
+	size rejected:       0
+	validation failed:   0
+	failed:              0
 
 Active:
 	1   encode    movie.mkv
 ```
 
 ```text
-ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE
-1   running    encode      0    1  -        av1_1080p_sdr   movie.mkv
+ID  STATUS    STAGE   PRI  TRY  CONTROL  PROFILE          FILE
+1   encoding  encode    0    1  -        av1_1080p_sdr   movie.mkv
 ```
 
 The current status commands show file, state, stage, and profile. They do not yet
@@ -642,9 +647,10 @@ reported as already queued or already completed.
 
 ## Scheduler and Job Management
 
-The scheduler runs queued jobs through `probe`, `plan`, `encode`, and `validate`.
-Promotion is explicit through `avarch promote JOB_ID`; it is not automatically
-run by the scheduler in this alpha.
+The scheduler runs queued jobs through `probe`, `plan`, `encode`, `validate`,
+size policy, cleanup, and `promote`. Completed encodes do not wait for the full
+queue: one job can be validating or promoting while another job is still
+encoding, subject to the configured resource limits.
 
 Scheduler commands:
 
@@ -668,13 +674,18 @@ Job states:
 
 | State | Meaning |
 | --- | --- |
-| `pending` | Ready to be claimed by the scheduler. |
-| `running` | Claimed by a scheduler runner. |
+| `queued` | Ready to be claimed by the scheduler. |
+| `encoding` | Claimed for encode work. |
+| `encoded` | Encode finished and validation is next. |
+| `validating` | Validation or validation recovery is active. |
+| `validation_failed` | Output failed required validation checks. |
+| `size_rejected` | Output passed validation but failed size policy and was cleaned up or retained according to profile policy. |
+| `ready_to_promote` | Output passed validation and size policy. |
+| `promoting` | Promotion or promotion recovery is active. |
+| `promoted` | Job finished after promotion. |
 | `held` | Held before continuing to the next stage. |
-| `validated` | Output passed validation and is ready for promotion. |
-| `completed` | Job finished after promotion. |
 | `failed` | Current stage failed. |
-| `canceled` | Canceled by user request. |
+| `cancelled` | Cancelled by user request. |
 | `skipped` | Skipped, for example because the profile did not match or a duplicate plan exists. |
 
 Job stages:
@@ -687,10 +698,10 @@ Job stages:
 | `validate` | cheap |
 | `promote` | file_op |
 
-Preparation stages (`probe`, `plan`, `validate`) may overlap up to
-`resources.cheap_workers`. Heavy encodes run up to `resources.av1an_jobs`; the
-default is one Av1an job. Promotion uses the file-operation resource class, but
-automatic promotion is not currently part of `scheduler run`.
+Preparation and validation stages may overlap up to `resources.cheap_workers`.
+Heavy encodes run up to `resources.av1an_jobs`; the default is one Av1an job.
+Promotion uses `resources.file_ops`. These independent limits allow per-job
+validation, cleanup, and promotion to continue while unrelated encodes run.
 
 Job commands:
 
@@ -711,10 +722,11 @@ avarch jobs clear --failed --confirm
 avarch jobs validate JOB_ID
 ```
 
-Recovery after restart marks abandoned non-promotion running attempts as
-interrupted and returns jobs to `pending` or `held`. Running promotion jobs are
-excluded from scheduler recovery and must be handled with `avarch promote JOB_ID
---recover`.
+Recovery after restart is state-aware. `encoded` and `validating` jobs resume
+validation if the encoded output still exists, missing encoded outputs fail the
+job without touching the original, `ready_to_promote` jobs remain promotable,
+and `promoting` jobs are resumed through promotion recovery. Startup recovery
+never blindly deletes files.
 
 Cancellation requests for active non-promotion jobs cancel the scheduler task.
 `scheduler stop` sends SIGTERM to the scheduler process group and escalates to
@@ -723,9 +735,13 @@ SIGKILL if needed. Running promotion transactions cannot be canceled through
 
 ## Validation and Promotion
 
-Avarch keeps the plan -> validate -> promote boundary explicit. Encoded output is
-created in workspace work paths, validation must pass, and promotion is the
-controlled step that places accepted output in its final location.
+Avarch keeps the plan -> validate -> size policy -> promote boundary explicit.
+Encoded output is created in workspace work paths, validation and size policy
+must pass, and promotion is the controlled step that places accepted output in
+its final location.
+
+Avarch never replaces the original unless the encoded file passes validation and
+size policy.
 
 ### Validation
 
@@ -752,7 +768,8 @@ Validation checks include:
 
 Validation policy failures produce a `ValidationReport` with check statuses:
 `pass`, `fail`, `warning`, or `skipped`. Required failed checks make the report
-fail and leave the job in `failed` at stage `validate`.
+fail and leave the job in `validation_failed` at stage `validate`; corrupt
+outputs never replace originals.
 
 Validation execution errors are different from failed validation reports.
 Missing tools, unreadable targets, subprocess failures, or persistence problems
@@ -769,12 +786,32 @@ avarch jobs validate JOB_ID
 
 Failed validation does not delete the source file. Encoded output and logs are
 left in the workspace work/artifact paths for inspection unless later cleanup is
-performed by a successful promotion path.
+performed by an explicit retry or operator action.
+
+### Size Policy
+
+After validation passes, Avarch applies the profile `[promotion]` size policy:
+
+```toml
+[promotion]
+require_smaller = true
+minimum_savings_percent = 5
+delete_rejected_output = true
+```
+
+By default, outputs must be smaller and must save at least 5 percent. A file
+that is only 0.1 percent smaller is rejected by default. `REJECT_NOT_SMALLER`
+sets the outcome reason `skipped_size_not_smaller`; insufficient savings sets
+`skipped_minimum_savings_not_met`. When `delete_rejected_output` is true, the
+rejected encoded temp file is deleted and the original remains untouched. If
+cleanup fails, the job is marked `failed` and the original is still untouched.
 
 ### Promotion
 
-Promotion requires a job in `validated` state at `promote` stage with a latest
-passing validation result matching the plan and output path.
+Promotion requires a job in `ready_to_promote` state at `promote` stage with a
+latest passing validation result matching the plan and output path. The scheduler
+can promote automatically; `avarch promote JOB_ID` remains available for manual
+preview, execution, and recovery.
 
 Preview promotion:
 
@@ -806,17 +843,26 @@ Collision behavior is strict. Promotion fails if the final path, backup path, or
 staging path already exists. Same-directory hidden staging files are used, for
 example `.Movie.av1.mkv.avarch-promote-abcdef123456.tmp`.
 
-Promotion verifies source and output fingerprints, stages the validated output,
-hashes content with the `promotion-content-v1` contract, verifies staging and
-final digests, journals progress, and can recover interrupted transactions.
+Promotion verifies source and output fingerprints, locks the promotion target,
+stages the validated output, hashes content with the `promotion-content-v1`
+contract, verifies staging and final digests, journals progress, and can recover
+interrupted transactions. A failed promotion releases its lock; a promoted job
+stays terminal.
 
 Cross-filesystem replacement is limited. The promotion policy requires hard-link
 support for replacement-style modes and destination-local staging. Keep-original
 mode writes a sibling final file and is the safest default.
 
-Originals are never encoded over. In `keep-original`, originals are never moved.
-In replacement modes, Avarch creates or uses rollback/backup handling and
-verifies state before installing the validated output.
+Originals are never encoded over or deleted first. In `keep-original`, originals
+are never moved. In replacement modes, Avarch creates or uses rollback/backup
+handling, re-stats the original, verifies identity, installs only the validated
+output, verifies the final path, and deletes the backup only after a safe
+replacement exists.
+
+Disk-space behavior is conservative. Validation and promotion need room for the
+encoded output, promotion staging, and any rollback backup required by the
+selected mode. Rejected outputs can be deleted immediately by policy to reclaim
+space; successful replacement promotion cleans up known work paths after commit.
 
 ## Configuration
 
@@ -1308,7 +1354,8 @@ avarch scheduler run
 
 ### Failed or Interrupted Jobs
 
-What you see: `failed` or `pending` after an interrupted attempt.
+What you see: `failed`, `queued`, `encoded`, or `ready_to_promote` after an
+interrupted attempt.
 
 Likely cause: a stage failed, the scheduler stopped, or recovery returned a job
 to a resumable state.
