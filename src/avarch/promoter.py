@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import hashlib
 import os
 import shutil
 import uuid
@@ -11,20 +10,52 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
-from avarch.config import AppConfig
-from avarch.db import create_db_engine
-from avarch.job_lifecycle import transition_job
-from avarch.models.db import (
+from avarch.adapters.filesystem.plans import PlanArtifactLoadError, load_plan_artifact
+from avarch.adapters.filesystem.promotion import (
+    PROMOTION_DIGEST_CHUNK_SIZE,
+    calculate_promotion_digest,
+    create_promotion_digest,
+    fsync_directory,
+    write_promotion_journal,
+)
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.job_transitions import transition_job
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     MediaFile,
     MediaFileStatus,
     PromotionRecord,
     ValidationResult,
+)
+from avarch.adapters.sqlite.promotions import (
+    PromotionLeaseOwnershipError,
+    PromotionRecordNotFoundError,
+    has_active_promotion_lease,
+    has_active_target_lease,
+    has_completed_promotion,
+    latest_promotion_record,
+    renew_promotion_lease,
+)
+from avarch.adapters.sqlite.validations import latest_validation
+from avarch.config import AppConfig
+from avarch.domain.jobs import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+)
+from avarch.domain.promotion import (
+    PromotionPathConflictError,
+    derive_backup_path,
+    derive_keep_original_path,
+    derive_promotion_journal_path,
+    derive_staging_path,
 )
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import (
@@ -34,21 +65,12 @@ from avarch.models.promotion import (
     PromotionPhase,
     PromotionStatus,
 )
-from avarch.models.scheduler import (
-    AttemptStatus,
-    JobOutcomeReason,
-    JobStage,
-    JobStatus,
-    ResourceClass,
-)
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
 PROMOTION_LEASE_SECONDS = 30.0
 PROMOTION_HEARTBEAT_SECONDS = 5.0
 PROMOTION_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024
-PROMOTION_CONTENT_HASH_CONTRACT = "promotion-content-v1"
-STAGING_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 class PromotionError(RuntimeError):
@@ -138,53 +160,23 @@ class PromotionHeartbeat:
 
     def refresh(self, *, force: bool = False) -> None:
         now = _utc_now()
-        if (
-            not force
-            and (now - self.last_heartbeat).total_seconds() < PROMOTION_HEARTBEAT_SECONDS
-        ):
+        if not force and (now - self.last_heartbeat).total_seconds() < PROMOTION_HEARTBEAT_SECONDS:
             return
         engine = create_db_engine(self.config.database.url)
         with Session(engine) as session, session.begin():
-            renew_promotion_lease(
-                session,
-                promotion_id=self.promotion_id,
-                owner_token=self.owner_token,
-                now=now,
-            )
+            try:
+                renew_promotion_lease(
+                    session,
+                    promotion_id=self.promotion_id,
+                    owner_token=self.owner_token,
+                    now=now,
+                    lease_seconds=PROMOTION_LEASE_SECONDS,
+                )
+            except PromotionRecordNotFoundError as exc:
+                raise PromotionPersistenceError(str(exc)) from exc
+            except PromotionLeaseOwnershipError as exc:
+                raise PromotionLeaseError(str(exc)) from exc
         self.last_heartbeat = now
-
-
-def derive_keep_original_path(source_path: Path, *, container: str) -> Path:
-    final_path = source_path.with_name(f"{source_path.stem}.av1.{container}")
-    if final_path == source_path:
-        raise PromotionConflictError("Derived promotion path would overwrite the source path.")
-    return final_path
-
-
-def derive_backup_path(source_path: Path) -> Path:
-    return source_path.with_name(source_path.name + ".avarch-original")
-
-
-def derive_staging_path(final_path: Path, *, operation_id: str) -> Path:
-    token = operation_id[:12]
-    return final_path.with_name(f".{final_path.name}.avarch-promote-{token}.tmp")
-
-
-def derive_promotion_journal_path(runtime_dir: Path) -> Path:
-    return runtime_dir / "promotion-journal.json"
-
-
-def calculate_promotion_digest(
-    path: Path,
-    *,
-    chunk_size: int = STAGING_CHUNK_SIZE,
-) -> str:
-    digest = hashlib.blake2b(digest_size=32)
-    digest.update(f"{PROMOTION_CONTENT_HASH_CONTRACT}\0".encode())
-    with path.open("rb") as input_file:
-        while chunk := input_file.read(chunk_size):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def create_promotion_staging_file(
@@ -236,22 +228,24 @@ def _stage_validated_output_sync(
     if before.fs_fingerprint != expected_fingerprint:
         raise PromotionEligibilityError("Validated output fingerprint changed before staging.")
 
-    digest = hashlib.blake2b(digest_size=32)
-    digest.update(f"{PROMOTION_CONTENT_HASH_CONTRACT}\0".encode())
+    digest = create_promotion_digest()
     bytes_copied = 0
     try:
-        with source_output.open("rb") as input_file, create_promotion_staging_file(
-            staging_path,
-            mode=expected_mode,
-        ) as output_file:
-            while chunk := input_file.read(STAGING_CHUNK_SIZE):
+        with (
+            source_output.open("rb") as input_file,
+            create_promotion_staging_file(
+                staging_path,
+                mode=expected_mode,
+            ) as output_file,
+        ):
+            while chunk := input_file.read(PROMOTION_DIGEST_CHUNK_SIZE):
                 output_file.write(chunk)
                 digest.update(chunk)
                 bytes_copied += len(chunk)
                 heartbeat.refresh()
             output_file.flush()
             os.fsync(output_file.fileno())
-        _fsync_directory(staging_path.parent)
+        fsync_directory(staging_path.parent)
     except Exception:
         _unlink_owned_staging(staging_path)
         raise
@@ -289,7 +283,7 @@ def create_original_rollback_link(
         os.link(source_path, backup_path, follow_symlinks=False)
     except OSError as exc:
         raise PromotionFilesystemError("Unable to create hard-link rollback backup.") from exc
-    _fsync_directory(source_path.parent)
+    fsync_directory(source_path.parent)
     _verify_hardlink_backup(
         source_path=source_path,
         backup_path=backup_path,
@@ -341,10 +335,13 @@ def validate_promotion_preflight(
         raise PromotionEligibilityError("Validated output fingerprint changed.")
 
     if mode == PromotionMode.KEEP_ORIGINAL:
-        final_path = derive_keep_original_path(
-            source_path,
-            container=plan.execution_identity.final_container,
-        )
+        try:
+            final_path = derive_keep_original_path(
+                source_path,
+                container=plan.execution_identity.final_container,
+            )
+        except PromotionPathConflictError as exc:
+            raise PromotionConflictError(str(exc)) from exc
         backup_path = None
     else:
         final_path = source_path
@@ -398,10 +395,14 @@ def claim_promotion(
     job = _require_job(session, job_id)
     if job.status != JobStatus.VALIDATED or job.stage != JobStage.PROMOTE:
         raise PromotionEligibilityError("Job is not validated and ready for promotion.")
-    _reject_completed_promotion(session, job_id=job_id)
-    _reject_unexpired_promotion_lease(session, job_id=job_id, now=now)
+    if has_completed_promotion(session, job):
+        raise PromotionEligibilityError("Job already has a completed promotion.")
+    if has_active_promotion_lease(session, job_id=job_id, now=now):
+        raise PromotionLeaseError("Another promotion lease is still active.")
     plan = _load_job_plan(job)
-    validation = _latest_validation(session, job)
+    validation = latest_validation(session, job)
+    if validation is None:
+        raise PromotionEligibilityError("Job has no current validation result.")
     operation_id = uuid.uuid4().hex
     preflight = validate_promotion_preflight(
         job=job,
@@ -410,22 +411,21 @@ def claim_promotion(
         mode=mode,
         operation_id=operation_id,
     )
-    _reject_unexpired_target_lease(
-        session,
-        job_id=job_id,
-        target_path=preflight.final_path,
-        now=now,
-    )
+    if has_active_target_lease(session, job_id=job_id, target_path=preflight.final_path, now=now):
+        raise PromotionLeaseError(f"Promotion target is already locked: {preflight.final_path}")
 
     latest_attempt = session.exec(
         select(JobAttempt)
         .where(JobAttempt.job_id == job_id)
         .order_by(col(JobAttempt.attempt_number).desc())
     ).first()
-    next_attempt_number = max(
-        job.attempts,
-        latest_attempt.attempt_number if latest_attempt is not None else 0,
-    ) + 1
+    next_attempt_number = (
+        max(
+            job.attempts,
+            latest_attempt.attempt_number if latest_attempt is not None else 0,
+        )
+        + 1
+    )
 
     transition_job(job, JobStatus.PROMOTING, now=now)
     job.stage = JobStage.PROMOTE
@@ -487,41 +487,6 @@ def claim_promotion(
     job.latest_promotion_id = record.id
     session.add(job)
     return record
-
-
-def renew_promotion_lease(
-    session: Session,
-    *,
-    promotion_id: int,
-    owner_token: str,
-    now: datetime,
-) -> None:
-    record = _require_promotion(session, promotion_id)
-    if record.owner_token != owner_token:
-        raise PromotionLeaseError("Promotion lease belongs to another owner.")
-    if record.status == PromotionStatus.COMPLETED:
-        return
-    record.heartbeat_at = now
-    record.lease_expires_at = now + timedelta(seconds=PROMOTION_LEASE_SECONDS)
-    record.updated_at = now
-    session.add(record)
-
-
-def release_promotion_lease(
-    session: Session,
-    *,
-    promotion_id: int,
-    owner_token: str,
-    now: datetime,
-) -> None:
-    record = _require_promotion(session, promotion_id)
-    if record.owner_token != owner_token:
-        return
-    record.owner_token = None
-    record.lease_expires_at = None
-    record.heartbeat_at = now
-    record.updated_at = now
-    session.add(record)
 
 
 async def execute_promotion(
@@ -685,7 +650,7 @@ async def _execute_claimed_promotion(
     _write_journal_from_record(engine, promotion_id)
     if staging_path.exists():
         os.replace(staging_path, install_path)
-        _fsync_directory(install_path.parent)
+        fsync_directory(install_path.parent)
     _set_phase(engine, promotion_id, PromotionPhase.FINAL_INSTALLED, owner_token)
 
     final_digest = calculate_promotion_digest(install_path)
@@ -753,7 +718,7 @@ async def _rollback_before_commit(
         if mode == PromotionMode.KEEP_ORIGINAL:
             if final_path.exists() and expected_digest == calculate_promotion_digest(final_path):
                 final_path.unlink()
-                _fsync_directory(final_path.parent)
+                fsync_directory(final_path.parent)
         else:
             if backup_path is None or not backup_path.exists():
                 raise PromotionRollbackError("Rollback backup is missing.")
@@ -762,7 +727,7 @@ async def _rollback_before_commit(
                 and calculate_promotion_digest(source_path) == expected_digest
             ):
                 os.replace(backup_path, source_path)
-                _fsync_directory(source_path.parent)
+                fsync_directory(source_path.parent)
                 if _stat_snapshot(source_path) != source_stat:
                     raise PromotionRollbackError("Rollback did not restore original source stat.")
         _unlink_owned_staging(staging_path)
@@ -854,7 +819,7 @@ def _cleanup_after_success(engine: Engine, promotion_id: int, plan: TranscodePla
                 same_inode=False,
             )
             backup_path.unlink()
-            _fsync_directory(backup_path.parent)
+            fsync_directory(backup_path.parent)
         except Exception as exc:
             errors.append(f"backup cleanup failed: {exc}")
     for path in (plan.output_path, plan.av1an.video_output_path, staging_path):
@@ -883,10 +848,10 @@ def _delete_known_work_path(path: Path, *, work_dir: Path, recursive: bool = Fal
         if not recursive:
             raise PromotionFilesystemError(f"Cleanup path is an unexpected directory: {path}")
         shutil.rmtree(path)
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
         return
     path.unlink()
-    _fsync_directory(path.parent)
+    fsync_directory(path.parent)
 
 
 def _set_phase(
@@ -930,18 +895,6 @@ def _write_journal_from_record(engine: Engine, promotion_id: int) -> None:
             updated_at=record.updated_at,
         )
         write_promotion_journal(Path(record.journal_path), journal)
-
-
-def write_promotion_journal(path: Path, journal: PromotionJournal) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{journal.operation_id}.tmp")
-    with temporary_path.open("w", encoding="utf-8", newline="\n") as output_file:
-        output_file.write(canonical_json(journal))
-        output_file.write("\n")
-        output_file.flush()
-        os.fsync(output_file.fileno())
-    os.replace(temporary_path, path)
-    _fsync_directory(path.parent)
 
 
 def mark_promotion_failed_or_validated(
@@ -992,16 +945,9 @@ def mark_promotion_failed_or_validated(
 
 
 def _recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> PromotionRecord:
-    records = list(
-        session.exec(
-            select(PromotionRecord)
-            .where(PromotionRecord.job_id == job_id)
-            .order_by(col(PromotionRecord.created_at).desc(), col(PromotionRecord.id).desc())
-        ).all()
-    )
-    if not records:
+    record = latest_promotion_record(session, job_id=job_id)
+    if record is None:
         raise PromotionRecoveryError("No promotion record exists for this job.")
-    record = records[0]
     if record.status == PromotionStatus.COMPLETED:
         raise PromotionRecoveryError("Promotion is already completed.")
     if (
@@ -1013,71 +959,12 @@ def _recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> P
     return record
 
 
-def _reject_completed_promotion(session: Session, *, job_id: int) -> None:
-    completed = session.exec(
-        select(PromotionRecord).where(
-            PromotionRecord.job_id == job_id,
-            PromotionRecord.status == PromotionStatus.COMPLETED,
-        )
-    ).first()
-    if completed is not None:
-        raise PromotionEligibilityError("Job already has a completed promotion.")
-
-
-def _reject_unexpired_promotion_lease(
-    session: Session,
-    *,
-    job_id: int,
-    now: datetime,
-) -> None:
-    leased = session.exec(
-        select(PromotionRecord).where(
-            PromotionRecord.job_id == job_id,
-            PromotionRecord.status == PromotionStatus.RUNNING,
-            col(PromotionRecord.lease_expires_at).is_not(None),
-            col(PromotionRecord.lease_expires_at) > now,
-        )
-    ).first()
-    if leased is not None:
-        raise PromotionLeaseError("Another promotion lease is still active.")
-
-
-def _reject_unexpired_target_lease(
-    session: Session,
-    *,
-    job_id: int,
-    target_path: Path,
-    now: datetime,
-) -> None:
-    target = str(target_path)
-    leased = session.exec(
-        select(PromotionRecord).where(
-            PromotionRecord.job_id != job_id,
-            PromotionRecord.status == PromotionStatus.RUNNING,
-            PromotionRecord.promotion_target_path == target,
-            col(PromotionRecord.lease_expires_at).is_not(None),
-            col(PromotionRecord.lease_expires_at) > now,
-        )
-    ).first()
-    if leased is not None:
-        raise PromotionLeaseError(f"Promotion target is already locked: {target_path}")
-
-
-def _latest_validation(session: Session, job: Job) -> ValidationResult:
-    if job.latest_validation_id is None:
-        raise PromotionEligibilityError("Job has no validation result.")
-    validation = session.get(ValidationResult, job.latest_validation_id)
-    if validation is None:
-        raise PromotionEligibilityError("Latest validation result no longer exists.")
-    return validation
-
-
 def _load_job_plan(job: Job) -> TranscodePlan:
     if job.plan_path is None:
         raise PromotionEligibilityError("Job has no plan artifact.")
     try:
-        return TranscodePlan.model_validate_json(Path(job.plan_path).read_text(encoding="utf-8"))
-    except (OSError, ValidationError, ValueError) as exc:
+        return load_plan_artifact(Path(job.plan_path))
+    except PlanArtifactLoadError as exc:
         raise PromotionEligibilityError(f"Unable to load job plan: {job.plan_path}") from exc
 
 
@@ -1130,15 +1017,7 @@ def _verify_hardlink_backup(
 def _unlink_owned_staging(staging_path: Path) -> None:
     if staging_path.exists() and not staging_path.is_symlink() and staging_path.is_file():
         staging_path.unlink()
-        _fsync_directory(staging_path.parent)
-
-
-def _fsync_directory(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        fsync_directory(staging_path.parent)
 
 
 def _require_job(session: Session, job_id: int) -> Job:

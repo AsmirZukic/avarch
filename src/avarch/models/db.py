@@ -6,16 +6,16 @@ from enum import StrEnum
 from sqlalchemy import Column, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
-from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import (
+from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
     JobOutcomeReason,
     JobStage,
     JobStatus,
     ResourceClass,
-    SchedulerMode,
 )
+from avarch.domain.scheduler import SchedulerMode
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 
 
 class AppMeta(SQLModel, table=True):

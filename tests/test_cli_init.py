@@ -20,7 +20,7 @@ def test_init_creates_config_and_database(tmp_path: Path) -> None:
     assert "[logging]" in config_text
     assert 'format = "console"' in config_text
 
-    db_path = tmp_path / ".avarch" / "data" / "avarch.db"
+    db_path = tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db"
     assert db_path.exists()
 
 

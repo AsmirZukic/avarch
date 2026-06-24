@@ -7,9 +7,8 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import (
     Job,
     JobEvent,
     MediaFile,
@@ -17,11 +16,13 @@ from avarch.models.db import (
     PromotionRecord,
     ValidationResult,
 )
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
+from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import JobEventType, JobStage, JobStatus
 from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
-from avarch.probe import normalize_probe, store_probe_result
+from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.scheduler import JobControlError, clear_queue, retry_job, retry_queue
@@ -502,8 +503,8 @@ def _dummy_attempt_id(
     now: datetime,
     attempt_number: int = 1,
 ) -> int:
-    from avarch.models.db import JobAttempt
-    from avarch.models.scheduler import AttemptStatus, ResourceClass
+    from avarch.adapters.sqlite.models import JobAttempt
+    from avarch.domain.jobs import AttemptStatus, ResourceClass
 
     attempt = JobAttempt(
         job_id=job_id,
@@ -594,6 +595,6 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine

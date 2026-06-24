@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 from sqlmodel import Session, select
 
+from avarch.adapters.filesystem.plans import write_plan_artifacts
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.planning import load_planning_context
+from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.config import AppConfig
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.planner import build_plan, load_planning_context, write_plan_artifacts
-from avarch.probe import normalize_probe, store_probe_result
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.planner import build_plan
+from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.scheduler import enqueue_inventory, execute_plan_job
@@ -25,7 +28,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.adapters.sqlite.db'}"
     config = _config(database_url)
     (tmp_path / ".avarch").mkdir()
     engine = create_db_engine(database_url)

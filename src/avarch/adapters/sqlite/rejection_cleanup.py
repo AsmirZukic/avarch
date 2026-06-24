@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from avarch.job_lifecycle import transition_job
-from avarch.models.db import Job
-from avarch.models.scheduler import JobOutcomeReason, JobStatus
+from avarch.adapters.sqlite.job_transitions import transition_job
+from avarch.adapters.sqlite.models import Job
+from avarch.domain.jobs import JobOutcomeReason, JobStatus
+from avarch.domain.size import SizeDecision
 from avarch.profiles.models import EncodingProfile
-from avarch.size_policy import SizeDecision
 
 
 class RejectedOutputCleanupError(RuntimeError):

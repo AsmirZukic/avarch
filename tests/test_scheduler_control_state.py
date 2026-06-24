@@ -8,9 +8,10 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus, SchedulerState
-from avarch.models.scheduler import JobStage, JobStatus, SchedulerMode
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, SchedulerState
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.scheduler import SchedulerMode
 from avarch.scheduler import (
     SCHEDULER_LEASE_SECONDS,
     SchedulerAlreadyRunningError,
@@ -342,14 +343,14 @@ def test_acquired_lease_sets_expected_expiry(tmp_path: Path) -> None:
         state = session.get(SchedulerState, 1)
 
     assert state is not None
-    assert state.lease_expires_at == (
-        now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)
-    ).replace(tzinfo=None)
+    assert state.lease_expires_at == (now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)).replace(
+        tzinfo=None
+    )
 
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

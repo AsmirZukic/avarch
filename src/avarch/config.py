@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy.engine import make_url
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogFormat = Literal["console", "json"]
@@ -21,7 +20,7 @@ class AppSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = "sqlite:///data/avarch.db"
+    url: str = "sqlite:///data/avarch.adapters.sqlite.db"
 
 
 class LoggingSettings(BaseModel):
@@ -115,7 +114,7 @@ WORKSPACE_CONFIG_TEXT = """[app]
 data_dir = "data"
 
 [database]
-url = "sqlite:///data/avarch.db"
+url = "sqlite:///data/avarch.adapters.sqlite.db"
 
 [logging]
 level = "INFO"
@@ -150,19 +149,6 @@ def resolve_data_dir(config: AppConfig, config_path: Path) -> Path:
         return data_dir
 
     return config_path.parent / data_dir
-
-
-def resolve_database_url(config: AppConfig, config_path: Path) -> str:
-    url = make_url(config.database.url)
-    database = url.database
-    if url.drivername != "sqlite" or database is None or database in {"", ":memory:"}:
-        return config.database.url
-
-    db_path = Path(database)
-    if not db_path.is_absolute():
-        db_path = config_path.parent / db_path
-
-    return url.set(database=str(db_path)).render_as_string(hide_password=False)
 
 
 def _resolve_profile_search_paths(config: AppConfig, config_dir: Path) -> AppConfig:

@@ -5,11 +5,12 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.config import AppConfig
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.probe import normalize_probe, store_probe_result
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.probe import normalize_probe
 from avarch.scheduler import enqueue_inventory
 from tests.probe_fixtures import sdr_probe_payload
 
@@ -220,7 +221,7 @@ def test_enqueue_allows_new_job_when_profile_changes(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

@@ -300,7 +300,7 @@ def _write_inventory_config(tmp_path: Path, *, roots: list[Path]) -> Path:
 data_dir = "data"
 
 [database]
-url = "sqlite:///data/avarch.db"
+url = "sqlite:///data/avarch.adapters.sqlite.db"
 
 [logging]
 level = "INFO"

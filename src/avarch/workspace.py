@@ -87,7 +87,7 @@ class WorkspaceContext:
 
     @property
     def database_path(self) -> Path:
-        return self.data_dir / "avarch.db"
+        return self.data_dir / "avarch.adapters.sqlite.db"
 
     @property
     def logs_dir(self) -> Path:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
 from avarch.planner import (
     PlanningContext,
     add_sdr_color_encoder_args,

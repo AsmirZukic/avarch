@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
 from sqlalchemy import Engine, event, inspect, text
@@ -71,6 +72,7 @@ def _is_file_backed_sqlite(database_url: str) -> bool:
 
 
 def create_db_schema(engine: Engine) -> None:
+    import_module("avarch.adapters.sqlite.models")
     SQLModel.metadata.create_all(engine)
 
 

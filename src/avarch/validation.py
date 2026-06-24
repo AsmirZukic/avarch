@@ -9,20 +9,15 @@ import tempfile
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from sqlmodel import Session
-
-from avarch.models.db import Job, JobAttempt, ValidationResult
+from avarch.domain.validation import ValidationCheckStatus, checks_pass
 from avarch.models.plan import ExecutionRuntimePaths, TranscodePlan
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus
 from avarch.models.validation import (
     ObservedValidationMedia,
     ValidationCheck,
-    ValidationCheckStatus,
     ValidationPolicy,
     ValidationReport,
-    checks_pass,
 )
 from avarch.probe import (
     ProbeError,
@@ -37,6 +32,18 @@ from avarch.serialization import canonical_json
 
 Clock = Callable[[], datetime]
 ProbeRunner = Callable[[Path], Mapping[str, Any]]
+
+
+class ValidationJob(Protocol):
+    @property
+    def plan_hash(self) -> str | None: ...
+
+    @property
+    def output_path(self) -> str | None: ...
+
+    @property
+    def media_file_id(self) -> int | None: ...
+
 
 DEFAULT_DECODE_TIMEOUT_SECONDS = 120.0
 MAX_PROCESS_TAIL_BYTES = 16_384
@@ -79,10 +86,6 @@ class ValidationTargetError(ValidationError):
 
 
 class ValidationPolicyError(ValidationError):
-    pass
-
-
-class ValidationPersistenceError(ValidationError):
     pass
 
 
@@ -197,7 +200,7 @@ def validate_encoded_file(
 
 async def validate_output(
     *,
-    job: Job,
+    job: ValidationJob,
     plan: TranscodePlan,
     policy: ValidationPolicy,
     runtime_paths: ExecutionRuntimePaths,
@@ -329,9 +332,7 @@ async def validate_output(
             output_before == output_after,
             expected=output_before,
             observed=output_after,
-            message="Output changed during validation."
-            if output_before != output_after
-            else None,
+            message="Output changed during validation." if output_before != output_after else None,
         )
         if output_before is not None
         else _skipped("output_stable", "output_nonempty")
@@ -749,64 +750,6 @@ def write_validation_report(path: Path, report: ValidationReport) -> Path:
     return path
 
 
-def persist_validation_result(
-    session: Session,
-    *,
-    job: Job,
-    attempt: JobAttempt,
-    report: ValidationReport,
-) -> ValidationResult:
-    if job.id is None or attempt.id is None:
-        raise ValidationPersistenceError("Job and attempt must be persisted.")
-    now = report.finished_at
-    result = ValidationResult(
-        job_id=job.id,
-        attempt_id=attempt.id,
-        plan_hash=report.plan_hash,
-        policy_hash=report.policy_hash,
-        output_path=str(report.output_path),
-        output_fs_fingerprint=report.output_fs_fingerprint_after,
-        passed=report.passed,
-        details_json=canonical_json(report),
-        created_at=now,
-    )
-    session.add(result)
-    session.flush()
-    if result.id is None:
-        raise ValidationPersistenceError("Validation result id was not assigned.")
-
-    job.latest_validation_id = result.id
-    job.claimed_by = None
-    job.updated_at = now
-    job.finished_at = None
-    attempt.status = AttemptStatus.COMPLETED
-    attempt.finished_at = now
-    attempt.output_path = str(report.output_path)
-    attempt.details_json = canonical_json(
-        {
-            "result_id": result.id,
-            "report_path": str(report.output_path),
-            "plan_hash": report.plan_hash,
-            "policy_hash": report.policy_hash,
-            "failed_checks": failed_required_check_names(report),
-        }
-    )
-    if report.passed:
-        job.status = JobStatus.VALIDATED
-        job.stage = JobStage.PROMOTE
-        job.last_error_type = None
-        job.last_error_message = None
-    else:
-        job.status = JobStatus.FAILED
-        job.stage = JobStage.VALIDATE
-        job.finished_at = now
-        job.last_error_type = "ValidationFailed"
-        job.last_error_message = failed_check_summary(report)
-    session.add(job)
-    session.add(attempt)
-    return result
-
-
 def failed_required_check_names(report: ValidationReport) -> list[str]:
     return [
         check.name
@@ -931,7 +874,7 @@ def _run_decode_sample(
 
 def _verify_validation_contract(
     *,
-    job: Job,
+    job: ValidationJob,
     plan: TranscodePlan,
     policy: ValidationPolicy,
 ) -> None:

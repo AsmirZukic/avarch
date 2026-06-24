@@ -7,10 +7,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.models import Job
 from avarch.cli import app
-from avarch.models.db import Job
+from avarch.domain.jobs import JobStage, JobStatus
 from avarch.models.promotion import PromotionMode
-from avarch.models.scheduler import JobStage, JobStatus
 
 runner = CliRunner()
 

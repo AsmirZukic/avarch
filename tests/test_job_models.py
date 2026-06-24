@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     MediaFile,
@@ -17,14 +17,16 @@ from avarch.models.db import (
     SchedulerState,
     ValidationResult,
 )
-from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import (
+from avarch.domain.jobs import (
     AttemptStatus,
     JobStage,
     JobStatus,
     ResourceClass,
+)
+from avarch.domain.scheduler import (
     SchedulerMode,
 )
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 
 
 def test_insert_pending_probe_job(tmp_path: Path) -> None:
@@ -301,7 +303,7 @@ def test_insert_prepared_promotion_record(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

@@ -5,10 +5,13 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.config import AppConfig
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobOutcomeReason, JobStage, JobStatus
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.adapters.sqlite.rejection_cleanup import cleanup_rejected_output
+from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
+from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
+from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.probe import ProbeProcessError
 from avarch.profiles.models import (
     EncodingProfile,
@@ -18,9 +21,7 @@ from avarch.profiles.models import (
     ProfileSubtitleSettings,
     ProfileVideoSettings,
 )
-from avarch.rejection_cleanup import cleanup_rejected_output
-from avarch.scheduler import claimable_jobs, has_resource_capacity, recover_abandoned_jobs
-from avarch.size_policy import SizeDecision, evaluate_size_policy
+from avarch.scheduler import recover_abandoned_jobs
 from avarch.validation import validate_encoded_file
 
 
@@ -92,13 +93,21 @@ def test_larger_output_is_deleted(tmp_path: Path) -> None:
     original.write_bytes(b"small")
     encoded.write_bytes(b"larger output")
     job = _job(1, datetime.now(UTC), queue_key="size", status=JobStatus.VALIDATING)
-    decision = evaluate_size_policy(original.stat().st_size, encoded.stat().st_size, _profile())
+    profile = _profile()
+    decision = evaluate_size_policy(
+        original.stat().st_size,
+        encoded.stat().st_size,
+        SizePolicy(
+            require_smaller=profile.promotion.require_smaller,
+            minimum_savings_percent=profile.promotion.minimum_savings_percent,
+        ),
+    )
 
     cleanup_rejected_output(
         job,
         encoded_path=encoded,
         decision=decision,
-        profile=_profile(),
+        profile=profile,
         now=datetime.now(UTC),
     )
 
@@ -128,9 +137,9 @@ def test_promotion_happens_before_all_encodes_finish(tmp_path: Path) -> None:
         promote_job = claimable_jobs(session, active_job_ids=set())[0]
 
     assert has_resource_capacity(
-        promote_job,
-        {object(): (99, JobStage.ENCODE)},
-        config=AppConfig(),
+        promote_job.stage,
+        [JobStage.ENCODE],
+        capacity=ResourceCapacity(cheap_workers=4, av1an_jobs=1, file_ops=1),
     )
 
 
@@ -161,7 +170,7 @@ def test_scheduler_restart_mid_promotion(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

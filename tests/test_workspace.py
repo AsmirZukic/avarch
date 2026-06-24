@@ -6,11 +6,12 @@ from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import Job, MediaFile
+from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import Job, MediaFile
-from avarch.models.scheduler import JobStage, JobStatus
+from avarch.config import load_config
+from avarch.domain.jobs import JobStage, JobStatus
 from avarch.workspace import (
     WorkspaceContext,
     WorkspaceCreateError,
@@ -31,7 +32,7 @@ def test_workspace_derives_all_paths(tmp_path: Path) -> None:
     assert workspace.profiles_dir == tmp_path / ".avarch" / "profiles"
     assert workspace.scripts_dir == tmp_path / ".avarch" / "scripts"
     assert workspace.vpy_requirements_toml == tmp_path / ".avarch" / "vpy" / "requirements.toml"
-    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.db"
+    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db"
     assert workspace.work_dir == tmp_path / ".avarch" / "work"
 
 
@@ -92,7 +93,7 @@ def test_init_creates_complete_workspace_layout(
     assert (tmp_path / ".avarch" / "scripts").is_dir()
     assert (tmp_path / ".avarch" / "vpy" / "requirements.toml").is_file()
     assert (tmp_path / ".avarch" / "vpy" / "environments").is_dir()
-    assert (tmp_path / ".avarch" / "data" / "avarch.db").is_file()
+    assert (tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db").is_file()
     assert (tmp_path / ".avarch" / "logs").is_dir()
     assert (tmp_path / ".avarch" / "work").is_dir()
     assert (tmp_path / ".avarch" / "tmp").is_dir()
