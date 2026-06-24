@@ -9,10 +9,8 @@ from sqlalchemy import Engine
 from sqlmodel import Session
 from typer.testing import CliRunner
 
-from avarch.cli import app
-from avarch.config import AppConfig, load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import (
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     MediaFile,
@@ -20,8 +18,12 @@ from avarch.models.db import (
     ProbeResult,
     ValidationResult,
 )
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.cli import app
+from avarch.config import AppConfig, load_config
+from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, ResourceClass
 from avarch.models.plan import ExecutionRuntimePaths, PlanArtifactPaths, TranscodePlan
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 from avarch.models.validation import (
     ObservedValidationMedia,
     ValidationCheck,
@@ -29,7 +31,7 @@ from avarch.models.validation import (
     ValidationReport,
 )
 from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
-from avarch.probe import normalize_probe, store_probe_result
+from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json

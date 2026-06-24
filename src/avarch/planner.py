@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import shlex
-import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-from sqlmodel import Session, select
+from typing import Any, Protocol
 
 from avarch.contracts import (
     EXECUTION_IDENTITY_HASH_CONTRACT,
@@ -19,7 +14,19 @@ from avarch.contracts import (
     VALIDATION_POLICY_HASH_CONTRACT,
     WORK_KEY_CONTRACT,
 )
-from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.domain.planning import (
+    TargetDimensionError,
+    TargetDimensions,
+)
+from avarch.domain.planning import (
+    calculate_target_dimensions as calculate_domain_target_dimensions,
+)
+from avarch.domain.profiles import (
+    ProfileMatchFacts,
+    ProfileMatchPolicy,
+    ProfileMatchResult,
+    evaluate_profile_match,
+)
 from avarch.models.plan import (
     AV1AN_COMMAND_CONTRACT_VERSION,
     FFMPEG_MUX_CONTRACT_VERSION,
@@ -43,9 +50,7 @@ from avarch.models.validation import (
     ExpectedSubtitlePolicy,
     ValidationPolicy,
 )
-from avarch.probe import ProbeError, parse_normalized_probe_json
 from avarch.profiles.models import EncodingProfile
-from avarch.profiles.registry import ResolvedProfile
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import (
     GENERATOR_VERSION,
@@ -53,7 +58,6 @@ from avarch.vapoursynth import (
     ResolvedVapourSynthTemplate,
     build_vapoursynth_identity_hash,
     resolve_vapoursynth_filter,
-    validate_script_syntax,
 )
 from avarch.vpy_env import VpyRequirements, build_runtime_identity, load_requirements
 from avarch.workspace import WorkspaceContext, WorkspaceError
@@ -63,30 +67,25 @@ class PlanningError(RuntimeError):
     pass
 
 
-class PlanArtifactConflictError(PlanningError):
-    pass
-
-
 @dataclass(frozen=True, slots=True)
 class PlanningContext:
-    media_file: MediaFile
-    probe_result: ProbeResult
+    media_file: PlanningMediaFile
+    probe_result: PlanningProbeResult
     normalized_probe: NormalizedProbe
     profile_name: str
     profile: EncodingProfile
 
 
-@dataclass(frozen=True, slots=True)
-class ProfileMatchResult:
-    matched: bool
-    reasons: tuple[str, ...]
+class PlanningMediaFile(Protocol):
+    id: int | None
+    path: str
+    size_bytes: int
+    fs_fingerprint: str
 
 
-@dataclass(frozen=True, slots=True)
-class TargetDimensions:
-    width: int
-    height: int
-    resize_required: bool
+class PlanningProbeResult(Protocol):
+    id: int | None
+    probe_hash: str
 
 
 SUPPORTED_AV1AN_VERSION_FAMILY = "0.5.x"
@@ -253,63 +252,6 @@ def finalize_promotion_policy(policy: PromotionPolicy) -> PromotionPolicy:
     return policy.model_copy(update={"policy_hash": build_promotion_policy_hash(policy)})
 
 
-def load_planning_context(
-    session: Session,
-    *,
-    input_path: Path,
-    resolved_profile: ResolvedProfile,
-) -> PlanningContext:
-    media_file = _get_media_file_for_input(session, input_path)
-    if media_file is None:
-        raise PlanningError("File is not present in the media inventory.")
-    if _status_value(media_file.status) == MediaFileStatus.MISSING.value:
-        raise PlanningError("File is marked missing in the media inventory.")
-    if media_file.latest_probe_id is None:
-        raise PlanningError("No canonical probe result exists for this file.")
-
-    probe_result = session.get(ProbeResult, media_file.latest_probe_id)
-    if probe_result is None:
-        raise PlanningError("The canonical probe result no longer exists.")
-    if probe_result.media_file_id != media_file.id:
-        raise PlanningError("The canonical probe belongs to another media file.")
-    if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
-        raise PlanningError(
-            "The canonical probe does not match the current filesystem fingerprint.\n"
-            "Run avarch probe for this file again."
-        )
-
-    try:
-        normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
-    except ProbeError as exc:
-        raise PlanningError(str(exc)) from exc
-    if not normalized_probe.video_streams:
-        raise PlanningError("The canonical probe contains no video stream.")
-
-    return PlanningContext(
-        media_file=media_file,
-        probe_result=probe_result,
-        normalized_probe=normalized_probe,
-        profile_name=resolved_profile.name,
-        profile=resolved_profile.profile,
-    )
-
-
-def _get_media_file_for_input(session: Session, input_path: Path) -> MediaFile | None:
-    resolved = input_path.resolve()
-    candidates = [str(resolved)]
-    try:
-        workspace = WorkspaceContext.discover(resolved.parent)
-        candidates.append(str(resolved.relative_to(workspace.root)))
-    except (WorkspaceError, ValueError):
-        pass
-
-    for candidate in dict.fromkeys(candidates):
-        media_file = session.exec(select(MediaFile).where(MediaFile.path == candidate)).first()
-        if media_file is not None:
-            return media_file
-    return None
-
-
 def _absolute_stored_media_path(value: str) -> Path:
     path = Path(value)
     if path.is_absolute():
@@ -321,29 +263,23 @@ def _absolute_stored_media_path(value: str) -> Path:
     return (workspace.root / path).resolve()
 
 
-def _status_value(status: MediaFileStatus | str) -> str:
-    if isinstance(status, MediaFileStatus):
-        return status.value
-    return status
-
-
 def match_profile(
     profile: EncodingProfile,
     probe: NormalizedProbe,
 ) -> ProfileMatchResult:
     if not probe.video_streams:
-        return ProfileMatchResult(False, ("no video stream",))
+        primary_video_codec = None
+    else:
+        primary_video = min(probe.video_streams, key=lambda stream: stream.index)
+        primary_video_codec = primary_video.codec
 
-    primary_video = min(probe.video_streams, key=lambda stream: stream.index)
-    if primary_video.codec is None:
-        return ProfileMatchResult(False, ("primary video codec is missing",))
-
-    source_codec = primary_video.codec.strip().lower()
-    blocked_codecs = {codec.strip().lower() for codec in profile.match.video_codec_not}
-    if source_codec in blocked_codecs:
-        return ProfileMatchResult(False, (f"video codec is excluded: {source_codec}",))
-
-    return ProfileMatchResult(True, ())
+    return evaluate_profile_match(
+        ProfileMatchFacts(
+            has_video_stream=bool(probe.video_streams),
+            primary_video_codec=primary_video_codec,
+        ),
+        ProfileMatchPolicy(excluded_video_codecs=frozenset(profile.match.video_codec_not)),
+    )
 
 
 def select_video(
@@ -391,34 +327,14 @@ def calculate_target_dimensions(
     source_height: int,
     max_width: int,
 ) -> TargetDimensions:
-    if source_width <= 0:
-        raise PlanningError("Source width must be positive.")
-    if source_height <= 0:
-        raise PlanningError("Source height must be positive.")
-    if max_width <= 0:
-        raise PlanningError("Profile max_width must be positive.")
-    if max_width % 2 != 0:
-        raise PlanningError("Profile max_width must be even.")
-
-    candidate_width = min(source_width, max_width)
-    target_width = candidate_width - candidate_width % 2
-    if target_width < 2:
-        raise PlanningError("Target width must be at least 2.")
-
-    if target_width == source_width:
-        target_height = source_height - source_height % 2
-    else:
-        numerator = source_height * target_width
-        target_height = ((numerator + source_width) // (2 * source_width)) * 2
-
-    if target_height < 2:
-        raise PlanningError("Target height must be at least 2.")
-
-    return TargetDimensions(
-        width=target_width,
-        height=target_height,
-        resize_required=target_width != source_width or target_height != source_height,
-    )
+    try:
+        return calculate_domain_target_dimensions(
+            source_width=source_width,
+            source_height=source_height,
+            max_width=max_width,
+        )
+    except TargetDimensionError as exc:
+        raise PlanningError(str(exc)) from exc
 
 
 def select_audio(
@@ -546,7 +462,8 @@ def build_plan(
         reasons = ", ".join(match.reasons)
         raise PlanningError(f"Profile does not apply to this file: {reasons}")
 
-    if context.media_file.id is None:
+    media_file_id = context.media_file.id
+    if media_file_id is None:
         raise PlanningError("Media file must be persisted before planning.")
 
     profile_template = _profile_template_path(context.profile)
@@ -611,7 +528,7 @@ def build_plan(
         input_path=input_path,
         output_path=paths.output_path,
         temp_dir=paths.work_dir,
-        media_file_id=context.media_file.id,
+        media_file_id=media_file_id,
         source_fs_fingerprint=source_fs_fingerprint,
         profile_name=context.profile_name,
         profile_hash=profile_hash,
@@ -767,146 +684,6 @@ def _workspace_for_data_dir(data_dir: Path) -> WorkspaceContext | None:
         return WorkspaceContext.discover(resolved)
     except WorkspaceError:
         return None
-
-
-def write_plan_artifacts(
-    *,
-    plan: TranscodePlan,
-    vapoursynth_script: str,
-    user_filter: ResolvedVapourSynthFilter | None = None,
-    template: ResolvedVapourSynthTemplate | None = None,
-) -> PlanArtifactPaths:
-    if plan.vapoursynth.mode == "custom_template" and template is None:
-        raise PlanningError("custom template plans must snapshot the resolved template")
-    if plan.vapoursynth.mode != "custom_template" and template is not None:
-        raise PlanningError("template snapshot was provided for a non-template plan")
-    validate_script_syntax(vapoursynth_script)
-    paths = plan.artifacts
-    artifact_dir = paths.artifact_dir
-    parent = artifact_dir.parent
-    parent.mkdir(parents=True, exist_ok=True)
-
-    artifact_payloads = _artifact_payloads(
-        plan,
-        vapoursynth_script=vapoursynth_script,
-        user_filter=user_filter,
-        template=template,
-    )
-    if artifact_dir.exists():
-        if _artifact_dir_matches(artifact_payloads, artifact_dir):
-            return paths
-        raise PlanArtifactConflictError(f"Plan artifact bundle already exists: {artifact_dir}")
-
-    temp_dir = Path(
-        tempfile.mkdtemp(
-            prefix=f".{artifact_dir.name}.tmp-",
-            dir=parent,
-        )
-    )
-    try:
-        for relative_path, content in artifact_payloads.items():
-            path = temp_dir / relative_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8", newline="\n") as output_file:
-                output_file.write(content)
-                output_file.flush()
-                os.fsync(output_file.fileno())
-        os.replace(temp_dir, artifact_dir)
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-
-    return paths
-
-
-def _artifact_payloads(
-    plan: TranscodePlan,
-    *,
-    vapoursynth_script: str,
-    user_filter: ResolvedVapourSynthFilter | None = None,
-    template: ResolvedVapourSynthTemplate | None = None,
-) -> dict[str, str]:
-    payloads = {
-        "plan.json": canonical_json(plan) + "\n",
-        plan.artifacts.vapoursynth_script.name: vapoursynth_script,
-        "av1an.command.json": canonical_json(plan.av1an) + "\n",
-        "validation-policy.json": canonical_json(plan.validation) + "\n",
-        "vpy/environment-lock.toml": _environment_lock_payload(plan),
-        "vpy/snapshot.json": _vpy_snapshot_payload(plan),
-    }
-    if user_filter is not None:
-        payloads["vpy/user_filter.py"] = user_filter.text
-    if template is not None:
-        payloads["vpy/custom_template.vpy"] = template.text
-    return payloads
-
-
-def _environment_lock_payload(plan: TranscodePlan) -> str:
-    manifest_hash = plan.vapoursynth.environment_manifest_hash or "unknown"
-    vapoursynth_version = plan.vapoursynth.vapoursynth_version or "unknown"
-    lines = [
-        "schema_version = 1",
-        f'environment_id = "{_toml_escape(plan.vapoursynth.environment_id or "unknown")}"',
-        f'avarch_image_digest = "{_toml_escape(plan.vapoursynth.avarch_image_digest)}"',
-        f'manifest_hash = "{_toml_escape(manifest_hash)}"',
-        f'python_version = "{_toml_escape(plan.vapoursynth.python_version or "unknown")}"',
-        f'python_abi = "{_toml_escape(plan.vapoursynth.python_abi or "unknown")}"',
-        f'platform = "{_toml_escape(plan.vapoursynth.runtime_platform or "unknown")}"',
-        f'vapoursynth_version = "{_toml_escape(vapoursynth_version)}"',
-        "",
-    ]
-    for namespace, digest in sorted(plan.vapoursynth.native_plugin_hashes.items()):
-        lines.extend(
-            (
-                "[[plugins]]",
-                f'namespace = "{_toml_escape(namespace)}"',
-                f'sha256 = "{_toml_escape(digest)}"',
-                "",
-            )
-        )
-    return "\n".join(lines)
-
-
-def _vpy_snapshot_payload(plan: TranscodePlan) -> str:
-    payload = {
-        "avarch_image_digest": plan.vapoursynth.avarch_image_digest,
-        "environment_id": plan.vapoursynth.environment_id,
-        "environment_manifest_hash": plan.vapoursynth.environment_manifest_hash,
-        "filter_api_version": plan.vapoursynth.filter_api_version,
-        "filter_entrypoint": plan.vapoursynth.filter_entrypoint,
-        "filter_hash": plan.vapoursynth.filter_hash,
-        "generator_version": plan.vapoursynth.generator_version,
-        "mode": plan.vapoursynth.mode,
-        "native_plugin_hashes": plan.vapoursynth.native_plugin_hashes,
-        "plan_hash": plan.plan_hash,
-        "profile_hash": plan.profile_hash,
-        "template_api_version": plan.vapoursynth.template_api_version,
-        "template_hash": plan.vapoursynth.template_hash,
-        "vapoursynth_identity_hash": plan.vapoursynth.identity_hash,
-        "vapoursynth_version": plan.vapoursynth.vapoursynth_version,
-    }
-    return canonical_json(payload) + "\n"
-
-
-def _toml_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _artifact_dir_matches(payloads: dict[str, str], artifact_dir: Path) -> bool:
-    if not artifact_dir.is_dir():
-        return False
-    existing = {
-        str(path.relative_to(artifact_dir)) for path in artifact_dir.rglob("*") if path.is_file()
-    }
-    if existing != set(payloads):
-        return False
-    for relative_path, expected_content in payloads.items():
-        path = artifact_dir / relative_path
-        if not path.is_file():
-            return False
-        if path.read_text(encoding="utf-8") != expected_content:
-            return False
-    return True
 
 
 def _primary_video(streams: list[VideoStream]) -> VideoStream:

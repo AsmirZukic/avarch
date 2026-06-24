@@ -1699,6 +1699,9 @@ any differences caused by locally installed media-tool versions and plugins.
 
 ## Architecture
 
+The adopted architectural contract for new code and the planned structural refactor lives in
+[docs/architecture.md](docs/architecture.md).
+
 ```text
 Media files
 		|

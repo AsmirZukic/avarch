@@ -8,9 +8,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.migrations import migration_project_root, upgrade_database
 from avarch.contracts import ALEMBIC_BASELINE_REVISION, ALEMBIC_HEAD_REVISION
-from avarch.db import create_db_engine
-from avarch.db_migrations import migration_project_root, upgrade_database
 
 
 def test_repository_contains_migration_revisions() -> None:
@@ -67,7 +67,7 @@ def test_promotion_target_lock_revision_depends_on_job_outcome_reason() -> None:
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -88,7 +88,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
 
 
 def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -115,7 +115,7 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
 
 
 def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -172,7 +172,7 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -185,7 +185,7 @@ def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
 
 
 def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -225,7 +225,7 @@ def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Pa
 
 
 def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
     config = _alembic_config(database_url)
 
     command.upgrade(config, "head")
@@ -237,7 +237,7 @@ def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
 
 
 def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
     config = _alembic_config(database_url)
 
     command.upgrade(config, ALEMBIC_BASELINE_REVISION)
@@ -251,7 +251,7 @@ def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
 
 
 def test_upgrade_adds_job_outcome_reason(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -262,7 +262,7 @@ def test_upgrade_adds_job_outcome_reason(tmp_path: Path) -> None:
 
 
 def test_upgrade_adds_promotion_target_lock_key(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 

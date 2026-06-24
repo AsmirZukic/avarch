@@ -9,7 +9,7 @@ from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 def test_default_config_has_sqlite_database() -> None:
     config = AppConfig()
 
-    assert config.database.url == "sqlite:///data/avarch.db"
+    assert config.database.url == "sqlite:///data/avarch.adapters.sqlite.db"
 
 
 def test_default_config_uses_workspace_data_dir() -> None:

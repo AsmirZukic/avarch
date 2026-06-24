@@ -13,38 +13,31 @@ from typing import Annotated, Literal
 
 import structlog
 import typer
-from pydantic import ValidationError
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from avarch import __version__
-from avarch.config import (
-    WORKSPACE_CONFIG_TEXT,
-    AppConfig,
-    load_config,
-    resolve_data_dir,
-    resolve_database_url,
+from avarch.adapters.filesystem.plans import (
+    PlanArtifactConflictError,
+    PlanArtifactLoadError,
+    load_plan_artifact,
+    validation_report_path_for_plan_artifact,
+    write_plan_artifacts,
 )
-from avarch.db import (
+from avarch.adapters.sqlite.db import (
     UnsupportedDatabaseSchemaError,
     create_db_engine,
     verify_database_revision,
 )
-from avarch.db_migrations import get_current_revision, upgrade_database
-from avarch.execution import (
-    build_av1an_command,
-    build_ffmpeg_mux_command,
-    create_mux_temporary_path,
-    execute_plan,
-)
-from avarch.inventory import (
+from avarch.adapters.sqlite.inventory import (
     active_inventory_files_with_missing_or_stale_probe,
     probe_is_missing_or_stale,
     select_inventory_files,
+    update_inventory,
 )
-from avarch.logging import configure_logging
-from avarch.models.db import (
+from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_database
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     JobEvent,
@@ -53,28 +46,48 @@ from avarch.models.db import (
     MediaPlan,
     ProbeResult,
     PromotionRecord,
-    ValidationResult,
 )
+from avarch.adapters.sqlite.planning import (
+    current_plan_for_file,
+    eligible_files_for_planning,
+    equivalent_current_plan_exists,
+    find_plan,
+    load_planning_context,
+    persist_media_plan,
+)
+from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
+from avarch.adapters.sqlite.promotions import has_completed_promotion
+from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
+from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.adapters.sqlite.validations import latest_validation
+from avarch.config import (
+    WORKSPACE_CONFIG_TEXT,
+    AppConfig,
+    load_config,
+    resolve_data_dir,
+)
+from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
+from avarch.execution import (
+    build_av1an_command,
+    build_ffmpeg_mux_command,
+    create_mux_temporary_path,
+    execute_plan,
+)
+from avarch.logging import configure_logging
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
-from avarch.models.promotion import PromotionMode, PromotionStatus
-from avarch.models.scheduler import JobOutcomeReason, JobStage, JobStatus
+from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
 from avarch.planner import (
-    PlanArtifactConflictError,
     PlanningError,
     build_plan,
-    load_planning_context,
-    write_plan_artifacts,
 )
 from avarch.probe import (
     ProbeError,
     format_probe_summary,
-    get_canonical_probe_result,
     normalize_probe,
     parse_normalized_probe_json,
     run_ffprobe,
-    store_probe_result,
 )
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import (
@@ -90,7 +103,7 @@ from avarch.promoter import (
     recover_promotion,
     validate_promotion_preflight,
 )
-from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
+from avarch.scanner import ScanError, ScanResult, scan_root
 from avarch.scheduler import (
     MAX_CLI_LOG_TAIL_BYTES,
     JobControlError,
@@ -469,7 +482,7 @@ def files_show(
             typer.echo("File is not present in the media inventory.")
             raise typer.Exit(1)
         probe_result = get_canonical_probe_result(session, media_file)
-        current_plan = _current_plan_for_file(session, media_file)
+        current_plan = current_plan_for_file(session, media_file)
 
     typer.echo(f"File:       {_display_media_path(media_file, workspace_root)}")
     typer.echo(f"Status:     {_status_value(media_file.status)}")
@@ -579,7 +592,7 @@ def plans_show(
     _upgrade_database_or_exit(database_url)
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        plan = _find_plan(session, plan_id)
+        plan = find_plan(session, plan_id)
         if plan is None:
             typer.echo(f"Plan not found: {plan_id}")
             raise typer.Exit(1)
@@ -1288,7 +1301,7 @@ def jobs_validate(
         if job.status == JobStatus.RUNNING:
             typer.echo("Validation cannot run while the job is running.")
             raise typer.Exit(1)
-        existing = _canonical_validation(session, job)
+        existing = latest_validation(session, job)
         if (
             job.status == JobStatus.VALIDATED
             and job.stage == JobStage.PROMOTE
@@ -1492,12 +1505,20 @@ def inspect_file(
     _upgrade_database_or_exit(database_url)
 
     file_path = _resolve_media_path(file)
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        media_file = _get_media_file(session, file_path)
-        if media_file is None:
+        selection = select_inventory_files(
+            session,
+            file_selectors=[file_path],
+            workspace_root=workspace_root,
+            resolve_path=_resolve_media_path,
+            active_only=False,
+        )
+        if selection.missing or not selection.selected:
             _echo_untracked_file()
             raise typer.Exit(1)
+        media_file = selection.selected[0]
         if media_file.id is None:
             typer.echo("File is not present in the media inventory.")
             raise typer.Exit(1)
@@ -1528,13 +1549,21 @@ def validate_file(
 
     output_path = _resolve_media_path(output)
     source_path = _resolve_media_path(against)
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
 
     with Session(engine) as session:
-        media_file = _get_media_file(session, source_path)
-        if media_file is None:
+        selection = select_inventory_files(
+            session,
+            file_selectors=[source_path],
+            workspace_root=workspace_root,
+            resolve_path=_resolve_media_path,
+            active_only=False,
+        )
+        if selection.missing or not selection.selected:
             _echo_untracked_file()
             raise typer.Exit(1)
+        media_file = selection.selected[0]
         jobs = list(
             session.exec(
                 select(Job).where(
@@ -1555,7 +1584,7 @@ def validate_file(
         if job.status == JobStatus.RUNNING:
             typer.echo("Validation cannot run while the job is running.")
             raise typer.Exit(1)
-        existing = _canonical_validation(session, job)
+        existing = latest_validation(session, job)
         if (
             job.status == JobStatus.VALIDATED
             and job.stage == JobStage.PROMOTE
@@ -1566,7 +1595,7 @@ def validate_file(
             typer.echo(format_validation_report_summary(report, reused=True))
             typer.echo("")
             typer.echo("Structured report:")
-            report_path = _report_path_for_job(engine, job_id)
+            report_path = validation_report_path_for_plan_artifact(job.plan_path)
             typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
             return
         eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
@@ -1607,7 +1636,7 @@ def validate_file(
     typer.echo(format_validation_report_summary(report))
     typer.echo("")
     typer.echo("Structured report:")
-    report_path = _report_path_for_job(engine, job_id)
+    report_path = validation_report_path_for_plan_artifact(job.plan_path)
     typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
     if not report.passed:
         raise typer.Exit(1)
@@ -1669,23 +1698,15 @@ def promote_job(
                 typer.echo("Job has no plan artifact.")
                 raise typer.Exit(1)
             try:
-                plan = TranscodePlan.model_validate_json(
-                    Path(job.plan_path).read_text(encoding="utf-8")
-                )
-            except (OSError, ValidationError, ValueError) as exc:
+                plan = load_plan_artifact(Path(job.plan_path))
+            except PlanArtifactLoadError as exc:
                 typer.echo("Job plan artifact is not usable. Regenerate the plan for this job.")
                 raise typer.Exit(1) from exc
-            validation = _canonical_validation(session, job)
+            validation = latest_validation(session, job)
             if validation is None:
                 typer.echo("Job has no current validation result.")
                 raise typer.Exit(1)
-            completed = session.exec(
-                select(PromotionRecord).where(
-                    PromotionRecord.job_id == job_id,
-                    PromotionRecord.status == PromotionStatus.COMPLETED,
-                )
-            ).first()
-            if completed is not None:
+            if has_completed_promotion(session, job):
                 typer.echo("Job already has a completed promotion.")
                 raise typer.Exit(1)
             preflight = validate_promotion_preflight(
@@ -1776,7 +1797,7 @@ def plan_file(
                 raise typer.Exit(1)
             media_files = list(selection.selected)
         else:
-            media_files = _eligible_files_for_planning(session)
+            media_files = eligible_files_for_planning(session)
         selected = len(media_files)
 
     for media_file in media_files:
@@ -1818,7 +1839,7 @@ def plan_file(
                     resolved_template=resolved_template,
                     resolved_filter=resolved_filter,
                 )
-                if not force and _equivalent_current_plan_exists(
+                if not force and equivalent_current_plan_exists(
                     session,
                     media_file_id=stored_media_file.id,
                     probe_hash=plan.probe_hash,
@@ -1850,7 +1871,7 @@ def plan_file(
                 )
                 runtime_checked = True
             with Session(engine) as session, session.begin():
-                _persist_media_plan(session, plan=plan, now=_utc_now())
+                persist_media_plan(session, plan=plan, now=_utc_now())
             processed += 1
             _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
         except PlanArtifactConflictError as exc:
@@ -2137,30 +2158,11 @@ def _validate_filter_entrypoint(script: str, entrypoint: str) -> None:
                     f"VapourSynth filter entrypoint must be synchronous: {entrypoint}"
                 )
             return
-    raise VapourSynthScriptPathError(
-        f"VapourSynth filter entrypoint was not found: {entrypoint}"
-    )
+    raise VapourSynthScriptPathError(f"VapourSynth filter entrypoint was not found: {entrypoint}")
 
 
 def _resolve_media_path(path: Path) -> Path:
     return _resolve_cli_path(path).resolve()
-
-
-def _get_media_file(session: Session, path: Path) -> MediaFile | None:
-    statement = select(MediaFile).where(MediaFile.path == str(path))
-    media_file = session.exec(statement).first()
-    if media_file is not None:
-        return media_file
-    try:
-        workspace = WorkspaceContext.discover(path.parent)
-    except WorkspaceError:
-        return None
-    try:
-        relative_path = str(path.resolve().relative_to(workspace.root))
-    except ValueError:
-        return None
-    statement = select(MediaFile).where(MediaFile.path == relative_path)
-    return session.exec(statement).first()
 
 
 def _absolute_media_path(media_file: MediaFile, workspace_root: Path) -> Path:
@@ -2172,173 +2174,6 @@ def _absolute_media_path(media_file: MediaFile, workspace_root: Path) -> Path:
 
 def _display_media_path(media_file: MediaFile, workspace_root: Path) -> str:
     return str(_absolute_media_path(media_file, workspace_root))
-
-
-def _eligible_files_for_planning(session: Session) -> list[MediaFile]:
-    media_files = list(
-        session.exec(
-            select(MediaFile)
-            .where(MediaFile.status != MediaFileStatus.MISSING)
-            .order_by(MediaFile.path)
-        ).all()
-    )
-    eligible: list[MediaFile] = []
-    for media_file in media_files:
-        if media_file.latest_probe_id is None:
-            continue
-        probe_result = session.get(ProbeResult, media_file.latest_probe_id)
-        if probe_result is None:
-            continue
-        if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
-            continue
-        eligible.append(media_file)
-    return eligible
-
-
-def _equivalent_current_plan_exists(
-    session: Session,
-    *,
-    media_file_id: int | None,
-    probe_hash: str,
-    profile_hash: str,
-    execution_identity_hash: str,
-) -> bool:
-    if media_file_id is None:
-        return False
-    return (
-        session.exec(
-            select(MediaPlan).where(
-                MediaPlan.media_file_id == media_file_id,
-                MediaPlan.probe_hash == probe_hash,
-                MediaPlan.profile_hash == profile_hash,
-                MediaPlan.execution_identity_hash == execution_identity_hash,
-                MediaPlan.is_current == True,  # noqa: E712
-                MediaPlan.is_valid == True,  # noqa: E712
-            )
-        ).first()
-        is not None
-    )
-
-
-def _persist_media_plan(session: Session, *, plan: TranscodePlan, now: datetime) -> MediaPlan:
-    existing = session.exec(select(MediaPlan).where(MediaPlan.plan_hash == plan.plan_hash)).first()
-    if existing is not None:
-        existing.is_current = True
-        existing.is_valid = True
-        existing.superseded_at = None
-        session.add(existing)
-        _supersede_other_current_plans(session, plan=plan, keep_plan_id=existing.id, now=now)
-        return existing
-
-    probe_result = session.exec(
-        select(ProbeResult).where(
-            ProbeResult.media_file_id == plan.media_file_id,
-            ProbeResult.probe_hash == plan.probe_hash,
-        )
-    ).first()
-    if probe_result is None or probe_result.id is None:
-        raise PlanningError("The planned probe result no longer exists.")
-
-    media_plan = MediaPlan(
-        media_file_id=plan.media_file_id,
-        probe_result_id=probe_result.id,
-        profile_name=plan.profile_name,
-        profile_hash=plan.profile_hash,
-        probe_hash=plan.probe_hash,
-        source_fs_fingerprint=plan.source_fs_fingerprint,
-        execution_identity_hash=plan.execution_identity.identity_hash,
-        plan_hash=plan.plan_hash,
-        plan_path=str(plan.artifacts.plan_json),
-        output_path=str(plan.output_path),
-        is_current=True,
-        is_valid=True,
-        created_at=now,
-    )
-    session.add(media_plan)
-    session.flush()
-    _supersede_other_current_plans(session, plan=plan, keep_plan_id=media_plan.id, now=now)
-    return media_plan
-
-
-def _supersede_other_current_plans(
-    session: Session,
-    *,
-    plan: TranscodePlan,
-    keep_plan_id: int | None,
-    now: datetime,
-) -> None:
-    plans = list(
-        session.exec(
-            select(MediaPlan).where(
-                MediaPlan.media_file_id == plan.media_file_id,
-                MediaPlan.profile_name == plan.profile_name,
-                MediaPlan.is_current == True,  # noqa: E712
-            )
-        ).all()
-    )
-    for media_plan in plans:
-        if media_plan.id == keep_plan_id:
-            continue
-        media_plan.is_current = False
-        media_plan.superseded_at = now
-        session.add(media_plan)
-
-
-def _current_plan_for_file(session: Session, media_file: MediaFile) -> MediaPlan | None:
-    if media_file.id is None:
-        return None
-    return session.exec(
-        select(MediaPlan)
-        .where(
-            MediaPlan.media_file_id == media_file.id,
-            MediaPlan.is_current == True,  # noqa: E712
-            MediaPlan.is_valid == True,  # noqa: E712
-        )
-        .order_by(col(MediaPlan.created_at).desc(), col(MediaPlan.id).desc())
-    ).first()
-
-
-def _select_plans_for_enqueue(
-    session: Session,
-    *,
-    file_selectors: list[Path] | None,
-    plan_selectors: list[str] | None,
-    workspace_root: Path,
-) -> list[MediaPlan]:
-    if file_selectors and plan_selectors:
-        raise ValueError("Use either --file or --plan selectors, not both.")
-    if plan_selectors:
-        plans: dict[int, MediaPlan] = {}
-        for selector in plan_selectors:
-            plan = _find_plan(session, selector)
-            if plan is None:
-                raise ValueError(f"Plan not found: {selector}")
-            if plan.id is not None:
-                plans.setdefault(plan.id, plan)
-        return sorted(plans.values(), key=lambda item: (item.created_at, item.id or 0))
-    if file_selectors:
-        selection = select_inventory_files(
-            session,
-            file_selectors=file_selectors,
-            workspace_root=workspace_root,
-            resolve_path=_resolve_media_path,
-        )
-        if selection.missing:
-            raise ValueError(f"File is not present in the media inventory: {selection.missing[0]}")
-        file_plans = [
-            _current_plan_for_file(session, media_file) for media_file in selection.selected
-        ]
-        return [plan for plan in file_plans if plan is not None]
-    return list(
-        session.exec(
-            select(MediaPlan)
-            .where(
-                MediaPlan.is_current == True,  # noqa: E712
-                MediaPlan.is_valid == True,  # noqa: E712
-            )
-            .order_by(col(MediaPlan.created_at).asc(), col(MediaPlan.id).asc())
-        ).all()
-    )
 
 
 def _enqueue_selected_plans(
@@ -2353,84 +2188,20 @@ def _enqueue_selected_plans(
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
         try:
-            selected_plans = _select_plans_for_enqueue(
+            selected_plans = select_plans_for_enqueue(
                 session,
                 file_selectors=file_selectors,
                 plan_selectors=plan_selectors,
                 workspace_root=workspace_root,
+                resolve_path=_resolve_media_path,
             )
         except ValueError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
         plan_hashes = [plan.plan_hash for plan in selected_plans]
-        summary = _enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
+        summary = enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
 
     return len(selected_plans), summary, plan_hashes
-
-
-def _find_plan(session: Session, selector: str) -> MediaPlan | None:
-    if selector.isdecimal():
-        plan = session.get(MediaPlan, int(selector))
-        if plan is not None:
-            return plan
-    return session.exec(select(MediaPlan).where(MediaPlan.plan_hash == selector)).first()
-
-
-def _enqueue_plans(
-    session: Session,
-    plans: list[MediaPlan],
-    *,
-    priority: int,
-    now: datetime,
-) -> dict[str, int]:
-    created = 0
-    already_queued = 0
-    already_done = 0
-    stale = 0
-    for plan in plans:
-        media_file = session.get(MediaFile, plan.media_file_id)
-        if media_file is None or _status_value(media_file.status) == MediaFileStatus.MISSING.value:
-            stale += 1
-            continue
-        if media_file.fs_fingerprint != plan.source_fs_fingerprint:
-            stale += 1
-            continue
-        queue_key = plan.plan_hash
-        existing = session.exec(select(Job).where(Job.queue_key == queue_key)).first()
-        if existing is not None:
-            if existing.status in {JobStatus.COMPLETED, JobStatus.VALIDATED}:
-                already_done += 1
-            else:
-                already_queued += 1
-            continue
-        session.add(
-            Job(
-                media_file_id=plan.media_file_id,
-                profile_name=plan.profile_name,
-                profile_hash=plan.profile_hash,
-                source_fs_fingerprint=plan.source_fs_fingerprint,
-                queue_key=queue_key,
-                probe_result_id=plan.probe_result_id,
-                probe_hash=plan.probe_hash,
-                plan_hash=plan.plan_hash,
-                plan_path=plan.plan_path,
-                output_path=plan.output_path,
-                status=JobStatus.PENDING,
-                stage=JobStage.ENCODE,
-                priority=priority,
-                attempts=0,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        created += 1
-    return {
-        "created": created,
-        "skipped": already_queued + already_done + stale,
-        "already_queued": already_queued,
-        "already_done": already_done,
-        "stale": stale,
-    }
 
 
 def _echo_pipeline_summary(
@@ -2858,9 +2629,7 @@ def vpy_packages_search(
     result = subprocess.run([vsrepo, "available"], capture_output=True, text=True, check=False)
     if result.stdout:
         query_folded = query.casefold()
-        matches = [
-            line for line in result.stdout.splitlines() if query_folded in line.casefold()
-        ]
+        matches = [line for line in result.stdout.splitlines() if query_folded in line.casefold()]
         typer.echo("\n".join(matches) if matches else "No matching VSRepo packages.")
     if result.stderr:
         typer.echo(result.stderr.rstrip(), err=True)
@@ -3310,31 +3079,6 @@ def _truncate_line(value: str, *, max_length: int = 120) -> str:
     return f"{line[: max_length - 3]}..."
 
 
-def _canonical_validation(session: Session, job: Job) -> ValidationResult | None:
-    if job.latest_validation_id is None:
-        return None
-    result = session.get(ValidationResult, job.latest_validation_id)
-    if result is None or result.job_id != job.id:
-        return None
-    if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
-        return None
-    return result
-
-
-def _report_path_for_job(engine: Engine, job_id: int) -> Path | None:
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-        if job is None or job.plan_path is None:
-            return None
-        try:
-            plan = TranscodePlan.model_validate_json(
-                Path(job.plan_path).read_text(encoding="utf-8")
-            )
-        except (OSError, ValidationError, ValueError):
-            return None
-        return plan.runtime.validation_report
-
-
 def _echo_encode_dry_run(plan: TranscodePlan) -> None:
     mux_temporary_path = create_mux_temporary_path(plan.output_path)
     try:
@@ -3474,15 +3218,9 @@ def _profile_document_to_toml(document: ProfileDocument) -> str:
             f"keep_forced = {_toml_bool(document.subtitles.keep_forced)}",
             "",
             "[validation]",
-            (
-                "duration_tolerance_seconds = "
-                f"{document.validation.duration_tolerance_seconds:g}"
-            ),
+            (f"duration_tolerance_seconds = {document.validation.duration_tolerance_seconds:g}"),
             f"minimum_output_bytes = {document.validation.minimum_output_bytes}",
-            (
-                "minimum_output_source_ratio = "
-                f"{document.validation.minimum_output_source_ratio:g}"
-            ),
+            (f"minimum_output_source_ratio = {document.validation.minimum_output_source_ratio:g}"),
             f"decode_sample = {_toml_bool(document.validation.decode_sample)}",
             f"decode_sample_seconds = {document.validation.decode_sample_seconds:g}",
         )

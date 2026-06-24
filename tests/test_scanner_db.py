@@ -7,9 +7,10 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import MediaFile, MediaFileStatus
-from avarch.scanner import ScanError, ScanResult, create_file_snapshot, scan_root, update_inventory
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.inventory import update_inventory
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus
+from avarch.scanner import ScanError, ScanResult, create_file_snapshot, scan_root
 
 
 def test_initial_scan_inserts_media_files(tmp_path: Path) -> None:
@@ -237,7 +238,7 @@ def test_failed_traversal_does_not_mark_files_missing(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path) -> Engine:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

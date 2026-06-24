@@ -7,10 +7,10 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.job_lifecycle import JobTransitionError, transition_job
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
-from avarch.models.scheduler import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
+from avarch.adapters.sqlite.models import Job, JobAttempt, MediaFile, MediaFileStatus
+from avarch.domain.jobs import (
     AttemptStatus,
     JobOutcomeReason,
     JobStage,
@@ -258,7 +258,7 @@ def _stored_job(
     stage: JobStage = JobStage.PROBE,
     started_at: datetime | None = None,
 ) -> tuple[Engine, int]:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     with Session(engine) as session:

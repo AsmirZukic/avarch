@@ -5,10 +5,11 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.scheduler import build_queue_key, find_existing_queue_job
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.queue import find_existing_queue_job
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.scheduler import build_queue_key
 
 
 def test_queue_key_is_deterministic(tmp_path: Path) -> None:
@@ -55,7 +56,7 @@ def test_null_probe_hash_is_distinct_from_real_probe_hash(tmp_path: Path) -> Non
 
 
 def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     queue_key = _queue_key(tmp_path)

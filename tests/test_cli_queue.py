@@ -7,11 +7,19 @@ import pytest
 from sqlmodel import Session
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import (
+    Job,
+    JobAttempt,
+    MediaFile,
+    MediaFileStatus,
+    MediaPlan,
+    ProbeResult,
+)
+from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus, MediaPlan, ProbeResult
-from avarch.models.scheduler import (
+from avarch.config import load_config
+from avarch.domain.jobs import (
     AttemptStatus,
     JobOutcomeReason,
     JobStage,

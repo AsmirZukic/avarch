@@ -5,20 +5,22 @@ import hashlib
 import os
 import socket
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
 from sqlmodel import Session, col, select
 
-from avarch.config import AppConfig
-from avarch.contracts import QUEUE_CONTRACT
-from avarch.db import create_db_engine
-from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
-from avarch.models.db import (
+from avarch.adapters.filesystem.plans import (
+    PlanArtifactConflictError,
+    PlanArtifactLoadError,
+    load_plan_artifact,
+    write_plan_artifacts,
+)
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     JobEvent,
@@ -28,46 +30,64 @@ from avarch.models.db import (
     SchedulerState,
     ValidationResult,
 )
-from avarch.models.execution import ExecutionError, ExecutionInterruptedError
-from avarch.models.plan import TranscodePlan
-from avarch.models.scheduler import (
+from avarch.adapters.sqlite.planning import load_planning_context
+from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
+from avarch.adapters.sqlite.promotions import has_completed_promotion
+from avarch.adapters.sqlite.queue import (
+    QueueSelectionError,
+    claimable_jobs,
+    find_existing_queue_job,
+    select_queue_jobs,
+)
+from avarch.adapters.sqlite.rejection_cleanup import (
+    RejectedOutputCleanupError,
+    cleanup_rejected_output,
+)
+from avarch.adapters.sqlite.validations import (
+    latest_validation,
+    persist_validation_result,
+)
+from avarch.config import AppConfig
+from avarch.contracts import QUEUE_CONTRACT
+from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
     JobStage,
     JobStatus,
-    ResourceClass,
-    SchedulerMode,
 )
+from avarch.domain.scheduler import (
+    ResourceCapacity,
+    SchedulerMode,
+    has_resource_capacity,
+    resource_for_stage,
+)
+from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
+from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
+from avarch.models.execution import ExecutionError, ExecutionInterruptedError
+from avarch.models.plan import TranscodePlan
 from avarch.planner import (
-    PlanArtifactConflictError,
     PlanningError,
     build_execution_identity,
     build_plan,
     build_profile_hash,
-    load_planning_context,
     match_profile,
-    write_plan_artifacts,
 )
 from avarch.probe import (
     ProbeError,
     build_ffprobe_command,
-    get_canonical_probe_result,
     normalize_probe,
     run_ffprobe,
-    store_probe_result,
 )
 from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
 from avarch.promoter import promote_job, recover_promotion
-from avarch.rejection_cleanup import RejectedOutputCleanupError, cleanup_rejected_output
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
-from avarch.size_policy import SizeDecision, evaluate_size_policy
 from avarch.validation import (
     ValidationError as OutputValidationError,
 )
 from avarch.validation import (
+    failed_check_summary,
     failed_required_check_names,
-    persist_validation_result,
     validate_output,
 )
 from avarch.vapoursynth import (
@@ -233,14 +253,6 @@ def build_queue_key(
     )
     payload = f"{QUEUE_CONTRACT}\0".encode() + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
-
-
-def find_existing_queue_job(
-    session: Session,
-    *,
-    queue_key: str,
-) -> Job | None:
-    return session.exec(select(Job).where(Job.queue_key == queue_key)).first()
 
 
 def enqueue_inventory(
@@ -730,12 +742,14 @@ async def execute_validation_job(
     now = utc_now()
     with Session(engine) as session, session.begin():
         job = _require_job(session, job_id)
+        existing_validation = latest_validation(session, job)
         if (
             job.status == JobStatus.VALIDATED
             and job.stage == JobStage.PROMOTE
-            and _latest_validation_passed(session, job)
+            and existing_validation is not None
+            and existing_validation.passed
         ):
-            return session.get(ValidationResult, job.latest_validation_id)
+            return existing_validation
         attempt = claim_job_stage(session, job_id=job_id, runner_id=runner_id, now=now)
         attempt_id = _require_id(attempt)
         try:
@@ -785,11 +799,14 @@ async def execute_validation_job(
             _cancel_claimed_job(session, job=job, attempt=attempt, now=utc_now())
             return None
         attempt = _require_attempt(session, attempt_id)
+        failed_checks = failed_required_check_names(report)
         result = persist_validation_result(
             session,
             job=job,
             attempt=attempt,
             report=report,
+            failed_checks=failed_checks,
+            failed_summary=failed_check_summary(report),
         )
         if report.passed:
             _apply_size_policy_after_validation(
@@ -807,7 +824,7 @@ async def execute_validation_job(
                 "report_path": str(plan.runtime.validation_report),
                 "plan_hash": report.plan_hash,
                 "policy_hash": report.policy_hash,
-                "failed_checks": failed_required_check_names(report),
+                "failed_checks": failed_checks,
             }
         )
         session.add(attempt)
@@ -1073,6 +1090,11 @@ async def run_scheduler(
     last_heartbeat = utc_now()
     idle_since: datetime | None = None
     current_mode = SchedulerMode.RUNNING
+    resource_capacity = ResourceCapacity(
+        cheap_workers=config.resources.cheap_workers,
+        av1an_jobs=config.resources.av1an_jobs,
+        file_ops=config.resources.file_ops,
+    )
 
     try:
         while True:
@@ -1120,7 +1142,11 @@ async def run_scheduler(
 
                 if current_mode == SchedulerMode.RUNNING:
                     for job in claimable_jobs(session, active_job_ids=active_job_ids):
-                        if not has_resource_capacity(job, active, config=config):
+                        if not has_resource_capacity(
+                            job.stage,
+                            (stage for _job_id, stage in active.values()),
+                            capacity=resource_capacity,
+                        ):
                             continue
                         worker = workers[job.stage]
                         job_id = _require_id(job)
@@ -1482,14 +1508,17 @@ def clear_queue(
     cancel_running: bool = False,
     confirm: bool = False,
 ) -> QueueClearSummary:
-    jobs = _select_jobs(
-        session,
-        job_ids=job_ids,
-        statuses=statuses,
-        stages=stages,
-        profile=profile,
-        all_jobs=all_jobs,
-    )
+    try:
+        jobs = select_queue_jobs(
+            session,
+            job_ids=job_ids,
+            statuses=statuses,
+            stages=stages,
+            profile=profile,
+            all_jobs=all_jobs,
+        )
+    except QueueSelectionError as exc:
+        raise JobControlError(str(exc)) from exc
     operation_id = uuid.uuid4().hex
     immediate = 0
     running = 0
@@ -1544,14 +1573,17 @@ def retry_queue(
     all_jobs: bool = False,
     confirm: bool = False,
 ) -> QueueRetrySummary:
-    jobs = _select_jobs(
-        session,
-        job_ids=job_ids,
-        statuses=statuses,
-        stages=stages,
-        profile=profile,
-        all_jobs=all_jobs,
-    )
+    try:
+        jobs = select_queue_jobs(
+            session,
+            job_ids=job_ids,
+            statuses=statuses,
+            stages=stages,
+            profile=profile,
+            all_jobs=all_jobs,
+        )
+    except QueueSelectionError as exc:
+        raise JobControlError(str(exc)) from exc
     retryable = 0
     requires_requeue = 0
     reset_to_probe = 0
@@ -1605,16 +1637,6 @@ def retry_queue(
 
 def new_runner_id() -> str:
     return uuid.uuid4().hex
-
-
-def resource_for_stage(stage: JobStage) -> ResourceClass:
-    if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}:
-        return ResourceClass.CHEAP
-    if stage == JobStage.ENCODE:
-        return ResourceClass.HEAVY_AV1AN
-    if stage == JobStage.PROMOTE:
-        return ResourceClass.FILE_OP
-    raise ValueError(f"Unsupported job stage: {stage}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1759,8 +1781,8 @@ def _load_job_plan(job: Job) -> TranscodePlan:
         raise JobPreparationError("Queued encode job has no persisted plan.")
     path = Path(job.plan_path)
     try:
-        plan = TranscodePlan.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError, ValueError) as exc:
+        plan = load_plan_artifact(path)
+    except PlanArtifactLoadError as exc:
         raise JobPreparationError(f"Unable to load queued plan: {path}") from exc
     if plan.plan_hash != job.plan_hash:
         raise JobPreparationError("Queued plan artifact does not match stored plan hash.")
@@ -1792,64 +1814,6 @@ def _verify_job_profile(config: AppConfig, job: Job) -> None:
         raise StaleJobProfileError("Profile changed after enqueue; re-enqueue this work.")
 
 
-def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
-    jobs = list(
-        session.exec(
-            select(Job)
-            .where(
-                col(Job.status).in_(
-                    [
-                        JobStatus.QUEUED,
-                        JobStatus.ENCODED,
-                        JobStatus.VALIDATING,
-                        JobStatus.READY_TO_PROMOTE,
-                        JobStatus.PROMOTING,
-                    ]
-                )
-            )
-            .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
-        ).all()
-    )
-    return [
-        job
-        for job in jobs
-        if job.id not in active_job_ids
-        and (
-            job.status == JobStatus.QUEUED
-            or (
-                job.stage == JobStage.VALIDATE
-                and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING}
-            )
-            or (
-                job.stage == JobStage.PROMOTE
-                and job.status in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING}
-            )
-        )
-    ]
-
-
-def has_resource_capacity(
-    job: Job,
-    active: Mapping[Any, tuple[int, JobStage]],
-    *,
-    config: AppConfig,
-) -> bool:
-    cheap = sum(
-        1
-        for _job_id, stage in active.values()
-        if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}
-    )
-    av1an = sum(1 for _job_id, stage in active.values() if stage == JobStage.ENCODE)
-    file_ops = sum(1 for _job_id, stage in active.values() if stage == JobStage.PROMOTE)
-    if job.stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}:
-        return cheap < config.resources.cheap_workers
-    if job.stage == JobStage.ENCODE:
-        return av1an < config.resources.av1an_jobs
-    if job.stage == JobStage.PROMOTE:
-        return file_ops < config.resources.file_ops
-    return False
-
-
 def _apply_size_policy_after_validation(
     *,
     job: Job,
@@ -1867,7 +1831,10 @@ def _apply_size_policy_after_validation(
     decision = evaluate_size_policy(
         plan.validation.source_size_bytes,
         encoded_size,
-        profile,
+        SizePolicy(
+            require_smaller=profile.promotion.require_smaller,
+            minimum_savings_percent=profile.promotion.minimum_savings_percent,
+        ),
     )
     if decision == SizeDecision.ACCEPT:
         return
@@ -2044,79 +2011,18 @@ def _resolve_retry_stage(
         or plan.execution_identity.identity_hash != identity.execution_identity_hash
     ):
         return JobStage.PLAN
-    validation = _latest_validation(session, job)
+    validation = latest_validation(session, job)
     if _output_exists(job):
         if validation is not None and validation.passed:
-            if _has_completed_promotion(session, job):
+            if has_completed_promotion(session, job):
                 return None
             return JobStage.PROMOTE
         return JobStage.VALIDATE
     return JobStage.ENCODE
 
 
-def _latest_validation(session: Session, job: Job) -> ValidationResult | None:
-    if job.latest_validation_id is None:
-        return None
-    result = session.get(ValidationResult, job.latest_validation_id)
-    if result is None or result.job_id != job.id:
-        return None
-    if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
-        return None
-    return result
-
-
 def _output_exists(job: Job) -> bool:
     return job.output_path is not None and Path(job.output_path).is_file()
-
-
-def _has_completed_promotion(session: Session, job: Job) -> bool:
-    from avarch.models.db import PromotionRecord
-    from avarch.models.promotion import PromotionStatus
-
-    if job.id is None:
-        return False
-    return (
-        session.exec(
-            select(PromotionRecord).where(
-                PromotionRecord.job_id == job.id,
-                PromotionRecord.status == PromotionStatus.COMPLETED,
-            )
-        ).first()
-        is not None
-    )
-
-
-def _select_jobs(
-    session: Session,
-    *,
-    job_ids: set[int] | None,
-    statuses: set[JobStatus] | None,
-    stages: set[JobStage] | None,
-    profile: str | None,
-    all_jobs: bool,
-) -> list[Job]:
-    if not all_jobs and not job_ids and not statuses and not stages and profile is None:
-        raise JobControlError("At least one selector is required.")
-    statement = select(Job).order_by(
-        col(Job.priority).desc(),
-        col(Job.created_at).asc(),
-        col(Job.id).asc(),
-    )
-    if job_ids:
-        statement = statement.where(col(Job.id).in_(job_ids))
-    if statuses:
-        statement = statement.where(col(Job.status).in_(statuses))
-    if stages:
-        statement = statement.where(col(Job.stage).in_(stages))
-    if profile is not None:
-        statement = statement.where(Job.profile_name == profile)
-    if all_jobs:
-        statement = statement.where(
-            col(Job.status).not_in(
-                [JobStatus.COMPLETED, JobStatus.SKIPPED, JobStatus.CANCELED]
-            )
-        )
-    return list(session.exec(statement).all())
 
 
 def _interrupt_running_job(engine: Any, *, job_id: int) -> None:
@@ -2142,19 +2048,6 @@ def _scheduler_error(error: Exception) -> Exception:
     if isinstance(error, SchedulerError | ProbeError):
         return error
     return JobPreparationError(str(error))
-
-
-def _latest_validation_passed(session: Session, job: Job) -> bool:
-    if job.latest_validation_id is None:
-        return False
-    result = session.get(ValidationResult, job.latest_validation_id)
-    return (
-        result is not None
-        and result.job_id == job.id
-        and result.plan_hash == job.plan_hash
-        and result.output_path == job.output_path
-        and result.passed
-    )
 
 
 def _snapshot_job(job: Job) -> Job:

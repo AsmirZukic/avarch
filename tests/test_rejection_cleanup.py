@@ -5,9 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from avarch.job_lifecycle import JobTransitionError, transition_job
-from avarch.models.db import Job
-from avarch.models.scheduler import JobOutcomeReason, JobStage, JobStatus
+from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
+from avarch.adapters.sqlite.models import Job
+from avarch.adapters.sqlite.rejection_cleanup import (
+    RejectedOutputCleanupError,
+    cleanup_rejected_output,
+)
+from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
+from avarch.domain.size import SizeDecision
 from avarch.profiles.models import (
     EncodingProfile,
     ProfileAudioSettings,
@@ -16,8 +21,6 @@ from avarch.profiles.models import (
     ProfileSubtitleSettings,
     ProfileVideoSettings,
 )
-from avarch.rejection_cleanup import RejectedOutputCleanupError, cleanup_rejected_output
-from avarch.size_policy import SizeDecision
 
 
 def test_larger_encoded_file_is_deleted(tmp_path: Path) -> None:

@@ -7,13 +7,15 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.config import AppConfig, DatabaseSettings
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionStatus
-from avarch.models.scheduler import JobStage, JobStatus
 from avarch.promoter import PromotionResult
-from avarch.scheduler import claimable_jobs, execute_promotion_job, has_resource_capacity
+from avarch.scheduler import execute_promotion_job
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -37,9 +39,9 @@ def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
 
     assert [job.stage for job in claimable] == [JobStage.PROMOTE]
     assert has_resource_capacity(
-        claimable[0],
-        {object(): (2, JobStage.ENCODE)},
-        config=AppConfig(),
+        claimable[0].stage,
+        [JobStage.ENCODE],
+        capacity=ResourceCapacity(cheap_workers=4, av1an_jobs=1, file_ops=1),
     )
 
 
@@ -106,7 +108,7 @@ def test_scheduler_continues_after_promotion_failure(
         )
 
     monkeypatch.setattr("avarch.scheduler.promote_job", fake_promote_job)
-    database_path = tmp_path / "avarch.db"
+    database_path = tmp_path / "avarch.adapters.sqlite.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
     engine = create_db_engine(config.database.url)
     create_db_schema(engine)
@@ -129,7 +131,7 @@ def test_scheduler_continues_after_promotion_failure(
 
 
 def _engine(tmp_path: Path) -> Any:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

@@ -9,7 +9,7 @@ from alembic.runtime.migration import MigrationContext
 from alembic.util.exc import CommandError
 from sqlalchemy.engine import make_url
 
-from avarch.db import (
+from avarch.adapters.sqlite.db import (
     RESET_DATABASE_MESSAGE,
     UnsupportedDatabaseSchemaError,
     create_db_engine,
@@ -50,7 +50,7 @@ def migration_project_root() -> Path:
     if configured_root:
         return Path(configured_root)
 
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[4]
 
 
 def _ensure_sqlite_parent(database_url: str) -> None:

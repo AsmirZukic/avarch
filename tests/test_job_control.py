@@ -7,9 +7,9 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
-from avarch.models.scheduler import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
+from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
     JobStage,
@@ -549,7 +549,7 @@ def _stored_job(
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

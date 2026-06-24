@@ -6,10 +6,9 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.config import AppConfig, DatabaseSettings
-from avarch.db import create_db_engine, create_db_schema
-from avarch.job_lifecycle import JobTransitionError, transition_job
-from avarch.models.db import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     MediaFile,
@@ -17,14 +16,15 @@ from avarch.models.db import (
     PromotionRecord,
     ValidationResult,
 )
-from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import (
+from avarch.config import AppConfig, DatabaseSettings
+from avarch.domain.jobs import (
     AttemptStatus,
     JobOutcomeReason,
     JobStage,
     JobStatus,
     ResourceClass,
 )
+from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.promoter import claim_promotion, mark_promotion_failed_or_validated, promote_job
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
@@ -163,7 +163,7 @@ def _ready_job(
     *,
     output_bytes: bytes,
 ) -> tuple[AppConfig, int, Path, Path]:
-    database_path = tmp_path / "avarch.db"
+    database_path = tmp_path / "avarch.adapters.sqlite.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
     engine = create_db_engine(config.database.url)
     create_db_schema(engine)

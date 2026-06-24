@@ -1,34 +1,22 @@
 from __future__ import annotations
 
-from avarch.profiles.models import (
-    EncodingProfile,
-    ProfileAudioSettings,
-    ProfileAv1anSettings,
-    ProfileMatchSettings,
-    ProfilePromotionSettings,
-    ProfileSubtitleSettings,
-    ProfileVideoSettings,
-)
-from avarch.size_policy import SizeDecision, evaluate_size_policy
+from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 
 
 def test_rejects_larger_output() -> None:
-    assert evaluate_size_policy(1000, 1001, _profile()) == SizeDecision.REJECT_NOT_SMALLER
+    assert evaluate_size_policy(1000, 1001, _policy()) == SizeDecision.REJECT_NOT_SMALLER
 
 
 def test_rejects_same_size_output() -> None:
-    assert evaluate_size_policy(1000, 1000, _profile()) == SizeDecision.REJECT_NOT_SMALLER
+    assert evaluate_size_policy(1000, 1000, _policy()) == SizeDecision.REJECT_NOT_SMALLER
 
 
 def test_rejects_output_below_minimum_savings() -> None:
-    assert (
-        evaluate_size_policy(1000, 999, _profile())
-        == SizeDecision.REJECT_MINIMUM_SAVINGS_NOT_MET
-    )
+    assert evaluate_size_policy(1000, 999, _policy()) == SizeDecision.REJECT_MINIMUM_SAVINGS_NOT_MET
 
 
 def test_accepts_output_above_minimum_savings() -> None:
-    assert evaluate_size_policy(1000, 900, _profile()) == SizeDecision.ACCEPT
+    assert evaluate_size_policy(1000, 900, _policy()) == SizeDecision.ACCEPT
 
 
 def test_allows_zero_minimum_savings_when_configured() -> None:
@@ -36,20 +24,14 @@ def test_allows_zero_minimum_savings_when_configured() -> None:
         evaluate_size_policy(
             1000,
             999,
-            _profile(promotion=ProfilePromotionSettings(minimum_savings_percent=0)),
+            _policy(minimum_savings_percent=0),
         )
         == SizeDecision.ACCEPT
     )
 
 
-def _profile(*, promotion: ProfilePromotionSettings | None = None) -> EncodingProfile:
-    return EncodingProfile(
-        backend="av1an",
-        container="mkv",
-        match=ProfileMatchSettings(video_codec_not=["av1"]),
-        video=ProfileVideoSettings(max_width=1920),
-        av1an=ProfileAv1anSettings(encoder="svt-av1", workers=1, video_args="--crf 30"),
-        audio=ProfileAudioSettings(codec="opus", bitrate="128k", channels=2, languages=["eng"]),
-        subtitles=ProfileSubtitleSettings(languages=["eng"]),
-        promotion=promotion or ProfilePromotionSettings(),
+def _policy(*, require_smaller: bool = True, minimum_savings_percent: float = 5.0) -> SizePolicy:
+    return SizePolicy(
+        require_smaller=require_smaller,
+        minimum_savings_percent=minimum_savings_percent,
     )
