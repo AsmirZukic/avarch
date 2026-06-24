@@ -11,7 +11,13 @@ from avarch.cli import app
 from avarch.config import load_config, resolve_database_url
 from avarch.db import create_db_engine
 from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus, MediaPlan, ProbeResult
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
+)
 from avarch.scheduler import SchedulerRunSummary
 
 runner = CliRunner()
@@ -38,7 +44,7 @@ def test_jobs_command_lists_queued_jobs(tmp_path: Path) -> None:
     result = runner.invoke(app, ["jobs", "list"])
 
     assert result.exit_code == 0
-    assert "pending" in result.output
+    assert "queued" in result.output
     assert "movie.mkv" in result.output
 
 
@@ -171,6 +177,54 @@ def test_run_command_prints_failed_job_error_details(
     assert f"stderr: {stderr_log} (missing)" in result.output
 
 
+def test_status_shows_size_rejected_reason(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    _insert_job(
+        config_path,
+        tmp_path / "movie-d.mkv",
+        status=JobStatus.SIZE_REJECTED,
+        stage=JobStage.VALIDATE,
+        outcome_reason=JobOutcomeReason.SKIPPED_SIZE_NOT_SMALLER,
+    )
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    assert result.exit_code == 0
+    assert "Skipped: movie-d.mkv, output was not smaller" in result.output
+
+
+def test_status_shows_validation_failure_reason(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    _insert_job(
+        config_path,
+        tmp_path / "movie-e.mkv",
+        status=JobStatus.VALIDATION_FAILED,
+        stage=JobStage.VALIDATE,
+        last_error_message="ffprobe could not read output",
+    )
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    assert result.exit_code == 0
+    assert "Failed: movie-e.mkv, ffprobe could not read output" in result.output
+
+
+def test_status_shows_promoted_jobs(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    _insert_job(
+        config_path,
+        tmp_path / "movie-c.mkv",
+        status=JobStatus.PROMOTED,
+        stage=JobStage.PROMOTE,
+        outcome_reason=JobOutcomeReason.SUCCESS,
+    )
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    assert result.exit_code == 0
+    assert "Promoted: movie-c.mkv" in result.output
+
+
 def _init_config(tmp_path: Path) -> Path:
     config_path = tmp_path / ".avarch" / "config.toml"
     result = runner.invoke(app, ["init"])
@@ -223,5 +277,50 @@ def _insert_current_plan(config_path: Path, media_path: Path) -> None:
                 is_current=True,
                 is_valid=True,
                 created_at=now,
+            )
+        )
+
+
+def _insert_job(
+    config_path: Path,
+    media_path: Path,
+    *,
+    status: JobStatus,
+    stage: JobStage,
+    outcome_reason: JobOutcomeReason | None = None,
+    last_error_message: str | None = None,
+) -> None:
+    media_path.write_bytes(b"media")
+    app_config = load_config(config_path)
+    engine = create_db_engine(resolve_database_url(app_config, config_path))
+    now = datetime.now(UTC)
+    stat_result = media_path.stat()
+    with Session(engine) as session, session.begin():
+        media_file = MediaFile(
+            path=str(media_path.resolve()),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+            device_id=stat_result.st_dev,
+            inode=stat_result.st_ino,
+            fs_fingerprint=f"fingerprint:{media_path.name}",
+            status=MediaFileStatus.PRESENT,
+            discovered_at=now,
+            last_seen_at=now,
+        )
+        session.add(media_file)
+        session.flush()
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name="av1_1080p_sdr",
+                profile_hash="profile",
+                source_fs_fingerprint=media_file.fs_fingerprint,
+                queue_key=f"queue:{media_path.name}",
+                status=status,
+                stage=stage,
+                outcome_reason=outcome_reason,
+                last_error_message=last_error_message,
+                created_at=now,
+                updated_at=now,
             )
         )

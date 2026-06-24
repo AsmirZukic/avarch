@@ -58,7 +58,7 @@ from avarch.models.db import (
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionStatus
-from avarch.models.scheduler import JobStage, JobStatus
+from avarch.models.scheduler import JobOutcomeReason, JobStage, JobStatus
 from avarch.models.validation import ValidationReport
 from avarch.planner import (
     PlanArtifactConflictError,
@@ -979,7 +979,10 @@ def jobs_list(
             f"{job.id:<3} {_job_status_value(job.status):<10} {_job_stage_value(job.stage):<9} "
             f"{job.priority:>3}  {job.attempts:>3}  {control:<7}  {job.profile_name:<15}  {path}"
         )
-        if _job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
+        outcome = _job_outcome_summary(job, path=path)
+        if outcome is not None:
+            typer.echo(f"    {outcome}")
+        elif _job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
             typer.echo(f"    error: {_truncate_line(job.last_error_message)}")
 
 
@@ -3068,10 +3071,16 @@ def _echo_queue_counts(database_url: str) -> None:
             for status in JobStatus
         }
     typer.echo("Queue:")
-    typer.echo(f"  pending:   {jobs_by_status[JobStatus.PENDING]}")
-    typer.echo(f"  running:   {jobs_by_status[JobStatus.RUNNING]}")
-    typer.echo(f"  completed: {jobs_by_status[JobStatus.COMPLETED]}")
-    typer.echo(f"  failed:    {jobs_by_status[JobStatus.FAILED]}")
+    typer.echo(f"  queued:              {jobs_by_status[JobStatus.QUEUED]}")
+    typer.echo(f"  encoding:            {jobs_by_status[JobStatus.ENCODING]}")
+    typer.echo(f"  encoded:             {jobs_by_status[JobStatus.ENCODED]}")
+    typer.echo(f"  validating:          {jobs_by_status[JobStatus.VALIDATING]}")
+    typer.echo(f"  ready to promote:    {jobs_by_status[JobStatus.READY_TO_PROMOTE]}")
+    typer.echo(f"  promoting:           {jobs_by_status[JobStatus.PROMOTING]}")
+    typer.echo(f"  promoted:            {jobs_by_status[JobStatus.PROMOTED]}")
+    typer.echo(f"  size rejected:       {jobs_by_status[JobStatus.SIZE_REJECTED]}")
+    typer.echo(f"  validation failed:   {jobs_by_status[JobStatus.VALIDATION_FAILED]}")
+    typer.echo(f"  failed:              {jobs_by_status[JobStatus.FAILED]}")
 
 
 def _echo_recent_failed_jobs(database_url: str, *, limit: int = 5) -> None:
@@ -3157,6 +3166,33 @@ def _job_control_label(job: Job) -> str:
     if _job_status_value(job.status) == JobStatus.HELD.value:
         return "held"
     return "-"
+
+
+def _job_outcome_summary(job: Job, *, path: str) -> str | None:
+    status = JobStatus(job.status)
+    if status == JobStatus.ENCODING:
+        return f"Encoding: {path}"
+    if status == JobStatus.VALIDATING:
+        return f"Validating: {path}"
+    if status == JobStatus.READY_TO_PROMOTE:
+        return f"Ready to promote: {path}"
+    if status == JobStatus.PROMOTING:
+        return f"Promoting: {path}"
+    if status == JobStatus.PROMOTED:
+        return f"Promoted: {path}"
+    if status == JobStatus.SIZE_REJECTED:
+        reason = JobOutcomeReason(job.outcome_reason) if job.outcome_reason is not None else None
+        if reason == JobOutcomeReason.SKIPPED_MINIMUM_SAVINGS_NOT_MET:
+            return f"Skipped: {path}, minimum savings was not met"
+        return f"Skipped: {path}, output was not smaller"
+    if status == JobStatus.VALIDATION_FAILED:
+        detail = job.last_error_message or "validation failed"
+        return f"Failed: {path}, {_truncate_line(detail)}"
+    if status == JobStatus.FAILED and job.last_error_message:
+        return f"Failed: {path}, {_truncate_line(job.last_error_message)}"
+    if status == JobStatus.SKIPPED and job.skip_reason:
+        return f"Skipped: {path}, {_truncate_line(job.skip_reason)}"
+    return None
 
 
 def _attempt_status_value(status: object) -> str:
