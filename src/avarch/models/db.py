@@ -240,6 +240,7 @@ class PromotionRecord(SQLModel, table=True):
     source_path: str
     validated_output_path: str
     final_path: str
+    promotion_target_path: str | None = Field(default=None, index=True)
     staging_path: str
     backup_path: str | None
 

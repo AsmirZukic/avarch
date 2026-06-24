@@ -404,6 +404,12 @@ def claim_promotion(
         mode=mode,
         operation_id=operation_id,
     )
+    _reject_unexpired_target_lease(
+        session,
+        job_id=job_id,
+        target_path=preflight.final_path,
+        now=now,
+    )
 
     latest_attempt = session.exec(
         select(JobAttempt)
@@ -450,6 +456,7 @@ def claim_promotion(
         source_path=str(preflight.source_path),
         validated_output_path=str(preflight.validated_output_path),
         final_path=str(preflight.final_path),
+        promotion_target_path=str(preflight.final_path),
         staging_path=str(preflight.staging_path),
         backup_path=str(preflight.backup_path) if preflight.backup_path is not None else None,
         source_fingerprint_before=preflight.source_fingerprint,
@@ -1027,6 +1034,27 @@ def _reject_unexpired_promotion_lease(
     ).first()
     if leased is not None:
         raise PromotionLeaseError("Another promotion lease is still active.")
+
+
+def _reject_unexpired_target_lease(
+    session: Session,
+    *,
+    job_id: int,
+    target_path: Path,
+    now: datetime,
+) -> None:
+    target = str(target_path)
+    leased = session.exec(
+        select(PromotionRecord).where(
+            PromotionRecord.job_id != job_id,
+            PromotionRecord.status == PromotionStatus.RUNNING,
+            PromotionRecord.promotion_target_path == target,
+            col(PromotionRecord.lease_expires_at).is_not(None),
+            col(PromotionRecord.lease_expires_at) > now,
+        )
+    ).first()
+    if leased is not None:
+        raise PromotionLeaseError(f"Promotion target is already locked: {target_path}")
 
 
 def _latest_validation(session: Session, job: Job) -> ValidationResult:
