@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlmodel import Session, col, select
@@ -7,6 +8,13 @@ from sqlmodel import Session, col, select
 from avarch.adapters.sqlite.models import Job, SchedulerState
 from avarch.domain.jobs import JobStatus
 from avarch.domain.scheduler import SchedulerMode
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalJobCounts:
+    completed: int
+    failed: int
+    skipped: int
 
 
 def get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:
@@ -55,3 +63,25 @@ def pending_hold_count(session: Session) -> int:
             )
         ).all()
     )
+
+
+def has_pending_jobs(session: Session) -> bool:
+    return session.exec(select(Job).where(Job.status == JobStatus.PENDING)).first() is not None
+
+
+def terminal_job_counts(session: Session) -> TerminalJobCounts:
+    return TerminalJobCounts(
+        completed=len(session.exec(select(Job).where(Job.status == JobStatus.COMPLETED)).all()),
+        failed=len(session.exec(select(Job).where(Job.status == JobStatus.FAILED)).all()),
+        skipped=len(session.exec(select(Job).where(Job.status == JobStatus.SKIPPED)).all()),
+    )
+
+
+def active_jobs_with_cancel_requested(session: Session, *, job_ids: set[int]) -> set[int]:
+    if not job_ids:
+        return set()
+    return {
+        job_id
+        for job_id in job_ids
+        if (job := session.get(Job, job_id)) is not None and job.cancel_requested_at is not None
+    }

@@ -23,6 +23,41 @@ def find_existing_queue_job(
     return session.exec(select(Job).where(Job.queue_key == queue_key)).first()
 
 
+def plan_hash_conflicts_with_other_job(
+    session: Session,
+    *,
+    plan_hash: str,
+    job_id: int,
+) -> bool:
+    return (
+        session.exec(select(Job).where(Job.plan_hash == plan_hash, Job.id != job_id)).first()
+        is not None
+    )
+
+
+def queue_key_conflicts_with_other_job(
+    session: Session,
+    *,
+    queue_key: str,
+    job_id: int | None,
+) -> bool:
+    return (
+        session.exec(select(Job).where(Job.queue_key == queue_key, Job.id != job_id)).first()
+        is not None
+    )
+
+
+def enqueue_candidate_media_files(
+    session: Session,
+    *,
+    media_file_ids: tuple[int, ...] | None,
+) -> list[MediaFile]:
+    statement = select(MediaFile).order_by(MediaFile.path)
+    if media_file_ids is not None:
+        statement = statement.where(col(MediaFile.id).in_(media_file_ids))
+    return list(session.exec(statement).all())
+
+
 def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
     jobs = list(
         session.exec(
