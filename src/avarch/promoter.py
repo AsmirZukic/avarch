@@ -12,7 +12,7 @@ from typing import BinaryIO
 
 from pydantic import BaseModel
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, col, select
+from sqlmodel import Session
 
 from avarch.adapters.filesystem.plans import PlanArtifactLoadError, load_plan_artifact
 from avarch.adapters.filesystem.promotion import (
@@ -40,6 +40,7 @@ from avarch.adapters.sqlite.promotions import (
     has_active_promotion_lease,
     has_active_target_lease,
     has_completed_promotion,
+    next_promotion_attempt_number,
     recoverable_promotion,
     renew_promotion_lease,
 )
@@ -416,18 +417,7 @@ def claim_promotion(
     if has_active_target_lease(session, job_id=job_id, target_path=preflight.final_path, now=now):
         raise PromotionLeaseError(f"Promotion target is already locked: {preflight.final_path}")
 
-    latest_attempt = session.exec(
-        select(JobAttempt)
-        .where(JobAttempt.job_id == job_id)
-        .order_by(col(JobAttempt.attempt_number).desc())
-    ).first()
-    next_attempt_number = (
-        max(
-            job.attempts,
-            latest_attempt.attempt_number if latest_attempt is not None else 0,
-        )
-        + 1
-    )
+    next_attempt_number = next_promotion_attempt_number(session, job=job, job_id=job_id)
 
     transition_job(job, JobStatus.PROMOTING, now=now)
     job.stage = JobStage.PROMOTE
