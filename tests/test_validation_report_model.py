@@ -15,8 +15,16 @@ def test_validation_report_passes_when_all_checks_pass(tmp_path: Path) -> None:
     report = _report(
         tmp_path,
         checks=[
-            ValidationCheck(name="container_readable", status=ValidationCheckStatus.PASS, required=True),
-            ValidationCheck(name="has_video_stream", status=ValidationCheckStatus.PASS, required=True),
+            ValidationCheck(
+                name="container_readable",
+                status=ValidationCheckStatus.PASS,
+                required=True,
+            ),
+            ValidationCheck(
+                name="has_video_stream",
+                status=ValidationCheckStatus.PASS,
+                required=True,
+            ),
         ],
     )
 
@@ -28,8 +36,16 @@ def test_validation_report_fails_when_any_required_check_fails(tmp_path: Path) -
     report = _report(
         tmp_path,
         checks=[
-            ValidationCheck(name="container_readable", status=ValidationCheckStatus.PASS, required=True),
-            ValidationCheck(name="decode_health", status=ValidationCheckStatus.FAIL, required=True),
+            ValidationCheck(
+                name="container_readable",
+                status=ValidationCheckStatus.PASS,
+                required=True,
+            ),
+            ValidationCheck(
+                name="decode_health",
+                status=ValidationCheckStatus.FAIL,
+                required=True,
+            ),
         ],
     )
 
@@ -72,7 +88,9 @@ def _report(tmp_path: Path, *, checks: list[ValidationCheck]) -> ValidationRepor
         source_fs_fingerprint_after="source-after",
         output_fs_fingerprint_before="output-before",
         output_fs_fingerprint_after="output-after",
-        passed=all(check.status == ValidationCheckStatus.PASS for check in checks if check.required),
+        passed=all(
+            check.status == ValidationCheckStatus.PASS for check in checks if check.required
+        ),
         checks=checks,
         warnings=[],
         observed=None,

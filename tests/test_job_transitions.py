@@ -8,8 +8,8 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
 from avarch.job_lifecycle import JobTransitionError, transition_job
+from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
 from avarch.models.scheduler import (
     AttemptStatus,
     JobOutcomeReason,

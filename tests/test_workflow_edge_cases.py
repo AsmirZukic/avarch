@@ -248,7 +248,7 @@ def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
 
     assert result.exit_code == 0
     assert "failed" in result.output
-    assert "validated" in result.output
+    assert "ready_to_promote" in result.output
     assert "encoder crashed" in result.output
 
 

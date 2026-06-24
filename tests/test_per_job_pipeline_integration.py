@@ -19,7 +19,7 @@ from avarch.profiles.models import (
     ProfileVideoSettings,
 )
 from avarch.rejection_cleanup import cleanup_rejected_output
-from avarch.scheduler import _claimable_jobs, _has_resource_capacity, recover_abandoned_jobs
+from avarch.scheduler import claimable_jobs, has_resource_capacity, recover_abandoned_jobs
 from avarch.size_policy import SizeDecision, evaluate_size_policy
 from avarch.validation import validate_encoded_file
 
@@ -64,7 +64,7 @@ def test_batch_with_success_failure_and_size_rejection(tmp_path: Path) -> None:
         session.add(_job(media_file.id or 0, now, queue_key="unrelated"))
 
     with Session(engine) as session:
-        claimable = _claimable_jobs(session, active_job_ids=set())
+        claimable = claimable_jobs(session, active_job_ids=set())
 
     assert [job.queue_key for job in claimable] == ["unrelated"]
 
@@ -125,9 +125,9 @@ def test_promotion_happens_before_all_encodes_finish(tmp_path: Path) -> None:
         )
 
     with Session(engine) as session:
-        promote_job = _claimable_jobs(session, active_job_ids=set())[0]
+        promote_job = claimable_jobs(session, active_job_ids=set())[0]
 
-    assert _has_resource_capacity(
+    assert has_resource_capacity(
         promote_job,
         {object(): (99, JobStage.ENCODE)},
         config=AppConfig(),

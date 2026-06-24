@@ -13,7 +13,7 @@ from avarch.models.db import Job, MediaFile, MediaFileStatus
 from avarch.models.promotion import PromotionStatus
 from avarch.models.scheduler import JobStage, JobStatus
 from avarch.promoter import PromotionResult
-from avarch.scheduler import _claimable_jobs, _has_resource_capacity, execute_promotion_job
+from avarch.scheduler import claimable_jobs, execute_promotion_job, has_resource_capacity
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -33,10 +33,10 @@ def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
         session.add(promoting)
 
     with Session(engine) as session:
-        claimable = _claimable_jobs(session, active_job_ids={2})
+        claimable = claimable_jobs(session, active_job_ids={2})
 
     assert [job.stage for job in claimable] == [JobStage.PROMOTE]
-    assert _has_resource_capacity(
+    assert has_resource_capacity(
         claimable[0],
         {object(): (2, JobStage.ENCODE)},
         config=AppConfig(),
@@ -62,7 +62,7 @@ def test_failed_validation_does_not_block_next_job(tmp_path: Path) -> None:
         session.add(_job(media_file.id or 0, now, queue_key="next"))
 
     with Session(engine) as session:
-        claimable = _claimable_jobs(session, active_job_ids=set())
+        claimable = claimable_jobs(session, active_job_ids=set())
 
     assert [job.queue_key for job in claimable] == ["next"]
 
@@ -86,7 +86,7 @@ def test_size_rejection_does_not_block_next_job(tmp_path: Path) -> None:
         session.add(_job(media_file.id or 0, now, queue_key="next"))
 
     with Session(engine) as session:
-        claimable = _claimable_jobs(session, active_job_ids=set())
+        claimable = claimable_jobs(session, active_job_ids=set())
 
     assert [job.queue_key for job in claimable] == ["next"]
 

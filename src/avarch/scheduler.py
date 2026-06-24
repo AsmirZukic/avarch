@@ -5,7 +5,7 @@ import hashlib
 import os
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -56,8 +56,8 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
-from avarch.promoter import promote_job, recover_promotion
 from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
+from avarch.promoter import promote_job, recover_promotion
 from avarch.rejection_cleanup import RejectedOutputCleanupError, cleanup_rejected_output
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
@@ -926,7 +926,9 @@ def recover_abandoned_jobs(
     )
     jobs.extend(
         session.exec(
-            select(Job).where(col(Job.status).in_([JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING]))
+            select(Job).where(
+                col(Job.status).in_([JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING])
+            )
         ).all()
     )
     seen_job_ids: set[int] = set()
@@ -1117,8 +1119,8 @@ async def run_scheduler(
                         task.cancel()
 
                 if current_mode == SchedulerMode.RUNNING:
-                    for job in _claimable_jobs(session, active_job_ids=active_job_ids):
-                        if not _has_resource_capacity(job, active, config=config):
+                    for job in claimable_jobs(session, active_job_ids=active_job_ids):
+                        if not has_resource_capacity(job, active, config=config):
                             continue
                         worker = workers[job.stage]
                         job_id = _require_id(job)
@@ -1790,7 +1792,7 @@ def _verify_job_profile(config: AppConfig, job: Job) -> None:
         raise StaleJobProfileError("Profile changed after enqueue; re-enqueue this work.")
 
 
-def _claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
+def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
     jobs = list(
         session.exec(
             select(Job)
@@ -1814,15 +1816,21 @@ def _claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
         if job.id not in active_job_ids
         and (
             job.status == JobStatus.QUEUED
-            or (job.stage == JobStage.VALIDATE and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING})
-            or (job.stage == JobStage.PROMOTE and job.status in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING})
+            or (
+                job.stage == JobStage.VALIDATE
+                and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING}
+            )
+            or (
+                job.stage == JobStage.PROMOTE
+                and job.status in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING}
+            )
         )
     ]
 
 
-def _has_resource_capacity(
+def has_resource_capacity(
     job: Job,
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]],
+    active: Mapping[Any, tuple[int, JobStage]],
     *,
     config: AppConfig,
 ) -> bool:
@@ -1895,9 +1903,10 @@ def _active_status_for_stage(stage: JobStage) -> JobStatus:
 def _job_can_be_claimed_for_stage(job: Job) -> bool:
     if job.status == JobStatus.QUEUED:
         return True
-    if job.stage == JobStage.VALIDATE and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING}:
-        return True
-    return False
+    return job.stage == JobStage.VALIDATE and job.status in {
+        JobStatus.ENCODED,
+        JobStatus.VALIDATING,
+    }
 
 
 def _request_scheduler_mode(
