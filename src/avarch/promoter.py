@@ -17,6 +17,7 @@ from sqlmodel import Session, col, select
 
 from avarch.config import AppConfig
 from avarch.db import create_db_engine
+from avarch.job_lifecycle import transition_job
 from avarch.models.db import (
     Job,
     JobAttempt,
@@ -33,7 +34,7 @@ from avarch.models.promotion import (
     PromotionPhase,
     PromotionStatus,
 )
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.models.scheduler import AttemptStatus, JobOutcomeReason, JobStage, JobStatus, ResourceClass
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
@@ -103,6 +104,16 @@ class PromotionPreflightResult(BaseModel):
     required_free_bytes: int
 
     warnings: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionResult:
+    job_id: int
+    promotion_id: int
+    status: PromotionStatus
+    final_path: Path
+    promoted: bool
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,7 +415,7 @@ def claim_promotion(
         latest_attempt.attempt_number if latest_attempt is not None else 0,
     ) + 1
 
-    job.status = JobStatus.RUNNING
+    transition_job(job, JobStatus.PROMOTING, now=now)
     job.stage = JobStage.PROMOTE
     job.claimed_by = owner_token
     job.attempts = next_attempt_number
@@ -534,6 +545,40 @@ async def execute_promotion(
                 now=_utc_now(),
             )
         raise
+
+
+async def promote_job(
+    job_id: int,
+    *,
+    config: AppConfig,
+    mode: PromotionMode = PromotionMode.REPLACE_ATOMIC,
+    owner_token: str | None = None,
+) -> PromotionResult:
+    token = owner_token or uuid.uuid4().hex
+    try:
+        record = await execute_promotion(
+            job_id=job_id,
+            mode=mode,
+            config=config,
+            owner_token=token,
+        )
+    except PromotionError as exc:
+        return PromotionResult(
+            job_id=job_id,
+            promotion_id=0,
+            status=PromotionStatus.FAILED,
+            final_path=Path(),
+            promoted=False,
+            error_message=str(exc),
+        )
+    return PromotionResult(
+        job_id=job_id,
+        promotion_id=_require_id(record),
+        status=PromotionStatus(record.status),
+        final_path=Path(record.final_path),
+        promoted=PromotionStatus(record.status) == PromotionStatus.COMPLETED,
+        error_message=record.error_message,
+    )
 
 
 async def recover_promotion(
@@ -721,7 +766,7 @@ async def _rollback_before_commit(
             record.lease_expires_at = None
             attempt.status = AttemptStatus.INTERRUPTED
             attempt.finished_at = _utc_now()
-            job.status = JobStatus.VALIDATED
+            transition_job(job, JobStatus.READY_TO_PROMOTE, now=_utc_now())
             job.stage = JobStage.PROMOTE
             job.claimed_by = None
             job.finished_at = None
@@ -755,7 +800,7 @@ def _commit_verified_promotion(
     attempt.finished_at = now
     attempt.output_path = str(installed_path)
     job.latest_promotion_id = record.id
-    job.status = JobStatus.COMPLETED
+    transition_job(job, JobStatus.PROMOTED, reason=JobOutcomeReason.SUCCESS, now=now)
     job.stage = JobStage.PROMOTE
     job.claimed_by = None
     job.last_error_type = None
@@ -918,10 +963,10 @@ def _mark_promotion_failed_or_validated(
     attempt.finished_at = now
     backup_exists = record.backup_path is not None and Path(record.backup_path).exists()
     if not Path(record.final_path).exists() and not backup_exists:
-        job.status = JobStatus.VALIDATED
+        transition_job(job, JobStatus.READY_TO_PROMOTE, now=now)
         job.finished_at = None
     else:
-        job.status = JobStatus.FAILED
+        transition_job(job, JobStatus.FAILED, reason=JobOutcomeReason.FAILED_PROMOTION, now=now)
         job.finished_at = now
     job.stage = JobStage.PROMOTE
     job.claimed_by = None
