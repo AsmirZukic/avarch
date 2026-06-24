@@ -389,7 +389,7 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
     assert job.stage == JobStage.ENCODE
 
 
-def test_recovery_skips_running_promotion_jobs(tmp_path: Path) -> None:
+def test_recovery_recovers_running_promotion_jobs(tmp_path: Path) -> None:
     engine, job_id = _running_job_with_attempt(tmp_path, stage=JobStage.PROMOTE)
 
     with Session(engine) as session, session.begin():
@@ -398,9 +398,88 @@ def test_recovery_skips_running_promotion_jobs(tmp_path: Path) -> None:
     with Session(engine) as session:
         job = session.get(Job, job_id)
 
-    assert summary.recovered_jobs == 0
+    assert summary.recovered_jobs == 1
     assert job is not None
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.PROMOTING
+    assert job.claimed_by is None
+
+
+def test_restart_recovers_encoded_job(tmp_path: Path) -> None:
+    output = tmp_path / "movie.av1.mkv"
+    output.write_bytes(b"encoded")
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.ENCODED,
+        stage=JobStage.VALIDATE,
+        output_path=output,
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.VALIDATING
+    assert job.stage == JobStage.VALIDATE
+
+
+def test_restart_recovers_ready_to_promote_job(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.READY_TO_PROMOTE,
+        stage=JobStage.PROMOTE,
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.READY_TO_PROMOTE
+    assert job.claimed_by is None
+
+
+def test_restart_handles_missing_encoded_file(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.ENCODED,
+        stage=JobStage.VALIDATE,
+        output_path=tmp_path / "missing.av1.mkv",
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.last_error_message == "Encoded output was missing during scheduler recovery."
+
+
+def test_restart_handles_partial_promotion_backup(tmp_path: Path) -> None:
+    backup = tmp_path / "movie.mkv.avarch-original"
+    backup.write_bytes(b"original")
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.PROMOTING, stage=JobStage.PROMOTE)
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert backup.read_bytes() == b"original"
+    assert job is not None
+    assert job.status == JobStatus.PROMOTING
 
 
 def _running_job_with_attempt(
@@ -431,6 +510,7 @@ def _stored_job(
     *,
     status: JobStatus = JobStatus.PENDING,
     stage: JobStage = JobStage.PROBE,
+    output_path: Path | None = None,
 ) -> tuple[Engine, int]:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
@@ -455,6 +535,7 @@ def _stored_job(
             profile_hash="profile-hash",
             source_fs_fingerprint="fingerprint",
             queue_key="queue-key",
+            output_path=str(output_path) if output_path is not None else None,
             status=status,
             stage=stage,
             created_at=now,

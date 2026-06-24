@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlmodel import Session
 
-from avarch.config import AppConfig
+from avarch.config import AppConfig, DatabaseSettings
 from avarch.db import create_db_engine, create_db_schema
 from avarch.models.db import Job, MediaFile, MediaFileStatus
 from avarch.models.promotion import PromotionStatus
@@ -106,8 +106,26 @@ def test_scheduler_continues_after_promotion_failure(
         )
 
     monkeypatch.setattr("avarch.scheduler.promote_job", fake_promote_job)
+    database_path = tmp_path / "avarch.db"
+    config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
+    engine = create_db_engine(config.database.url)
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = _media_file(tmp_path / "movie-a.mkv", now)
+        session.add(media_file)
+        session.flush()
+        session.add(
+            _job(
+                media_file.id or 0,
+                now,
+                queue_key="promote",
+                status=JobStatus.READY_TO_PROMOTE,
+                stage=JobStage.PROMOTE,
+            )
+        )
 
-    asyncio.run(execute_promotion_job(job_id=1, runner_id="runner", config=AppConfig()))
+    asyncio.run(execute_promotion_job(job_id=1, runner_id="runner", config=config))
 
 
 def _engine(tmp_path: Path) -> Any:

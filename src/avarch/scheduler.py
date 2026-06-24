@@ -56,7 +56,7 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
-from avarch.promoter import promote_job
+from avarch.promoter import promote_job, recover_promotion
 from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
 from avarch.rejection_cleanup import RejectedOutputCleanupError, cleanup_rejected_output
 from avarch.scanner import create_file_snapshot
@@ -318,10 +318,10 @@ def claim_job_stage(
     now: datetime,
 ) -> JobAttempt:
     job = _require_job(session, job_id)
-    if job.status != JobStatus.PENDING:
-        raise JobClaimError(f"Job is not pending: {job_id}")
+    if not _job_can_be_claimed_for_stage(job):
+        raise JobClaimError(f"Job is not claimable: {job_id}")
 
-    job.status = JobStatus.RUNNING
+    job.status = _active_status_for_stage(job.stage)
     job.claimed_by = runner_id
     job.attempts += 1
     job.started_at = job.started_at or now
@@ -367,7 +367,12 @@ def complete_job_stage(
         job.status = JobStatus.COMPLETED
         job.finished_at = now
     else:
-        job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
+        if job.hold_requested_at is not None:
+            job.status = JobStatus.HELD
+        elif attempt.stage == JobStage.ENCODE and next_stage == JobStage.VALIDATE:
+            job.status = JobStatus.ENCODED
+        else:
+            job.status = JobStatus.PENDING
         job.stage = next_stage
         job.finished_at = None
         if job.status == JobStatus.HELD:
@@ -815,6 +820,13 @@ async def execute_promotion_job(
     runner_id: str,
     config: AppConfig,
 ) -> None:
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        job = _require_job(session, job_id)
+        recovering = job.status == JobStatus.PROMOTING
+    if recovering:
+        await recover_promotion(job_id=job_id, config=config, owner_token=runner_id)
+        return
     await promote_job(job_id=job_id, config=config, owner_token=runner_id)
 
 
@@ -907,8 +919,73 @@ def recover_abandoned_jobs(
     recovered_jobs = 0
     interrupted_attempts = 0
     jobs = list(session.exec(select(Job).where(Job.status == JobStatus.RUNNING)).all())
+    jobs.extend(
+        session.exec(
+            select(Job).where(col(Job.status).in_([JobStatus.ENCODED, JobStatus.VALIDATING]))
+        ).all()
+    )
+    jobs.extend(
+        session.exec(
+            select(Job).where(col(Job.status).in_([JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING]))
+        ).all()
+    )
+    seen_job_ids: set[int] = set()
     for job in jobs:
-        if job.stage == JobStage.PROMOTE:
+        job_id = _require_id(job)
+        if job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        if job.status == JobStatus.ENCODED:
+            if job.output_path is None or not Path(job.output_path).exists():
+                job.status = JobStatus.FAILED
+                job.last_error_type = "SchedulerRecovered"
+                job.last_error_message = "Encoded output was missing during scheduler recovery."
+                job.claimed_by = None
+                job.finished_at = now
+                job.updated_at = now
+                session.add(job)
+                recovered_jobs += 1
+                continue
+            job.stage = JobStage.VALIDATE
+            job.status = JobStatus.VALIDATING
+            job.claimed_by = None
+            job.finished_at = None
+            job.updated_at = now
+            session.add(job)
+            recovered_jobs += 1
+            continue
+        if job.status == JobStatus.VALIDATING and job.stage == JobStage.VALIDATE:
+            attempt = session.exec(
+                select(JobAttempt)
+                .where(JobAttempt.job_id == job.id, JobAttempt.status == AttemptStatus.RUNNING)
+                .order_by(col(JobAttempt.attempt_number).desc())
+            ).first()
+            if attempt is not None:
+                attempt.status = AttemptStatus.INTERRUPTED
+                attempt.finished_at = now
+                attempt.error_type = "SchedulerRecovered"
+                attempt.error_message = "Validation attempt was recovered after scheduler restart."
+                session.add(attempt)
+                interrupted_attempts += 1
+            job.claimed_by = None
+            job.finished_at = None
+            job.updated_at = now
+            session.add(job)
+            recovered_jobs += 1
+            continue
+        if job.status == JobStatus.READY_TO_PROMOTE and job.stage == JobStage.PROMOTE:
+            job.claimed_by = None
+            job.finished_at = None
+            job.updated_at = now
+            session.add(job)
+            recovered_jobs += 1
+            continue
+        if job.status == JobStatus.PROMOTING and job.stage == JobStage.PROMOTE:
+            job.claimed_by = None
+            job.finished_at = None
+            job.updated_at = now
+            session.add(job)
+            recovered_jobs += 1
             continue
         attempt = session.exec(
             select(JobAttempt)
@@ -1717,7 +1794,17 @@ def _claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
     jobs = list(
         session.exec(
             select(Job)
-            .where(col(Job.status).in_([JobStatus.QUEUED, JobStatus.READY_TO_PROMOTE]))
+            .where(
+                col(Job.status).in_(
+                    [
+                        JobStatus.QUEUED,
+                        JobStatus.ENCODED,
+                        JobStatus.VALIDATING,
+                        JobStatus.READY_TO_PROMOTE,
+                        JobStatus.PROMOTING,
+                    ]
+                )
+            )
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
         ).all()
     )
@@ -1725,7 +1812,11 @@ def _claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
         job
         for job in jobs
         if job.id not in active_job_ids
-        and (job.status == JobStatus.QUEUED or job.stage == JobStage.PROMOTE)
+        and (
+            job.status == JobStatus.QUEUED
+            or (job.stage == JobStage.VALIDATE and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING})
+            or (job.stage == JobStage.PROMOTE and job.status in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING})
+        )
     ]
 
 
@@ -1791,6 +1882,22 @@ def _get_or_create_scheduler_state(session: Session, *, now: datetime) -> Schedu
         session.add(state)
         session.flush()
     return state
+
+
+def _active_status_for_stage(stage: JobStage) -> JobStatus:
+    if stage == JobStage.VALIDATE:
+        return JobStatus.VALIDATING
+    if stage == JobStage.PROMOTE:
+        return JobStatus.PROMOTING
+    return JobStatus.ENCODING
+
+
+def _job_can_be_claimed_for_stage(job: Job) -> bool:
+    if job.status == JobStatus.QUEUED:
+        return True
+    if job.stage == JobStage.VALIDATE and job.status in {JobStatus.ENCODED, JobStatus.VALIDATING}:
+        return True
+    return False
 
 
 def _request_scheduler_mode(
