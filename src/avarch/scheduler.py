@@ -36,8 +36,11 @@ from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import (
     QueueSelectionError,
     claimable_jobs,
+    enqueue_candidate_media_files,
     failed_jobs_for_retry,
     find_existing_queue_job,
+    plan_hash_conflicts_with_other_job,
+    queue_key_conflicts_with_other_job,
     select_queue_jobs,
 )
 from avarch.adapters.sqlite.rejection_cleanup import (
@@ -45,11 +48,14 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     cleanup_rejected_output,
 )
 from avarch.adapters.sqlite.scheduler_state import (
+    active_jobs_with_cancel_requested,
     active_scheduler_jobs,
     get_or_create_scheduler_state,
+    has_pending_jobs,
     job_counts_by_status,
     pending_cancel_count,
     pending_hold_count,
+    terminal_job_counts,
 )
 from avarch.adapters.sqlite.validations import (
     latest_validation,
@@ -276,10 +282,7 @@ def enqueue_inventory(
 ) -> EnqueueSummary:
     resolved_profile = _require_profile(config, profile_name)
     identity = _planning_identity(resolved_profile)
-    statement = select(MediaFile).order_by(MediaFile.path)
-    if media_file_ids is not None:
-        statement = statement.where(col(MediaFile.id).in_(media_file_ids))
-    media_files = list(session.exec(statement).all())
+    media_files = enqueue_candidate_media_files(session, media_file_ids=media_file_ids)
     selected = 0
     created = 0
     existing = 0
@@ -632,10 +635,7 @@ async def execute_plan_job(
 
     with Session(engine) as session, session.begin():
         job = _require_job(session, job_id)
-        duplicate = session.exec(
-            select(Job).where(Job.plan_hash == plan.plan_hash, Job.id != job_id)
-        ).first()
-        if duplicate is not None:
+        if plan_hash_conflicts_with_other_job(session, plan_hash=plan.plan_hash, job_id=job_id):
             _skip_claimed_job(
                 session,
                 job=job,
@@ -1136,11 +1136,10 @@ async def run_scheduler(
                             ack_state.control_acknowledged_at = utc_now()
                             ack_session.add(ack_state)
 
-                canceled_active_ids: set[int] = set()
-                for job_id in active_job_ids:
-                    active_job = session.get(Job, job_id)
-                    if active_job is not None and active_job.cancel_requested_at is not None:
-                        canceled_active_ids.add(job_id)
+                canceled_active_ids = active_jobs_with_cancel_requested(
+                    session,
+                    job_ids=active_job_ids,
+                )
                 if canceled_active_ids:
                     for task, (job_id, _stage) in active.items():
                         if job_id in canceled_active_ids:
@@ -1178,10 +1177,8 @@ async def run_scheduler(
                 continue
 
             with Session(engine) as session:
-                pending_count = session.exec(
-                    select(Job).where(Job.status == JobStatus.PENDING)
-                ).first()
-            if pending_count is None:
+                pending = has_pending_jobs(session)
+            if not pending:
                 idle_since = idle_since or utc_now()
                 if (utc_now() - idle_since).total_seconds() >= SCHEDULER_IDLE_EXIT_SECONDS:
                     break
@@ -1193,10 +1190,13 @@ async def run_scheduler(
             release_scheduler_lease(session, runner_id=runner_id, now=utc_now())
 
     with Session(engine) as session:
-        completed = len(session.exec(select(Job).where(Job.status == JobStatus.COMPLETED)).all())
-        failed = len(session.exec(select(Job).where(Job.status == JobStatus.FAILED)).all())
-        skipped = len(session.exec(select(Job).where(Job.status == JobStatus.SKIPPED)).all())
-    return SchedulerRunSummary(completed=completed, failed=failed, skipped=skipped, idle=True)
+        terminal_counts = terminal_job_counts(session)
+    return SchedulerRunSummary(
+        completed=terminal_counts.completed,
+        failed=terminal_counts.failed,
+        skipped=terminal_counts.skipped,
+        idle=True,
+    )
 
 
 def pause_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
@@ -1688,10 +1688,7 @@ def _attach_probe_and_advance(
         vapoursynth_identity_hash=identity.vapoursynth_identity_hash,
         execution_identity_hash=identity.execution_identity_hash,
     )
-    duplicate = session.exec(
-        select(Job).where(Job.queue_key == queue_key, Job.id != job.id)
-    ).first()
-    if duplicate is not None:
+    if queue_key_conflicts_with_other_job(session, queue_key=queue_key, job_id=job.id):
         _skip_claimed_job(
             session,
             job=job,
