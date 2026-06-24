@@ -56,9 +56,12 @@ from avarch.probe import (
     run_ffprobe,
     store_probe_result,
 )
+from avarch.promoter import promote_job
 from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
+from avarch.rejection_cleanup import RejectedOutputCleanupError, cleanup_rejected_output
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
+from avarch.size_policy import SizeDecision, evaluate_size_policy
 from avarch.validation import (
     ValidationError as OutputValidationError,
 )
@@ -783,6 +786,14 @@ async def execute_validation_job(
             attempt=attempt,
             report=report,
         )
+        if report.passed:
+            _apply_size_policy_after_validation(
+                job=job,
+                plan=plan,
+                report=report,
+                config=config,
+                now=utc_now(),
+            )
         if report.passed and job.hold_requested_at is not None:
             _clear_hold_fields(job)
         attempt.details_json = canonical_json(
@@ -796,6 +807,15 @@ async def execute_validation_job(
         )
         session.add(attempt)
         return result
+
+
+async def execute_promotion_job(
+    *,
+    job_id: int,
+    runner_id: str,
+    config: AppConfig,
+) -> None:
+    await promote_job(job_id=job_id, config=config, owner_token=runner_id)
 
 
 def acquire_scheduler_lease(
@@ -967,6 +987,7 @@ async def run_scheduler(
         JobStage.PLAN: execute_plan_job,
         JobStage.ENCODE: execute_encode_job,
         JobStage.VALIDATE: execute_validation_job,
+        JobStage.PROMOTE: execute_promotion_job,
     }
     active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
     active_job_ids: set[int] = set()
@@ -1696,11 +1717,16 @@ def _claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
     jobs = list(
         session.exec(
             select(Job)
-            .where(Job.status == JobStatus.PENDING)
+            .where(col(Job.status).in_([JobStatus.QUEUED, JobStatus.READY_TO_PROMOTE]))
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
         ).all()
     )
-    return [job for job in jobs if job.id not in active_job_ids]
+    return [
+        job
+        for job in jobs
+        if job.id not in active_job_ids
+        and (job.status == JobStatus.QUEUED or job.stage == JobStage.PROMOTE)
+    ]
 
 
 def _has_resource_capacity(
@@ -1715,11 +1741,47 @@ def _has_resource_capacity(
         if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}
     )
     av1an = sum(1 for _job_id, stage in active.values() if stage == JobStage.ENCODE)
+    file_ops = sum(1 for _job_id, stage in active.values() if stage == JobStage.PROMOTE)
     if job.stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}:
         return cheap < config.resources.cheap_workers
     if job.stage == JobStage.ENCODE:
         return av1an < config.resources.av1an_jobs
+    if job.stage == JobStage.PROMOTE:
+        return file_ops < config.resources.file_ops
     return False
+
+
+def _apply_size_policy_after_validation(
+    *,
+    job: Job,
+    plan: TranscodePlan,
+    report: Any,
+    config: AppConfig,
+    now: datetime,
+) -> None:
+    profile = _require_profile(config, job.profile_name).profile
+    encoded_size = (
+        report.observed.output_size_bytes
+        if report.observed is not None and report.observed.output_size_bytes is not None
+        else Path(report.output_path).stat().st_size
+    )
+    decision = evaluate_size_policy(
+        plan.validation.source_size_bytes,
+        encoded_size,
+        profile,
+    )
+    if decision == SizeDecision.ACCEPT:
+        return
+    try:
+        cleanup_rejected_output(
+            job,
+            encoded_path=Path(report.output_path),
+            decision=decision,
+            profile=profile,
+            now=now,
+        )
+    except RejectedOutputCleanupError:
+        return
 
 
 def _get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:

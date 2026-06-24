@@ -61,6 +61,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
         {
             JobStatus.READY_TO_PROMOTE,
             JobStatus.PROMOTING,
+            JobStatus.SIZE_REJECTED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         }
