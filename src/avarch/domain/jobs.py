@@ -100,6 +100,26 @@ class JobTransition:
     updated_at: datetime | None = None
 
 
+def active_status_for_stage(stage: JobStage | str) -> JobStatus:
+    normalized_stage = JobStage(stage)
+    if normalized_stage == JobStage.VALIDATE:
+        return JobStatus.VALIDATING
+    if normalized_stage == JobStage.PROMOTE:
+        return JobStatus.PROMOTING
+    return JobStatus.ENCODING
+
+
+def job_can_be_claimed_for_stage(status: JobStatus | str, stage: JobStage | str) -> bool:
+    normalized_status = JobStatus(status)
+    normalized_stage = JobStage(stage)
+    if normalized_status == JobStatus.QUEUED:
+        return True
+    return normalized_stage == JobStage.VALIDATE and normalized_status in {
+        JobStatus.ENCODED,
+        JobStatus.VALIDATING,
+    }
+
+
 _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     JobStatus.QUEUED: frozenset(
         {

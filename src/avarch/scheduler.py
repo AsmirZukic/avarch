@@ -43,6 +43,7 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     RejectedOutputCleanupError,
     cleanup_rejected_output,
 )
+from avarch.adapters.sqlite.scheduler_state import get_or_create_scheduler_state
 from avarch.adapters.sqlite.validations import (
     latest_validation,
     persist_validation_result,
@@ -54,6 +55,8 @@ from avarch.domain.jobs import (
     JobEventType,
     JobStage,
     JobStatus,
+    active_status_for_stage,
+    job_can_be_claimed_for_stage,
 )
 from avarch.domain.scheduler import (
     ResourceCapacity,
@@ -330,10 +333,10 @@ def claim_job_stage(
     now: datetime,
 ) -> JobAttempt:
     job = _require_job(session, job_id)
-    if not _job_can_be_claimed_for_stage(job):
+    if not job_can_be_claimed_for_stage(job.status, job.stage):
         raise JobClaimError(f"Job is not claimable: {job_id}")
 
-    job.status = _active_status_for_stage(job.stage)
+    job.status = active_status_for_stage(job.stage)
     job.claimed_by = runner_id
     job.attempts += 1
     job.started_at = job.started_at or now
@@ -854,7 +857,7 @@ def acquire_scheduler_lease(
     now: datetime,
     resume: bool = False,
 ) -> SchedulerState:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if (
         state.runner_id is not None
         and state.lease_expires_at is not None
@@ -896,7 +899,7 @@ def renew_scheduler_lease(
     runner_id: str,
     now: datetime,
 ) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if state.runner_id != runner_id:
         raise SchedulerLeaseLostError("Scheduler lease belongs to another runner.")
     state.heartbeat_at = now
@@ -911,7 +914,7 @@ def release_scheduler_lease(
     runner_id: str,
     now: datetime,
 ) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if state.runner_id != runner_id:
         return
     state.runner_id = None
@@ -1114,13 +1117,13 @@ async def run_scheduler(
                     _interrupt_running_job(engine, job_id=job_id)
 
             with Session(engine) as session:
-                state = _get_or_create_scheduler_state(session, now=now)
+                state = get_or_create_scheduler_state(session, now=now)
                 if state.runner_id != runner_id:
                     raise SchedulerLeaseLostError("Scheduler lease belongs to another runner.")
                 current_mode = SchedulerMode(state.mode)
                 if state.acknowledged_generation != state.control_generation:
                     with Session(engine) as ack_session, ack_session.begin():
-                        ack_state = _get_or_create_scheduler_state(ack_session, now=utc_now())
+                        ack_state = get_or_create_scheduler_state(ack_session, now=utc_now())
                         if ack_state.runner_id == runner_id:
                             ack_state.acknowledged_generation = ack_state.control_generation
                             ack_state.control_acknowledged_at = utc_now()
@@ -1190,7 +1193,7 @@ async def run_scheduler(
 
 
 def pause_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if state.mode == SchedulerMode.PAUSED:
         return
     if state.mode != SchedulerMode.RUNNING:
@@ -1200,7 +1203,7 @@ def pause_scheduler(session: Session, *, now: datetime, reason: str | None = Non
 
 
 def resume_scheduler(session: Session, *, now: datetime) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if state.mode == SchedulerMode.RUNNING:
         return
     if state.mode != SchedulerMode.PAUSED:
@@ -1210,7 +1213,7 @@ def resume_scheduler(session: Session, *, now: datetime) -> None:
 
 
 def drain_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if not _lease_active(state, now=now):
         raise SchedulerControlError("No active scheduler lease is running.")
     if state.mode != SchedulerMode.RUNNING:
@@ -1220,7 +1223,7 @@ def drain_scheduler(session: Session, *, now: datetime, reason: str | None = Non
 
 
 def stop_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     if not _lease_active(state, now=now):
         raise SchedulerControlError("No active scheduler lease is running.")
     if state.mode not in {SchedulerMode.RUNNING, SchedulerMode.PAUSED}:
@@ -1230,7 +1233,7 @@ def stop_scheduler(session: Session, *, now: datetime, reason: str | None = None
 
 
 def scheduler_status(session: Session, *, now: datetime) -> SchedulerStatus:
-    state = _get_or_create_scheduler_state(session, now=now)
+    state = get_or_create_scheduler_state(session, now=now)
     counts_by_status = {
         status: len(session.exec(select(Job).where(Job.status == status)).all())
         for status in JobStatus
@@ -1848,32 +1851,6 @@ def _apply_size_policy_after_validation(
         )
     except RejectedOutputCleanupError:
         return
-
-
-def _get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:
-    state = session.get(SchedulerState, 1)
-    if state is None:
-        state = SchedulerState(id=1, mode=SchedulerMode.RUNNING, updated_at=now)
-        session.add(state)
-        session.flush()
-    return state
-
-
-def _active_status_for_stage(stage: JobStage) -> JobStatus:
-    if stage == JobStage.VALIDATE:
-        return JobStatus.VALIDATING
-    if stage == JobStage.PROMOTE:
-        return JobStatus.PROMOTING
-    return JobStatus.ENCODING
-
-
-def _job_can_be_claimed_for_stage(job: Job) -> bool:
-    if job.status == JobStatus.QUEUED:
-        return True
-    return job.stage == JobStage.VALIDATE and job.status in {
-        JobStatus.ENCODED,
-        JobStatus.VALIDATING,
-    }
 
 
 def _request_scheduler_mode(
