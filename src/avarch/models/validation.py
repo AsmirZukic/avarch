@@ -74,6 +74,11 @@ class ValidationCheckStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class ValidationResult(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+
+
 class ValidationCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -127,6 +132,18 @@ class ValidationReport(BaseModel):
 
     started_at: datetime
     finished_at: datetime
+
+    @property
+    def result(self) -> ValidationResult:
+        return ValidationResult.PASS if checks_pass(self.checks) else ValidationResult.FAIL
+
+    @property
+    def failure_reasons(self) -> list[str]:
+        return [
+            check.message or check.name
+            for check in self.checks
+            if check.required and check.status != ValidationCheckStatus.PASS
+        ]
 
 
 def checks_pass(checks: list[ValidationCheck]) -> bool:
