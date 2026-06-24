@@ -6,8 +6,11 @@ import pytest
 
 from avarch.domain.jobs import (
     JobOutcomeReason,
+    JobStage,
     JobStatus,
     JobTransitionError,
+    active_status_for_stage,
+    job_can_be_claimed_for_stage,
     plan_job_transition,
 )
 
@@ -46,3 +49,35 @@ def test_plan_job_transition_normalizes_reason_value() -> None:
     )
 
     assert transition.outcome_reason == JobOutcomeReason.FAILED_VALIDATION
+
+
+@pytest.mark.parametrize(
+    "stage,expected_status",
+    [
+        (JobStage.PROBE, JobStatus.ENCODING),
+        (JobStage.PLAN, JobStatus.ENCODING),
+        (JobStage.ENCODE, JobStatus.ENCODING),
+        (JobStage.VALIDATE, JobStatus.VALIDATING),
+        (JobStage.PROMOTE, JobStatus.PROMOTING),
+    ],
+)
+def test_active_status_for_stage(stage: JobStage, expected_status: JobStatus) -> None:
+    assert active_status_for_stage(stage) == expected_status
+
+
+@pytest.mark.parametrize(
+    "status,stage,expected",
+    [
+        (JobStatus.QUEUED, JobStage.PROBE, True),
+        (JobStatus.ENCODED, JobStage.VALIDATE, True),
+        (JobStatus.VALIDATING, JobStage.VALIDATE, True),
+        (JobStatus.ENCODED, JobStage.ENCODE, False),
+        (JobStatus.FAILED, JobStage.VALIDATE, False),
+    ],
+)
+def test_job_can_be_claimed_for_stage(
+    status: JobStatus,
+    stage: JobStage,
+    expected: bool,
+) -> None:
+    assert job_can_be_claimed_for_stage(status, stage) is expected

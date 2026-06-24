@@ -17,6 +17,14 @@ class PromotionLeaseOwnershipError(ValueError):
     pass
 
 
+class PromotionActiveLeaseError(ValueError):
+    pass
+
+
+class PromotionRecoveryLookupError(LookupError):
+    pass
+
+
 def has_completed_promotion(session: Session, job: Job) -> bool:
     if job.id is None:
         return False
@@ -37,6 +45,21 @@ def latest_promotion_record(session: Session, *, job_id: int) -> PromotionRecord
         .where(PromotionRecord.job_id == job_id)
         .order_by(col(PromotionRecord.created_at).desc(), col(PromotionRecord.id).desc())
     ).first()
+
+
+def recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> PromotionRecord:
+    record = latest_promotion_record(session, job_id=job_id)
+    if record is None:
+        raise PromotionRecoveryLookupError("No promotion record exists for this job.")
+    if record.status == PromotionStatus.COMPLETED:
+        raise PromotionRecoveryLookupError("Promotion is already completed.")
+    if (
+        record.lease_expires_at is not None
+        and record.lease_expires_at > now
+        and record.owner_token is not None
+    ):
+        raise PromotionActiveLeaseError("Promotion lease is still active.")
+    return record
 
 
 def renew_promotion_lease(

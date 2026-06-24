@@ -33,12 +33,14 @@ from avarch.adapters.sqlite.models import (
     ValidationResult,
 )
 from avarch.adapters.sqlite.promotions import (
+    PromotionActiveLeaseError,
     PromotionLeaseOwnershipError,
     PromotionRecordNotFoundError,
+    PromotionRecoveryLookupError,
     has_active_promotion_lease,
     has_active_target_lease,
     has_completed_promotion,
-    latest_promotion_record,
+    recoverable_promotion,
     renew_promotion_lease,
 )
 from avarch.adapters.sqlite.validations import latest_validation
@@ -567,7 +569,12 @@ async def recover_promotion(
 ) -> PromotionRecord:
     engine = create_db_engine(config.database.url)
     with Session(engine) as session, session.begin():
-        record = _recoverable_promotion(session, job_id=job_id, now=_utc_now())
+        try:
+            record = recoverable_promotion(session, job_id=job_id, now=_utc_now())
+        except PromotionRecoveryLookupError as exc:
+            raise PromotionRecoveryError(str(exc)) from exc
+        except PromotionActiveLeaseError as exc:
+            raise PromotionLeaseError(str(exc)) from exc
         record.owner_token = owner_token
         record.heartbeat_at = _utc_now()
         record.lease_expires_at = _utc_now() + timedelta(seconds=PROMOTION_LEASE_SECONDS)
@@ -942,21 +949,6 @@ def mark_promotion_failed_or_validated(
     session.add(record)
     session.add(attempt)
     session.add(job)
-
-
-def _recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> PromotionRecord:
-    record = latest_promotion_record(session, job_id=job_id)
-    if record is None:
-        raise PromotionRecoveryError("No promotion record exists for this job.")
-    if record.status == PromotionStatus.COMPLETED:
-        raise PromotionRecoveryError("Promotion is already completed.")
-    if (
-        record.lease_expires_at is not None
-        and record.lease_expires_at > now
-        and record.owner_token is not None
-    ):
-        raise PromotionLeaseError("Promotion lease is still active.")
-    return record
 
 
 def _load_job_plan(job: Job) -> TranscodePlan:

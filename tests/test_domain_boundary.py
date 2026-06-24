@@ -91,6 +91,7 @@ OBSOLETE_IMPORT_MEMBERS = {
     "avarch.promoter": frozenset(
         {
             "calculate_promotion_digest",
+            "recoverable_promotion",
             "release_promotion_lease",
             "renew_promotion_lease",
             "write_promotion_journal",
@@ -98,6 +99,26 @@ OBSOLETE_IMPORT_MEMBERS = {
     ),
     "avarch.scheduler": frozenset(
         {
+            "claimable_jobs",
+            "has_resource_capacity",
+            "resource_for_stage",
+        }
+    ),
+}
+
+OBSOLETE_FUNCTION_DEFINITIONS = {
+    "avarch.promoter": frozenset(
+        {
+            "_recoverable_promotion",
+            "release_promotion_lease",
+            "renew_promotion_lease",
+        }
+    ),
+    "avarch.scheduler": frozenset(
+        {
+            "_active_status_for_stage",
+            "_get_or_create_scheduler_state",
+            "_job_can_be_claimed_for_stage",
             "claimable_jobs",
             "has_resource_capacity",
             "resource_for_stage",
@@ -158,6 +179,18 @@ def test_obsolete_import_members_are_not_used() -> None:
     assert violations == []
 
 
+def test_obsolete_function_definitions_are_not_reintroduced() -> None:
+    violations: list[str] = []
+    for module_name, obsolete_functions in OBSOLETE_FUNCTION_DEFINITIONS.items():
+        path = _module_path(module_name)
+        defined_functions = set(_defined_functions(path))
+        for function_name in sorted(obsolete_functions & defined_functions):
+            relative_path = path.relative_to(PACKAGE_ROOT.parent.parent)
+            violations.append(f"{relative_path} defines {function_name}")
+
+    assert violations == []
+
+
 def test_validation_module_does_not_import_adapters() -> None:
     imported_adapters = sorted(
         imported_name
@@ -191,6 +224,13 @@ def _test_module_paths() -> list[Path]:
     return sorted(path for path in test_root.rglob("*.py") if path.is_file())
 
 
+def _module_path(module_name: str) -> Path:
+    if not module_name.startswith("avarch."):
+        raise ValueError(f"Unsupported module: {module_name}")
+    relative_module = module_name.removeprefix("avarch.").replace(".", "/")
+    return PACKAGE_ROOT / f"{relative_module}.py"
+
+
 def _imported_names(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     imported_names: list[str] = []
@@ -209,6 +249,11 @@ def _imported_members(path: Path) -> list[tuple[str, str]]:
         if isinstance(node, ast.ImportFrom) and node.module is not None:
             imported_members.extend((node.module, alias.name) for alias in node.names)
     return imported_members
+
+
+def _defined_functions(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
 
 
 def _is_forbidden_import(imported_name: str) -> bool:
