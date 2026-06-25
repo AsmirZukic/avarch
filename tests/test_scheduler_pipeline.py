@@ -107,7 +107,7 @@ def test_scheduler_continues_after_promotion_failure(
             error_message="failed",
         )
 
-    monkeypatch.setattr("avarch.scheduler.promote_job", fake_promote_job)
+    monkeypatch.setattr("avarch.scheduler_workers.promote_job", fake_promote_job)
     database_path = tmp_path / "avarch.adapters.sqlite.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
     engine = create_db_engine(config.database.url)
