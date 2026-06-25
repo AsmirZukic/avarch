@@ -37,6 +37,7 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "job_lifecycle.py",
         "rejection_cleanup.py",
         "scheduler.py",
+        "scheduler_queue.py",
         "size_policy.py",
     }
 )
