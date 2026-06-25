@@ -36,7 +36,6 @@ from avarch.adapters.sqlite.inventory import (
     select_inventory_files,
     update_inventory,
 )
-from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_database
 from avarch.adapters.sqlite.models import (
     Job,
@@ -59,8 +58,6 @@ from avarch.adapters.sqlite.planning import (
 from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
-from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
-from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
 from avarch.adapters.sqlite.scheduler_state import (
     SchedulerAlreadyRunningError,
     SchedulerControlError,
@@ -86,6 +83,12 @@ from avarch.application.scheduler_control import (
     pause_scheduler,
     resume_scheduler,
     stop_scheduler,
+)
+from avarch.bootstrap import (
+    job_control_store,
+    queue_control_store,
+    queue_retry_store,
+    scheduler_control_store,
 )
 from avarch.config import (
     WORKSPACE_CONFIG_TEXT,
@@ -689,7 +692,7 @@ def run_queue(
         try:
             with Session(engine) as session, session.begin():
                 stop_scheduler(
-                    SqliteSchedulerControlStore(session),
+                    scheduler_control_store(session),
                     now=_utc_now(),
                     reason="SIGTERM",
                 )
@@ -753,7 +756,7 @@ def queue_retry_command(
     try:
         with Session(engine) as session, session.begin():
             summary = retry_queue(
-                SqliteQueueRetryStore(session, config=runtime_config),
+                queue_retry_store(session, config=runtime_config),
                 actor=cli_actor(),
                 now=_utc_now(),
                 job_ids=set(job_id or []) or None,
@@ -799,7 +802,7 @@ def pause(
     try:
         with Session(engine) as session, session.begin():
             pause_scheduler(
-                SqliteSchedulerControlStore(session),
+                scheduler_control_store(session),
                 now=_utc_now(),
                 reason=reason,
             )
@@ -824,7 +827,7 @@ def resume_scheduler_command() -> None:
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            resume_scheduler(SqliteSchedulerControlStore(session), now=_utc_now())
+            resume_scheduler(scheduler_control_store(session), now=_utc_now())
     except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
@@ -845,7 +848,7 @@ def drain_scheduler_command(
     try:
         with Session(engine) as session, session.begin():
             drain_scheduler(
-                SqliteSchedulerControlStore(session),
+                scheduler_control_store(session),
                 now=_utc_now(),
                 reason=reason,
             )
@@ -879,7 +882,7 @@ def stop_scheduler_command(
         try:
             with Session(engine) as session, session.begin():
                 stop_scheduler(
-                    SqliteSchedulerControlStore(session),
+                    scheduler_control_store(session),
                     now=_utc_now(),
                     reason=reason,
                 )
@@ -957,7 +960,7 @@ def scheduler_restart_command(
         try:
             with Session(engine) as session, session.begin():
                 stop_scheduler(
-                    SqliteSchedulerControlStore(session),
+                    scheduler_control_store(session),
                     now=_utc_now(),
                     reason="restart",
                 )
@@ -1157,7 +1160,7 @@ def jobs_cancel(
     try:
         with Session(engine) as session, session.begin():
             job_count = cancel_jobs(
-                SqliteJobControlStore(session),
+                job_control_store(session),
                 job_id=job_id,
                 running=running,
                 actor=cli_actor(),
@@ -1190,7 +1193,7 @@ def jobs_hold(
     try:
         with Session(engine) as session, session.begin():
             hold_job(
-                SqliteJobControlStore(session),
+                job_control_store(session),
                 job_id=job_id,
                 actor=cli_actor(),
                 reason=reason,
@@ -1213,7 +1216,7 @@ def jobs_release(
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
         changed = release_job(
-            SqliteJobControlStore(session),
+            job_control_store(session),
             job_id=job_id,
             actor=cli_actor(),
             now=_utc_now(),
@@ -1236,7 +1239,7 @@ def jobs_retry(
         with Session(engine) as session, session.begin():
             if failed:
                 summary = retry_queue(
-                    SqliteQueueRetryStore(session, config=runtime_config),
+                    queue_retry_store(session, config=runtime_config),
                     actor=cli_actor(),
                     now=_utc_now(),
                     statuses={JobStatus.FAILED},
@@ -1249,7 +1252,7 @@ def jobs_retry(
                 typer.echo("Provide JOB_ID or --failed.")
                 raise typer.Exit(1)
             next_stage = retry_job(
-                SqliteQueueRetryStore(session, config=runtime_config),
+                queue_retry_store(session, config=runtime_config),
                 job_id=job_id,
                 actor=cli_actor(),
                 now=_utc_now(),
@@ -1273,7 +1276,7 @@ def jobs_priority(
     try:
         with Session(engine) as session, session.begin():
             update_job_priority(
-                SqliteJobControlStore(session),
+                job_control_store(session),
                 job_id=job_id,
                 priority=value,
                 actor=cli_actor(),
@@ -1306,7 +1309,7 @@ def jobs_clear(
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            SqliteQueueControlStore(session),
+            queue_control_store(session),
             actor=cli_actor(),
             now=_utc_now(),
             statuses=statuses,
@@ -1389,7 +1392,7 @@ def queue_clear_command(
     try:
         with Session(engine) as session, session.begin():
             summary = clear_queue(
-                SqliteQueueControlStore(session),
+                queue_control_store(session),
                 actor=cli_actor(),
                 now=_utc_now(),
                 job_ids=set(job_id or []) or None,
