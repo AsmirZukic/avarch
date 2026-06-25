@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -53,7 +53,7 @@ SCHEDULER_IDLE_EXIT_SECONDS = 2.0
 SCHEDULER_CONTROL_POLL_SECONDS = 0.5
 MAX_CLI_LOG_TAIL_BYTES = 64 * 1024
 
-JobWorker = Callable[..., Awaitable[Any]]
+JobWorker = Callable[..., Coroutine[Any, Any, Any]]
 
 
 @dataclass(frozen=True, slots=True)
