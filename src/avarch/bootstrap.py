@@ -7,6 +7,7 @@ from avarch.adapters.scheduler_process import SchedulerProcessAdapter
 from avarch.adapters.scheduler_run import SchedulerRuntimeAdapter
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
+from avarch.adapters.sqlite.job_views import SqliteJobViewStore
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
 from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
@@ -19,6 +20,10 @@ def enqueue_store(session: Session) -> SqliteEnqueueStore:
 
 def job_control_store(session: Session) -> SqliteJobControlStore:
     return SqliteJobControlStore(session)
+
+
+def job_view_store(session: Session) -> SqliteJobViewStore:
+    return SqliteJobViewStore(session)
 
 
 def queue_control_store(session: Session) -> SqliteQueueControlStore:
