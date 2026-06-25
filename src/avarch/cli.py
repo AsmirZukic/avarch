@@ -36,13 +36,7 @@ from avarch.adapters.sqlite.inventory import (
     select_inventory_files,
     update_inventory,
 )
-from avarch.adapters.sqlite.job_control import (
-    JobControlError,
-    cancel_job,
-    hold_job,
-    release_job,
-    update_job_priority,
-)
+from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_database
 from avarch.adapters.sqlite.models import (
     Job,
@@ -76,6 +70,13 @@ from avarch.adapters.sqlite.scheduler_state import (
 )
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
+from avarch.application.job_control import (
+    JobControlWorkflowError,
+    cancel_jobs,
+    hold_job,
+    release_job,
+    update_job_priority,
+)
 from avarch.application.queue_control import (
     QueueControlError,
     clear_queue,
@@ -1131,27 +1132,15 @@ def jobs_cancel(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            if running:
-                running_jobs = list(
-                    session.exec(select(Job).where(Job.status == JobStatus.ENCODING)).all()
-                )
-                for job in running_jobs:
-                    if job.id is not None:
-                        cancel_job(
-                            session,
-                            job_id=job.id,
-                            actor=cli_actor(),
-                            reason=reason,
-                            now=_utc_now(),
-                        )
-                job_count = len(running_jobs)
-            elif job_id is not None:
-                cancel_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
-                job_count = 1
-            else:
-                typer.echo("Provide JOB_ID or --running.")
-                raise typer.Exit(1)
-    except JobControlError as exc:
+            job_count = cancel_jobs(
+                SqliteJobControlStore(session),
+                job_id=job_id,
+                running=running,
+                actor=cli_actor(),
+                reason=reason,
+                now=_utc_now(),
+            )
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"Job cancellation requested: {job_count}")
@@ -1176,8 +1165,14 @@ def jobs_hold(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            hold_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
-    except QueueControlError as exc:
+            hold_job(
+                SqliteJobControlStore(session),
+                job_id=job_id,
+                actor=cli_actor(),
+                reason=reason,
+                now=_utc_now(),
+            )
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job hold requested")
@@ -1193,7 +1188,12 @@ def jobs_release(
     _upgrade_database_or_exit(database_url)
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
-        changed = release_job(session, job_id=job_id, actor=cli_actor(), now=_utc_now())
+        changed = release_job(
+            SqliteJobControlStore(session),
+            job_id=job_id,
+            actor=cli_actor(),
+            now=_utc_now(),
+        )
     typer.echo("Job released" if changed else "No hold request exists")
 
 
@@ -1249,13 +1249,13 @@ def jobs_priority(
     try:
         with Session(engine) as session, session.begin():
             update_job_priority(
-                session,
+                SqliteJobControlStore(session),
                 job_id=job_id,
                 priority=value,
                 actor=cli_actor(),
                 now=_utc_now(),
             )
-    except JobControlError as exc:
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job priority updated")
