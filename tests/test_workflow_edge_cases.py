@@ -23,6 +23,10 @@ from avarch.adapters.sqlite.models import (
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.validation import validate_output
+from avarch.application.vapoursynth_identity import (
+    GENERATOR_VERSION,
+    build_vapoursynth_identity_hash,
+)
 from avarch.cli import app
 from avarch.config import AppConfig, load_config
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, ResourceClass
@@ -36,7 +40,6 @@ from avarch.models.validation import (
 from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
 from avarch.profiles.registry import ProfileRegistry
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 

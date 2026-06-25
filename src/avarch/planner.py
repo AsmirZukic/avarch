@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from avarch.adapters.vpy_env import VpyRequirements, build_runtime_identity, load_requirements
+from avarch.application.vapoursynth_identity import (
+    GENERATOR_VERSION,
+    ResolvedVapourSynthFilter,
+    ResolvedVapourSynthTemplate,
+    build_vapoursynth_identity_hash,
+    resolve_vapoursynth_filter,
+)
 from avarch.contracts import (
     EXECUTION_IDENTITY_HASH_CONTRACT,
     PLAN_HASH_CONTRACT,
@@ -52,14 +60,6 @@ from avarch.models.validation import (
 )
 from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import (
-    GENERATOR_VERSION,
-    ResolvedVapourSynthFilter,
-    ResolvedVapourSynthTemplate,
-    build_vapoursynth_identity_hash,
-    resolve_vapoursynth_filter,
-)
-from avarch.vpy_env import VpyRequirements, build_runtime_identity, load_requirements
 from avarch.workspace import WorkspaceContext, WorkspaceError
 
 

@@ -21,6 +21,10 @@ from avarch.adapters.sqlite.models import (
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.application.queue_control import QueueControlError, clear_queue, retry_job, retry_queue
+from avarch.application.vapoursynth_identity import (
+    GENERATOR_VERSION,
+    build_vapoursynth_identity_hash,
+)
 from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
@@ -28,7 +32,6 @@ from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStat
 from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
 from avarch.profiles.registry import ProfileRegistry
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 

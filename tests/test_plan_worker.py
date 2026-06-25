@@ -16,12 +16,13 @@ from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.vapoursynth import generate_vapoursynth_script
 from avarch.application.enqueue import enqueue_inventory
+from avarch.application.vapoursynth_identity import resolve_vapoursynth_template
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.planner import build_plan
 from avarch.profiles.registry import ProfileRegistry
-from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
 from tests.probe_fixtures import sdr_probe_payload
 
 

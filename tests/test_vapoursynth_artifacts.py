@@ -9,12 +9,12 @@ from avarch.adapters.filesystem.plans import (
     validation_report_path_for_plan_artifact,
     write_plan_artifacts,
 )
-from avarch.models.plan import TranscodePlan
-from avarch.vapoursynth import (
+from avarch.adapters.vapoursynth import generate_builtin_script
+from avarch.application.vapoursynth_identity import (
     ResolvedVapourSynthFilter,
     ResolvedVapourSynthTemplate,
-    generate_builtin_script,
 )
+from avarch.models.plan import TranscodePlan
 from tests.test_plan_models import sample_plan
 
 

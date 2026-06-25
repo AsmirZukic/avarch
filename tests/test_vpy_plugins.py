@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from avarch.adapters.vpy_plugins import VpyPluginInfo, plugin_info_from_object
 from avarch.cli import app
-from avarch.vpy_plugins import VpyPluginInfo, plugin_info_from_object
 
 runner = CliRunner()
 
