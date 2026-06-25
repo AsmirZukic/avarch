@@ -155,7 +155,12 @@ OBSOLETE_IMPORT_MEMBERS = {
     "avarch.scheduler_queue": frozenset(
         {
             "QueueClearSummary",
+            "QueueRetrySummary",
+            "RetrySummary",
             "clear_queue",
+            "retry_failed_jobs",
+            "retry_job",
+            "retry_queue",
         }
     ),
 }
@@ -236,6 +241,9 @@ OBSOLETE_FUNCTION_DEFINITIONS = {
     "avarch.scheduler_queue": frozenset(
         {
             "clear_queue",
+            "retry_failed_jobs",
+            "retry_job",
+            "retry_queue",
         }
     ),
 }

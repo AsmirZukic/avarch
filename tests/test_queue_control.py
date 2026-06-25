@@ -8,7 +8,6 @@ from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
-from avarch.adapters.sqlite.job_control import JobControlError
 from avarch.adapters.sqlite.models import (
     Job,
     JobEvent,
@@ -18,8 +17,8 @@ from avarch.adapters.sqlite.models import (
     ValidationResult,
 )
 from avarch.adapters.sqlite.probes import store_probe_result
-from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore
-from avarch.application.queue_control import QueueControlError, clear_queue
+from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
+from avarch.application.queue_control import QueueControlError, clear_queue, retry_job, retry_queue
 from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
@@ -28,7 +27,6 @@ from avarch.planner import build_execution_identity, build_profile_hash, finaliz
 from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
-from avarch.scheduler_queue import retry_job, retry_queue
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
@@ -201,8 +199,7 @@ def test_queue_retry_preview_does_not_mutate_retryable_job(tmp_path: Path) -> No
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -244,8 +241,7 @@ def test_queue_retry_resolves_safe_resume_stage(
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -276,8 +272,7 @@ def test_queue_retry_reports_reenqueue_when_source_identity_changed(tmp_path: Pa
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -319,8 +314,7 @@ def test_queue_retry_resets_to_plan_when_vapoursynth_identity_changed(tmp_path: 
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -344,11 +338,10 @@ def test_retry_job_rejects_completed_promotion(tmp_path: Path) -> None:
         job_id = job.id or 0
         _store_completed_promotion(session, job_id=job_id, now=now)
 
-    with Session(engine) as session, session.begin(), pytest.raises(JobControlError):
+    with Session(engine) as session, session.begin(), pytest.raises(QueueControlError):
         retry_job(
-            session,
+            SqliteQueueRetryStore(session, config=config),
             job_id=job_id,
-            config=config,
             actor="test",
             now=now,
         )
