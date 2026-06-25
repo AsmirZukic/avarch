@@ -85,6 +85,15 @@ from avarch.application.scheduler_control import (
     resume_scheduler,
     stop_scheduler,
 )
+from avarch.application.scheduler_process import (
+    SchedulerLifecycleError,
+    launch_detached,
+    remove_metadata,
+    terminate_scheduler,
+    verified_status,
+    workspace_lock,
+    write_current_metadata,
+)
 from avarch.application.scheduler_run import (
     MAX_CLI_LOG_TAIL_BYTES,
     cli_actor,
@@ -98,6 +107,7 @@ from avarch.bootstrap import (
     queue_control_store,
     queue_retry_store,
     scheduler_control_store,
+    scheduler_process_controller,
     scheduler_runner,
     scheduler_status_store,
 )
@@ -151,17 +161,6 @@ from avarch.promoter import (
     validate_promotion_preflight,
 )
 from avarch.scanner import ScanError, ScanResult, scan_root
-from avarch.scheduler_lifecycle import (
-    SchedulerLifecycleError,
-    SchedulerWorkspaceLock,
-    current_process_metadata,
-    launch_detached,
-    remove_metadata,
-    runtime_paths,
-    terminate_scheduler,
-    verified_status,
-    write_metadata,
-)
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
@@ -665,6 +664,7 @@ def run_queue(
             child_argv.append("--resume")
         try:
             metadata = launch_detached(
+                scheduler_process_controller(),
                 workspace=workspace,
                 argv=child_argv,
             )
@@ -685,8 +685,8 @@ def run_queue(
     typer.echo("")
     _echo_queue_counts(database_url)
 
-    paths = runtime_paths(workspace)
-    lock = SchedulerWorkspaceLock(paths.lock_path)
+    process_controller = scheduler_process_controller()
+    lock = workspace_lock(process_controller, workspace=workspace)
     runner_id = new_runner_id()
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
@@ -704,8 +704,7 @@ def run_queue(
 
     try:
         lock.acquire()
-        metadata = current_process_metadata(workspace=workspace, mode=mode)
-        write_metadata(paths, metadata)
+        write_current_metadata(process_controller, workspace=workspace, mode=mode)
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
             run_scheduler(
@@ -725,7 +724,7 @@ def run_queue(
         raise typer.Exit(130) from exc
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
-        remove_metadata(paths)
+        remove_metadata(process_controller, workspace=workspace)
         lock.release()
 
     typer.echo("")
@@ -802,7 +801,7 @@ def pause(
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
     workspace = _workspace_for_config(config)
-    if verified_status(workspace).metadata is None:
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is None:
         typer.echo("No live scheduler process exists.")
         raise typer.Exit(1)
 
@@ -828,7 +827,7 @@ def resume_scheduler_command() -> None:
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
     workspace = _workspace_for_config(config)
-    if verified_status(workspace).metadata is None:
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is None:
         typer.echo("No live scheduler process exists.")
         raise typer.Exit(1)
 
@@ -885,7 +884,7 @@ def stop_scheduler_command(
     _upgrade_database_or_exit(database_url)
     workspace = _workspace_for_config(config)
     engine = create_db_engine(database_url)
-    live = verified_status(workspace).metadata is not None
+    live = verified_status(scheduler_process_controller(), workspace=workspace).metadata is not None
     if live and not force:
         try:
             with Session(engine) as session, session.begin():
@@ -898,12 +897,17 @@ def stop_scheduler_command(
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
     stopped = terminate_scheduler(
+        scheduler_process_controller(),
         workspace=workspace,
         force=force,
         timeout_seconds=timeout_seconds if wait else 0.1,
     )
     typer.echo("Scheduler stopped" if stopped or not live else "Scheduler stop requested")
-    if wait and verified_status(workspace).metadata is not None:
+    if (
+        wait
+        and verified_status(scheduler_process_controller(), workspace=workspace).metadata
+        is not None
+    ):
         typer.echo("Timed out waiting for scheduler stop.")
         raise typer.Exit(1)
 
@@ -915,7 +919,7 @@ def scheduler_status_command() -> None:
     database_url = resolve_database_url(app_config, config)
     _upgrade_database_or_exit(database_url)
     workspace = _workspace_for_config(config)
-    process_status = verified_status(workspace)
+    process_status = verified_status(scheduler_process_controller(), workspace=workspace)
     engine = create_db_engine(database_url)
     with Session(engine) as session:
         status = scheduler_status(scheduler_status_store(session), now=_utc_now())
@@ -958,7 +962,7 @@ def scheduler_restart_command(
     _upgrade_database_or_exit(database_url)
     workspace = _workspace_for_config(config)
     engine = create_db_engine(database_url)
-    if verified_status(workspace).metadata is not None:
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is not None:
         try:
             with Session(engine) as session, session.begin():
                 stop_scheduler(
@@ -969,6 +973,7 @@ def scheduler_restart_command(
         except SchedulerControlWorkflowError:
             pass
         if not terminate_scheduler(
+            scheduler_process_controller(),
             workspace=workspace,
             force=False,
             timeout_seconds=timeout_seconds,
@@ -976,7 +981,11 @@ def scheduler_restart_command(
             typer.echo("Unable to stop existing scheduler.")
             raise typer.Exit(1)
     try:
-        metadata = launch_detached(workspace=workspace, argv=["scheduler", "run"])
+        metadata = launch_detached(
+            scheduler_process_controller(),
+            workspace=workspace,
+            argv=["scheduler", "run"],
+        )
     except SchedulerLifecycleError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
