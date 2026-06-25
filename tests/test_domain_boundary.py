@@ -5,6 +5,7 @@ from pathlib import Path
 
 DOMAIN_ROOT = Path(__file__).resolve().parents[1] / "src" / "avarch" / "domain"
 PACKAGE_ROOT = DOMAIN_ROOT.parent
+APPLICATION_ROOT = PACKAGE_ROOT / "application"
 
 FORBIDDEN_IMPORT_ROOTS = frozenset(
     {
@@ -151,6 +152,12 @@ OBSOLETE_IMPORT_MEMBERS = {
             "update_job_priority",
         }
     ),
+    "avarch.scheduler_queue": frozenset(
+        {
+            "QueueClearSummary",
+            "clear_queue",
+        }
+    ),
 }
 
 OBSOLETE_FUNCTION_DEFINITIONS = {
@@ -224,6 +231,11 @@ OBSOLETE_FUNCTION_DEFINITIONS = {
             "skip_claimed_job",
             "stop_scheduler",
             "update_job_priority",
+        }
+    ),
+    "avarch.scheduler_queue": frozenset(
+        {
+            "clear_queue",
         }
     ),
 }
@@ -305,6 +317,28 @@ def test_validation_module_does_not_import_adapters() -> None:
     assert imported_adapters == []
 
 
+def test_application_modules_do_not_import_concrete_boundaries() -> None:
+    forbidden_roots = frozenset(
+        {
+            "avarch.adapters",
+            "sqlmodel",
+            "sqlalchemy",
+            "subprocess",
+            "typer",
+        }
+    )
+    violations: list[str] = []
+    for path in _application_module_paths():
+        for imported_name in _imported_names(path):
+            if any(
+                imported_name == forbidden or imported_name.startswith(f"{forbidden}.")
+                for forbidden in forbidden_roots
+            ):
+                violations.append(f"{path.relative_to(APPLICATION_ROOT)} imports {imported_name}")
+
+    assert violations == []
+
+
 def test_config_module_does_not_import_sqlalchemy() -> None:
     imported_sqlalchemy = sorted(
         imported_name
@@ -317,6 +351,12 @@ def test_config_module_does_not_import_sqlalchemy() -> None:
 
 def _domain_module_paths() -> list[Path]:
     return sorted(path for path in DOMAIN_ROOT.rglob("*.py") if path.is_file())
+
+
+def _application_module_paths() -> list[Path]:
+    if not APPLICATION_ROOT.exists():
+        return []
+    return sorted(path for path in APPLICATION_ROOT.rglob("*.py") if path.is_file())
 
 
 def _package_module_paths() -> list[Path]:

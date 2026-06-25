@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,11 +21,9 @@ from avarch.adapters.sqlite.queue import (
 )
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.config import AppConfig
-from avarch.domain.jobs import JobEventType, JobStage, JobStatus, job_can_retry
+from avarch.domain.jobs import JobStage, JobStatus, job_can_retry
 from avarch.domain.scheduler import (
-    QueueClearAction,
     RetryFacts,
-    classify_queue_clear_job,
     select_retry_stage,
 )
 from avarch.scheduler_support import (
@@ -36,13 +33,11 @@ from avarch.scheduler_support import (
     load_job_plan,
     output_exists,
     planning_identity,
-    require_id,
     require_profile,
     source_media_file,
     status_value,
     verify_job_profile,
 )
-from avarch.serialization import canonical_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,17 +56,6 @@ class RetrySummary:
     reset_to_encode: int
     reset_to_validate: int
     requires_requeue: int
-
-
-@dataclass(frozen=True, slots=True)
-class QueueClearSummary:
-    matched: int
-    immediate_cancel: int
-    running_requests: int
-    promotion_excluded: int
-    completed_excluded: int
-    changed: int
-    operation_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,76 +191,6 @@ def retry_failed_jobs(
         reset_to_encode=reset_to_encode,
         reset_to_validate=reset_to_validate,
         requires_requeue=requires_requeue,
-    )
-
-
-def clear_queue(
-    session: Session,
-    *,
-    actor: str,
-    now: datetime,
-    job_ids: set[int] | None = None,
-    statuses: set[JobStatus] | None = None,
-    stages: set[JobStage] | None = None,
-    profile: str | None = None,
-    all_jobs: bool = False,
-    cancel_running: bool = False,
-    confirm: bool = False,
-) -> QueueClearSummary:
-    try:
-        jobs = select_queue_jobs(
-            session,
-            job_ids=job_ids,
-            statuses=statuses,
-            stages=stages,
-            profile=profile,
-            all_jobs=all_jobs,
-        )
-    except QueueSelectionError as exc:
-        raise job_control.JobControlError(str(exc)) from exc
-    operation_id = uuid.uuid4().hex
-    immediate = 0
-    running = 0
-    promotion_excluded = 0
-    completed_excluded = 0
-    changed = 0
-    for job in jobs:
-        action = classify_queue_clear_job(
-            job.status,
-            job.stage,
-            cancel_running=cancel_running,
-        )
-        if action == QueueClearAction.EXCLUDE_TERMINAL:
-            completed_excluded += 1
-            continue
-        if action == QueueClearAction.EXCLUDE_RUNNING_PROMOTION:
-            promotion_excluded += 1
-            continue
-        if action == QueueClearAction.SKIP_RUNNING:
-            continue
-        if action == QueueClearAction.REQUEST_RUNNING_CANCEL:
-            running += 1
-        else:
-            immediate += 1
-        if confirm:
-            job_control.cancel_job(
-                session,
-                job_id=require_id(job),
-                actor=actor,
-                now=now,
-                reason="queue clear",
-                event_type=JobEventType.QUEUE_CLEARED,
-                details_json=canonical_json({"operation_id": operation_id}),
-            )
-            changed += 1
-    return QueueClearSummary(
-        matched=len(jobs),
-        immediate_cancel=immediate,
-        running_requests=running,
-        promotion_excluded=promotion_excluded,
-        completed_excluded=completed_excluded,
-        changed=changed,
-        operation_id=operation_id,
     )
 
 
