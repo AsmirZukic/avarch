@@ -6,7 +6,7 @@ import os
 import shutil
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -23,35 +23,43 @@ from avarch.adapters.filesystem.promotion import (
     write_promotion_journal,
 )
 from avarch.adapters.sqlite.db import create_db_engine
-from avarch.adapters.sqlite.job_transitions import transition_job
 from avarch.adapters.sqlite.models import (
     Job,
-    JobAttempt,
-    MediaFile,
-    MediaFileStatus,
     PromotionRecord,
     ValidationResult,
 )
 from avarch.adapters.sqlite.promotions import (
+    PromotedMediaFileSnapshot,
     PromotionActiveLeaseError,
+    PromotionClaimData,
+    PromotionClaimPersistenceError,
     PromotionLeaseOwnershipError,
     PromotionRecordNotFoundError,
     PromotionRecoveryLookupError,
+    claim_recoverable_promotion,
+    commit_verified_promotion,
     has_active_promotion_lease,
     has_active_target_lease,
     has_completed_promotion,
+    mark_promotion_rolled_back,
     next_promotion_attempt_number,
-    recoverable_promotion,
+    persist_promotion_claim,
     renew_promotion_lease,
+    require_promotion_job,
+    require_promotion_record,
+    set_promotion_phase,
+    update_promotion_cleanup,
+    update_promotion_staged,
+    update_promotion_verified,
+)
+from avarch.adapters.sqlite.promotions import (
+    mark_promotion_failed_or_validated as persist_promotion_failure,
 )
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.config import AppConfig
 from avarch.domain.jobs import (
-    AttemptStatus,
-    JobOutcomeReason,
     JobStage,
     JobStatus,
-    ResourceClass,
 )
 from avarch.domain.promotion import (
     PromotionPathConflictError,
@@ -395,7 +403,7 @@ def claim_promotion(
     owner_token: str,
     now: datetime,
 ) -> PromotionRecord:
-    job = _require_job(session, job_id)
+    job = _promotion_job(session, job_id)
     if job.status != JobStatus.VALIDATED or job.stage != JobStage.PROMOTE:
         raise PromotionEligibilityError("Job is not validated and ready for promotion.")
     if has_completed_promotion(session, job):
@@ -419,66 +427,33 @@ def claim_promotion(
 
     next_attempt_number = next_promotion_attempt_number(session, job=job, job_id=job_id)
 
-    transition_job(job, JobStatus.PROMOTING, now=now)
-    job.stage = JobStage.PROMOTE
-    job.claimed_by = owner_token
-    job.attempts = next_attempt_number
-    job.started_at = job.started_at or now
-    job.finished_at = None
-    job.updated_at = now
-    attempt = JobAttempt(
-        job_id=job_id,
-        attempt_number=next_attempt_number,
-        stage=JobStage.PROMOTE,
-        resource_class=ResourceClass.FILE_OP,
-        status=AttemptStatus.RUNNING,
-        runner_id=owner_token,
-        started_at=now,
-        temp_dir=str(plan.temp_dir),
-        output_path=str(preflight.final_path),
-    )
-    session.add(job)
-    session.add(attempt)
-    session.flush()
-    if attempt.id is None:
-        raise PromotionPersistenceError("Promotion attempt id was not assigned.")
-
-    record = PromotionRecord(
-        operation_id=operation_id,
-        job_id=job_id,
-        attempt_id=attempt.id,
-        validation_result_id=preflight.validation_result_id,
-        mode=mode,
-        status=PromotionStatus.RUNNING,
-        phase=PromotionPhase.PREPARED,
-        source_path=str(preflight.source_path),
-        validated_output_path=str(preflight.validated_output_path),
-        final_path=str(preflight.final_path),
-        promotion_target_path=str(preflight.final_path),
-        staging_path=str(preflight.staging_path),
-        backup_path=str(preflight.backup_path) if preflight.backup_path is not None else None,
-        source_fingerprint_before=preflight.source_fingerprint,
-        source_stat_json=canonical_json(preflight.source_stat),
-        validated_output_fingerprint=preflight.validated_output_fingerprint,
-        validated_output_digest=None,
-        staging_digest=None,
-        final_fingerprint=None,
-        final_digest=None,
-        journal_path=str(derive_promotion_journal_path(plan.runtime.runtime_dir)),
-        owner_token=owner_token,
-        heartbeat_at=now,
-        lease_expires_at=now + timedelta(seconds=PROMOTION_LEASE_SECONDS),
-        created_at=now,
-        updated_at=now,
-        started_at=now,
-    )
-    session.add(record)
-    session.flush()
-    if record.id is None:
-        raise PromotionPersistenceError("Promotion record id was not assigned.")
-    job.latest_promotion_id = record.id
-    session.add(job)
-    return record
+    try:
+        return persist_promotion_claim(
+            session,
+            job=job,
+            claim=PromotionClaimData(
+                operation_id=operation_id,
+                job_id=job_id,
+                validation_result_id=preflight.validation_result_id,
+                mode=mode,
+                source_path=preflight.source_path,
+                validated_output_path=preflight.validated_output_path,
+                final_path=preflight.final_path,
+                staging_path=preflight.staging_path,
+                backup_path=preflight.backup_path,
+                source_fingerprint=preflight.source_fingerprint,
+                source_stat_json=canonical_json(preflight.source_stat),
+                validated_output_fingerprint=preflight.validated_output_fingerprint,
+                journal_path=derive_promotion_journal_path(plan.runtime.runtime_dir),
+                temp_dir=plan.temp_dir,
+                owner_token=owner_token,
+                attempt_number=next_attempt_number,
+                now=now,
+                lease_seconds=PROMOTION_LEASE_SECONDS,
+            ),
+        )
+    except PromotionClaimPersistenceError as exc:
+        raise PromotionPersistenceError(str(exc)) from exc
 
 
 async def execute_promotion(
@@ -560,16 +535,17 @@ async def recover_promotion(
     engine = create_db_engine(config.database.url)
     with Session(engine) as session, session.begin():
         try:
-            record = recoverable_promotion(session, job_id=job_id, now=_utc_now())
+            record = claim_recoverable_promotion(
+                session,
+                job_id=job_id,
+                owner_token=owner_token,
+                now=_utc_now(),
+                lease_seconds=PROMOTION_LEASE_SECONDS,
+            )
         except PromotionRecoveryLookupError as exc:
             raise PromotionRecoveryError(str(exc)) from exc
         except PromotionActiveLeaseError as exc:
             raise PromotionLeaseError(str(exc)) from exc
-        record.owner_token = owner_token
-        record.heartbeat_at = _utc_now()
-        record.lease_expires_at = _utc_now() + timedelta(seconds=PROMOTION_LEASE_SECONDS)
-        record.status = PromotionStatus.RUNNING
-        session.add(record)
         promotion_id = _require_id(record)
     return await _execute_claimed_promotion(
         promotion_id=promotion_id,
@@ -591,8 +567,8 @@ async def _execute_claimed_promotion(
         owner_token=owner_token,
     )
     with Session(engine) as session:
-        record = _require_promotion(session, promotion_id)
-        plan = _load_job_plan(_require_job(session, record.job_id))
+        record = _promotion_record(session, promotion_id)
+        plan = _load_job_plan(_promotion_job(session, record.job_id))
         source_path = Path(record.source_path)
         output_path = Path(record.validated_output_path)
         final_path = Path(record.final_path)
@@ -611,7 +587,7 @@ async def _execute_claimed_promotion(
     }:
         _unlink_owned_staging(staging_path)
     if not staging_path.exists():
-        _set_phase(engine, promotion_id, PromotionPhase.STAGING, owner_token)
+        _set_promotion_phase(engine, promotion_id, PromotionPhase.STAGING, owner_token)
         _write_journal_from_record(engine, promotion_id)
         staged = await stage_validated_output(
             source_output=output_path,
@@ -621,38 +597,42 @@ async def _execute_claimed_promotion(
             heartbeat=heartbeat,
         )
         with Session(engine) as session, session.begin():
-            record = _require_promotion(session, promotion_id)
-            record.validated_output_digest = staged.source_digest
-            record.staging_digest = staged.staging_digest
-            record.phase = PromotionPhase.STAGED
-            record.updated_at = _utc_now()
-            session.add(record)
+            try:
+                update_promotion_staged(
+                    session,
+                    promotion_id=promotion_id,
+                    source_digest=staged.source_digest,
+                    staging_digest=staged.staging_digest,
+                    now=_utc_now(),
+                )
+            except PromotionRecordNotFoundError as exc:
+                raise PromotionPersistenceError(str(exc)) from exc
         _write_journal_from_record(engine, promotion_id)
 
     if backup_path is not None and not backup_path.exists():
-        _set_phase(engine, promotion_id, PromotionPhase.BACKUP_PENDING, owner_token)
+        _set_promotion_phase(engine, promotion_id, PromotionPhase.BACKUP_PENDING, owner_token)
         _write_journal_from_record(engine, promotion_id)
         create_original_rollback_link(
             source_path=source_path,
             backup_path=backup_path,
             expected_source=source_stat,
         )
-        _set_phase(engine, promotion_id, PromotionPhase.BACKUP_CREATED, owner_token)
+        _set_promotion_phase(engine, promotion_id, PromotionPhase.BACKUP_CREATED, owner_token)
         _write_journal_from_record(engine, promotion_id)
 
     install_path = final_path
     if promotion_mode != PromotionMode.KEEP_ORIGINAL:
         install_path = source_path
-    _set_phase(engine, promotion_id, PromotionPhase.INSTALL_PENDING, owner_token)
+    _set_promotion_phase(engine, promotion_id, PromotionPhase.INSTALL_PENDING, owner_token)
     _write_journal_from_record(engine, promotion_id)
     if staging_path.exists():
         os.replace(staging_path, install_path)
         fsync_directory(install_path.parent)
-    _set_phase(engine, promotion_id, PromotionPhase.FINAL_INSTALLED, owner_token)
+    _set_promotion_phase(engine, promotion_id, PromotionPhase.FINAL_INSTALLED, owner_token)
 
     final_digest = calculate_promotion_digest(install_path)
     with Session(engine) as session:
-        record = _require_promotion(session, promotion_id)
+        record = _promotion_record(session, promotion_id)
         expected_digest = record.validated_output_digest
     if expected_digest is None or final_digest != expected_digest:
         await _rollback_before_commit(
@@ -663,33 +643,34 @@ async def _execute_claimed_promotion(
         raise PromotionVerificationError("Final digest does not match validated output.")
     final_snapshot = create_file_snapshot(install_path)
     with Session(engine) as session, session.begin():
-        record = _require_promotion(session, promotion_id)
-        record.final_digest = final_digest
-        record.final_fingerprint = final_snapshot.fs_fingerprint
-        record.phase = PromotionPhase.VERIFIED
-        record.updated_at = _utc_now()
-        session.add(record)
+        try:
+            update_promotion_verified(
+                session,
+                promotion_id=promotion_id,
+                final_digest=final_digest,
+                final_fingerprint=final_snapshot.fs_fingerprint,
+                now=_utc_now(),
+            )
+        except PromotionRecordNotFoundError as exc:
+            raise PromotionPersistenceError(str(exc)) from exc
     _write_journal_from_record(engine, promotion_id)
 
     with Session(engine) as session, session.begin():
-        record = _require_promotion(session, promotion_id)
+        record = _promotion_record(session, promotion_id)
         _commit_verified_promotion(session, record=record, now=_utc_now())
         promotion_id = _require_id(record)
 
     cleanup_error = _cleanup_after_success(engine, promotion_id, plan)
     with Session(engine) as session, session.begin():
-        record = _require_promotion(session, promotion_id)
-        if cleanup_error is None:
-            record.cleanup_completed = True
-            record.phase = PromotionPhase.CLEANUP_COMPLETE
-        else:
-            record.cleanup_completed = False
-            record.cleanup_error = cleanup_error
-        record.updated_at = _utc_now()
-        session.add(record)
-        session.flush()
-        session.refresh(record)
-        result = record.model_copy(deep=True)
+        try:
+            result = update_promotion_cleanup(
+                session,
+                promotion_id=promotion_id,
+                cleanup_error=cleanup_error,
+                now=_utc_now(),
+            )
+        except PromotionRecordNotFoundError as exc:
+            raise PromotionPersistenceError(str(exc)) from exc
     return result
 
 
@@ -702,7 +683,7 @@ async def _rollback_before_commit(
     del owner_token
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
-        record = _require_promotion(session, promotion_id)
+        record = _promotion_record(session, promotion_id)
         mode = PromotionMode(record.mode)
         source_path = Path(record.source_path)
         final_path = Path(record.final_path)
@@ -730,25 +711,10 @@ async def _rollback_before_commit(
         _unlink_owned_staging(staging_path)
     finally:
         with Session(engine) as session, session.begin():
-            record = _require_promotion(session, promotion_id)
-            job = _require_job(session, record.job_id)
-            attempt = _require_attempt(session, record.attempt_id)
-            record.status = PromotionStatus.ROLLED_BACK
-            record.phase = PromotionPhase.ROLLED_BACK
-            record.finished_at = _utc_now()
-            record.updated_at = _utc_now()
-            record.owner_token = None
-            record.lease_expires_at = None
-            attempt.status = AttemptStatus.INTERRUPTED
-            attempt.finished_at = _utc_now()
-            transition_job(job, JobStatus.READY_TO_PROMOTE, now=_utc_now())
-            job.stage = JobStage.PROMOTE
-            job.claimed_by = None
-            job.finished_at = None
-            job.updated_at = _utc_now()
-            session.add(record)
-            session.add(attempt)
-            session.add(job)
+            try:
+                mark_promotion_rolled_back(session, promotion_id=promotion_id, now=_utc_now())
+            except PromotionRecordNotFoundError as exc:
+                raise PromotionPersistenceError(str(exc)) from exc
 
 
 def _commit_verified_promotion(
@@ -757,53 +723,36 @@ def _commit_verified_promotion(
     record: PromotionRecord,
     now: datetime,
 ) -> None:
-    job = _require_job(session, record.job_id)
-    attempt = _require_attempt(session, record.attempt_id)
     mode = PromotionMode(record.mode)
     final_path = Path(record.final_path)
     installed_path = Path(record.source_path) if mode != PromotionMode.KEEP_ORIGINAL else final_path
     final_snapshot = create_file_snapshot(installed_path)
-
-    record.status = PromotionStatus.COMPLETED
-    record.phase = PromotionPhase.COMMITTED
-    record.final_fingerprint = final_snapshot.fs_fingerprint
-    record.finished_at = now
-    record.updated_at = now
-    record.owner_token = None
-    record.lease_expires_at = None
-    attempt.status = AttemptStatus.COMPLETED
-    attempt.finished_at = now
-    attempt.output_path = str(installed_path)
-    job.latest_promotion_id = record.id
-    transition_job(job, JobStatus.PROMOTED, reason=JobOutcomeReason.SUCCESS, now=now)
-    job.stage = JobStage.PROMOTE
-    job.claimed_by = None
-    job.last_error_type = None
-    job.last_error_message = None
-    job.finished_at = now
-    job.updated_at = now
+    media_snapshot = None
     if mode != PromotionMode.KEEP_ORIGINAL:
-        media_file = session.get(MediaFile, job.media_file_id)
-        if media_file is None:
-            raise PromotionPersistenceError("Promoted job media file no longer exists.")
-        media_file.size_bytes = final_snapshot.size_bytes
-        media_file.mtime_ns = final_snapshot.mtime_ns
-        media_file.device_id = final_snapshot.device_id
-        media_file.inode = final_snapshot.inode
-        media_file.fs_fingerprint = final_snapshot.fs_fingerprint
-        media_file.last_seen_at = now
-        media_file.status = MediaFileStatus.PRESENT
-        media_file.latest_probe_id = None
-        session.add(media_file)
-    session.add(record)
-    session.add(attempt)
-    session.add(job)
+        media_snapshot = PromotedMediaFileSnapshot(
+            size_bytes=final_snapshot.size_bytes,
+            mtime_ns=final_snapshot.mtime_ns,
+            device_id=final_snapshot.device_id,
+            inode=final_snapshot.inode,
+            fs_fingerprint=final_snapshot.fs_fingerprint,
+        )
+    try:
+        commit_verified_promotion(
+            session,
+            record=record,
+            installed_path=installed_path,
+            final_fingerprint=final_snapshot.fs_fingerprint,
+            media_snapshot=media_snapshot,
+            now=now,
+        )
+    except PromotionRecordNotFoundError as exc:
+        raise PromotionPersistenceError(str(exc)) from exc
 
 
 def _cleanup_after_success(engine: Engine, promotion_id: int, plan: TranscodePlan) -> str | None:
     errors: list[str] = []
     with Session(engine) as session:
-        record = _require_promotion(session, promotion_id)
+        record = _promotion_record(session, promotion_id)
         mode = PromotionMode(record.mode)
         backup_path = Path(record.backup_path) if record.backup_path is not None else None
         staging_path = Path(record.staging_path)
@@ -851,24 +800,29 @@ def _delete_known_work_path(path: Path, *, work_dir: Path, recursive: bool = Fal
     fsync_directory(path.parent)
 
 
-def _set_phase(
+def _set_promotion_phase(
     engine: Engine,
     promotion_id: int,
     phase: PromotionPhase,
     owner_token: str,
 ) -> None:
-    with Session(engine) as session, session.begin():
-        record = _require_promotion(session, promotion_id)
-        if record.owner_token != owner_token:
-            raise PromotionLeaseError("Promotion lease belongs to another owner.")
-        record.phase = phase
-        record.updated_at = _utc_now()
-        session.add(record)
+    try:
+        set_promotion_phase(
+            engine,
+            promotion_id=promotion_id,
+            phase=phase,
+            owner_token=owner_token,
+            now=_utc_now(),
+        )
+    except PromotionRecordNotFoundError as exc:
+        raise PromotionPersistenceError(str(exc)) from exc
+    except PromotionLeaseOwnershipError as exc:
+        raise PromotionLeaseError(str(exc)) from exc
 
 
 def _write_journal_from_record(engine: Engine, promotion_id: int) -> None:
     with Session(engine) as session:
-        record = _require_promotion(session, promotion_id)
+        record = _promotion_record(session, promotion_id)
         journal = PromotionJournal(
             promotion_id=_require_id(record),
             operation_id=record.operation_id,
@@ -901,44 +855,18 @@ def mark_promotion_failed_or_validated(
     error: Exception,
     now: datetime,
 ) -> None:
-    record = _require_promotion(session, promotion_id)
-    job = _require_job(session, record.job_id)
-    attempt = _require_attempt(session, record.attempt_id)
-    record.error_type = error.__class__.__name__
-    record.error_message = str(error)
-    record.status = (
-        PromotionStatus.ROLLED_BACK
-        if PromotionStatus(record.status) == PromotionStatus.ROLLED_BACK
-        else PromotionStatus.FAILED
-    )
-    record.phase = (
-        PromotionPhase.ROLLED_BACK
-        if PromotionPhase(record.phase) == PromotionPhase.ROLLED_BACK
-        else PromotionPhase.FAILED
-    )
-    record.finished_at = now
-    record.updated_at = now
-    record.owner_token = None
-    record.lease_expires_at = None
-    attempt.status = AttemptStatus.FAILED
-    attempt.error_type = error.__class__.__name__
-    attempt.error_message = str(error)
-    attempt.finished_at = now
+    record = _promotion_record(session, promotion_id)
     backup_exists = record.backup_path is not None and Path(record.backup_path).exists()
-    if not Path(record.final_path).exists() and not backup_exists:
-        transition_job(job, JobStatus.READY_TO_PROMOTE, now=now)
-        job.finished_at = None
-    else:
-        transition_job(job, JobStatus.FAILED, reason=JobOutcomeReason.FAILED_PROMOTION, now=now)
-        job.finished_at = now
-    job.stage = JobStage.PROMOTE
-    job.claimed_by = None
-    job.last_error_type = error.__class__.__name__
-    job.last_error_message = str(error)
-    job.updated_at = now
-    session.add(record)
-    session.add(attempt)
-    session.add(job)
+    try:
+        persist_promotion_failure(
+            session,
+            promotion_id=promotion_id,
+            error=error,
+            can_return_to_promote=not Path(record.final_path).exists() and not backup_exists,
+            now=now,
+        )
+    except PromotionRecordNotFoundError as exc:
+        raise PromotionPersistenceError(str(exc)) from exc
 
 
 def _load_job_plan(job: Job) -> TranscodePlan:
@@ -1002,25 +930,18 @@ def _unlink_owned_staging(staging_path: Path) -> None:
         fsync_directory(staging_path.parent)
 
 
-def _require_job(session: Session, job_id: int) -> Job:
-    job = session.get(Job, job_id)
-    if job is None:
-        raise PromotionEligibilityError(f"Job not found: {job_id}")
-    return job
+def _promotion_job(session: Session, job_id: int) -> Job:
+    try:
+        return require_promotion_job(session, job_id=job_id)
+    except PromotionRecordNotFoundError as exc:
+        raise PromotionEligibilityError(str(exc)) from exc
 
 
-def _require_attempt(session: Session, attempt_id: int) -> JobAttempt:
-    attempt = session.get(JobAttempt, attempt_id)
-    if attempt is None:
-        raise PromotionPersistenceError(f"Promotion attempt not found: {attempt_id}")
-    return attempt
-
-
-def _require_promotion(session: Session, promotion_id: int) -> PromotionRecord:
-    record = session.get(PromotionRecord, promotion_id)
-    if record is None:
-        raise PromotionPersistenceError(f"Promotion record not found: {promotion_id}")
-    return record
+def _promotion_record(session: Session, promotion_id: int) -> PromotionRecord:
+    try:
+        return require_promotion_record(session, promotion_id=promotion_id)
+    except PromotionRecordNotFoundError as exc:
+        raise PromotionPersistenceError(str(exc)) from exc
 
 
 def _require_id(value: object) -> int:

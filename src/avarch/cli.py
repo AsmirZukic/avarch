@@ -36,6 +36,13 @@ from avarch.adapters.sqlite.inventory import (
     select_inventory_files,
     update_inventory,
 )
+from avarch.adapters.sqlite.job_control import (
+    JobControlError,
+    cancel_job,
+    hold_job,
+    release_job,
+    update_job_priority,
+)
 from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_database
 from avarch.adapters.sqlite.models import (
     Job,
@@ -58,6 +65,14 @@ from avarch.adapters.sqlite.planning import (
 from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
+from avarch.adapters.sqlite.scheduler_state import (
+    SchedulerAlreadyRunningError,
+    SchedulerControlError,
+    drain_scheduler,
+    pause_scheduler,
+    resume_scheduler,
+    stop_scheduler,
+)
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.config import (
@@ -106,25 +121,14 @@ from avarch.promoter import (
 from avarch.scanner import ScanError, ScanResult, scan_root
 from avarch.scheduler import (
     MAX_CLI_LOG_TAIL_BYTES,
-    JobControlError,
-    SchedulerAlreadyRunningError,
-    SchedulerControlError,
-    cancel_job,
     clear_queue,
     cli_actor,
-    drain_scheduler,
     execute_validation_job,
-    hold_job,
     new_runner_id,
-    pause_scheduler,
-    release_job,
-    resume_scheduler,
     retry_job,
     retry_queue,
     run_scheduler,
     scheduler_status,
-    stop_scheduler,
-    update_job_priority,
 )
 from avarch.scheduler_lifecycle import (
     SchedulerLifecycleError,

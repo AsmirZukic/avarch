@@ -18,7 +18,18 @@ class FileSelection:
     skipped_missing_status: tuple[MediaFile, ...]
 
 
+class MediaFileNotFoundError(LookupError):
+    pass
+
+
 PathResolver = Callable[[Path], Path]
+
+
+def require_media_file(session: Session, *, media_file_id: int) -> MediaFile:
+    media_file = session.get(MediaFile, media_file_id)
+    if media_file is None:
+        raise MediaFileNotFoundError(f"Media file not found: {media_file_id}")
+    return media_file
 
 
 def update_inventory(

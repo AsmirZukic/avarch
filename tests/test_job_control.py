@@ -8,24 +8,26 @@ from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_control import (
+    JobControlError,
+    cancel_job,
+    hold_job,
+    release_job,
+    update_job_priority,
+)
+from avarch.adapters.sqlite.job_transitions import (
+    claim_job_stage,
+    complete_job_stage,
+    fail_job_stage,
+    interrupt_job_stage,
+    recover_abandoned_jobs,
+)
 from avarch.adapters.sqlite.models import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
     JobStage,
     JobStatus,
-)
-from avarch.scheduler import (
-    JobControlError,
-    cancel_job,
-    claim_job_stage,
-    complete_job_stage,
-    fail_job_stage,
-    hold_job,
-    interrupt_job_stage,
-    recover_abandoned_jobs,
-    release_job,
-    update_job_priority,
 )
 
 
@@ -346,7 +348,11 @@ def test_recovery_cancels_abandoned_job_with_cancel_request(tmp_path: Path) -> N
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=now)
+        summary = recover_abandoned_jobs(
+            session,
+            now=now,
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -363,7 +369,7 @@ def test_recovery_holds_abandoned_job_with_hold_request(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        recover_abandoned_jobs(session, new_runner_id="new", now=now)
+        recover_abandoned_jobs(session, now=now, encoded_output_exists=_encoded_output_exists)
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -379,7 +385,11 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
     engine, job_id = _running_job_with_attempt(tmp_path)
 
     with Session(engine) as session, session.begin():
-        recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -393,7 +403,11 @@ def test_recovery_recovers_running_promotion_jobs(tmp_path: Path) -> None:
     engine, job_id = _running_job_with_attempt(tmp_path, stage=JobStage.PROMOTE)
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -415,7 +429,11 @@ def test_restart_recovers_encoded_job(tmp_path: Path) -> None:
     )
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -434,7 +452,11 @@ def test_restart_recovers_ready_to_promote_job(tmp_path: Path) -> None:
     )
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -454,7 +476,11 @@ def test_restart_handles_missing_encoded_file(tmp_path: Path) -> None:
     )
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -471,7 +497,11 @@ def test_restart_handles_partial_promotion_backup(tmp_path: Path) -> None:
     engine, job_id = _stored_job(tmp_path, status=JobStatus.PROMOTING, stage=JobStage.PROMOTE)
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -503,6 +533,10 @@ def _running_job_with_attempt(
             job.hold_requested_by = "test"
         session.add(job)
     return engine, job_id
+
+
+def _encoded_output_exists(job: Job) -> bool:
+    return job.output_path is not None and Path(job.output_path).exists()
 
 
 def _stored_job(

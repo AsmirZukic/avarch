@@ -58,6 +58,37 @@ def enqueue_candidate_media_files(
     return list(session.exec(statement).all())
 
 
+def create_queue_job(
+    session: Session,
+    *,
+    media_file: MediaFile,
+    profile_name: str,
+    profile_hash: str,
+    queue_key: str,
+    probe_result_id: int | None,
+    probe_hash: str | None,
+    priority: int,
+    now: datetime,
+) -> None:
+    session.add(
+        Job(
+            media_file_id=_require_id(media_file),
+            profile_name=profile_name,
+            profile_hash=profile_hash,
+            source_fs_fingerprint=media_file.fs_fingerprint,
+            queue_key=queue_key,
+            probe_result_id=probe_result_id,
+            probe_hash=probe_hash,
+            status=JobStatus.PENDING,
+            stage=JobStage.PLAN if probe_result_id is not None else JobStage.PROBE,
+            priority=priority,
+            attempts=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
 def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
     jobs = list(
         session.exec(
@@ -234,3 +265,10 @@ def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
     return status
+
+
+def _require_id(value: object) -> int:
+    identifier = getattr(value, "id", None)
+    if not isinstance(identifier, int):
+        raise QueueSelectionError("Expected a persisted row id.")
+    return identifier
