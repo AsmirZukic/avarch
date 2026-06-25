@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from avarch.adapters.scheduler_workers import execute_validation_job
 from avarch.application.manual_validation import ManualValidationResult
 from avarch.config import AppConfig
-from avarch.scheduler_workers import execute_validation_job
 
 
 class SchedulerManualValidationWorker:

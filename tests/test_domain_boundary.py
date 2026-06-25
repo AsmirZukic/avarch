@@ -39,6 +39,8 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "scheduler.py",
         "scheduler_queue.py",
         "scheduler_runner.py",
+        "scheduler_support.py",
+        "scheduler_workers.py",
         "size_policy.py",
     }
 )
@@ -58,6 +60,8 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
         "avarch.job_lifecycle",
         "avarch.rejection_cleanup",
         "avarch.scheduler_runner",
+        "avarch.scheduler_support",
+        "avarch.scheduler_workers",
         "avarch.models.db",
         "avarch.models.scheduler",
         "avarch.size_policy",
@@ -332,7 +336,7 @@ def test_application_modules_do_not_import_concrete_boundaries() -> None:
     forbidden_roots = frozenset(
         {
             "avarch.adapters",
-            "avarch.scheduler_support",
+            "avarch.adapters.scheduler_support",
             "sqlmodel",
             "sqlalchemy",
             "subprocess",
