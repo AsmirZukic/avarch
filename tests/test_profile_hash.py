@@ -2,7 +2,7 @@ from typing import cast
 
 import pytest
 
-from avarch.planner import build_profile_hash, parse_encoder_args
+from avarch.application.planning import build_profile_hash, parse_encoder_args
 from avarch.profiles.models import EncodingProfile
 
 

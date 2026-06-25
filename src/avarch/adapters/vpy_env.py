@@ -15,8 +15,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from avarch.application.planning import PlanningRuntimeIdentity
 from avarch.serialization import canonical_json
-from avarch.workspace import WorkspaceContext, ensure_workspace_layout
+from avarch.workspace import WorkspaceContext, WorkspaceError, ensure_workspace_layout
 
 VPY_REQUIREMENTS_SCHEMA_VERSION = 1
 VPY_LOCK_SCHEMA_VERSION = 1
@@ -208,6 +209,19 @@ def build_runtime_identity(requirements: VpyRequirements) -> RuntimeIdentity:
     )
 
 
+def planning_runtime_identity_for_data_dir(data_dir: Path) -> PlanningRuntimeIdentity:
+    identity = build_runtime_identity(_vpy_requirements_for_data_dir(data_dir))
+    return PlanningRuntimeIdentity(
+        manifest_hash=identity.manifest_hash,
+        avarch_image_digest=identity.avarch_image_digest,
+        python_version=identity.python_version,
+        python_abi=identity.python_abi,
+        platform=identity.platform,
+        vapoursynth_version=identity.vapoursynth_version,
+        environment_id=identity.environment_id,
+    )
+
+
 def build_manifest_hash(requirements: VpyRequirements) -> str:
     payload = requirements.model_dump(mode="json")
     return hashlib.blake2b(
@@ -229,6 +243,25 @@ def detect_vapoursynth_version() -> str:
     if api_version is not None:
         return str(api_version)
     return "unknown"
+
+
+def _vpy_requirements_for_data_dir(data_dir: Path) -> VpyRequirements:
+    workspace = _workspace_for_data_dir(data_dir)
+    if workspace is None or not workspace.vpy_requirements_toml.exists():
+        return VpyRequirements()
+    return load_requirements(workspace)
+
+
+def _workspace_for_data_dir(data_dir: Path) -> WorkspaceContext | None:
+    resolved = data_dir.resolve()
+    if resolved.name == "data" and resolved.parent.name == ".avarch":
+        return WorkspaceContext(resolved.parent.parent)
+    if resolved.name == ".avarch":
+        return WorkspaceContext(resolved.parent)
+    try:
+        return WorkspaceContext.discover(resolved)
+    except WorkspaceError:
+        return None
 
 
 def sync_environment(workspace: WorkspaceContext) -> VpyEnvironment:

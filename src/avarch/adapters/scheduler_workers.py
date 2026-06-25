@@ -62,6 +62,8 @@ from avarch.adapters.vapoursynth import (
     generate_vapoursynth_script,
     validate_script_syntax,
 )
+from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
+from avarch.application.planning import PlanningError, build_plan, match_profile
 from avarch.application.promotion import promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.application.vapoursynth_identity import (
@@ -73,7 +75,6 @@ from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
-from avarch.planner import PlanningError, build_plan, match_profile
 from avarch.serialization import canonical_json
 
 ProgressCallback = Callable[[int, float | None], None]
@@ -201,6 +202,7 @@ async def execute_plan_job(
             plan = build_plan(
                 context,
                 data_dir=config_data_dir(config),
+                runtime_identity=planning_runtime_identity_for_data_dir(config_data_dir(config)),
                 resolved_template=resolved_template,
                 resolved_filter=resolved_filter,
             )

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from avarch.adapters.probe import build_probe_hash, normalize_probe
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
-from avarch.planner import (
+from avarch.application.planning import (
     PlanningContext,
     add_sdr_color_encoder_args,
     build_plan,

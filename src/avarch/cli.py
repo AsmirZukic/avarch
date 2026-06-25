@@ -82,6 +82,7 @@ from avarch.adapters.vpy_env import (
     add_vsrepo_package,
     build_runtime_identity,
     load_requirements,
+    planning_runtime_identity_for_data_dir,
     remove_python_package,
     remove_vsrepo_package,
     runtime_environment_variables,
@@ -107,6 +108,10 @@ from avarch.application.job_views import (
     list_jobs,
 )
 from avarch.application.manual_validation import run_validation_job
+from avarch.application.planning import (
+    PlanningError,
+    build_plan,
+)
 from avarch.application.promotion import (
     PromotionPreflightView,
     PromotionRecordView,
@@ -183,10 +188,6 @@ from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
-from avarch.planner import (
-    PlanningError,
-    build_plan,
-)
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import (
     ProfileOrigin,
@@ -1802,6 +1803,7 @@ def plan_file(
                 plan = build_plan(
                     context,
                     data_dir=data_dir,
+                    runtime_identity=planning_runtime_identity_for_data_dir(data_dir),
                     resolved_template=resolved_template,
                     resolved_filter=resolved_filter,
                 )
@@ -2451,6 +2453,7 @@ def vpy_check(
             plan = build_plan(
                 context,
                 data_dir=data_dir,
+                runtime_identity=planning_runtime_identity_for_data_dir(data_dir),
                 resolved_template=resolved_template,
                 resolved_filter=resolved_filter,
             )
@@ -2707,6 +2710,7 @@ def encode_file(
             plan = build_plan(
                 context,
                 data_dir=data_dir,
+                runtime_identity=planning_runtime_identity_for_data_dir(data_dir),
                 resolved_template=resolved_template,
                 resolved_filter=resolved_filter,
             )

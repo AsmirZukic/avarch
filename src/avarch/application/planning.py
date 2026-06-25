@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from avarch.adapters.vpy_env import VpyRequirements, build_runtime_identity, load_requirements
 from avarch.application.vapoursynth_identity import (
     GENERATOR_VERSION,
     ResolvedVapourSynthFilter,
@@ -60,11 +59,21 @@ from avarch.models.validation import (
 )
 from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
-from avarch.workspace import WorkspaceContext, WorkspaceError
 
 
 class PlanningError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningRuntimeIdentity:
+    manifest_hash: str
+    avarch_image_digest: str
+    python_version: str
+    python_abi: str
+    platform: str
+    vapoursynth_version: str
+    environment_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +83,7 @@ class PlanningContext:
     normalized_probe: NormalizedProbe
     profile_name: str
     profile: EncodingProfile
+    relative_path_root: Path | None = None
 
 
 class PlanningMediaFile(Protocol):
@@ -252,15 +262,13 @@ def finalize_promotion_policy(policy: PromotionPolicy) -> PromotionPolicy:
     return policy.model_copy(update={"policy_hash": build_promotion_policy_hash(policy)})
 
 
-def _absolute_stored_media_path(value: str) -> Path:
+def _absolute_stored_media_path(value: str, *, relative_path_root: Path | None = None) -> Path:
     path = Path(value)
     if path.is_absolute():
         return path.resolve()
-    try:
-        workspace = WorkspaceContext.discover(Path.cwd())
-    except WorkspaceError:
+    if relative_path_root is None:
         return path.resolve()
-    return (workspace.root / path).resolve()
+    return (relative_path_root / path).resolve()
 
 
 def match_profile(
@@ -453,6 +461,7 @@ def build_plan(
     context: PlanningContext,
     *,
     data_dir: Path,
+    runtime_identity: PlanningRuntimeIdentity | None = None,
     resolved_template: ResolvedVapourSynthTemplate | None = None,
     resolved_filter: ResolvedVapourSynthFilter | None = None,
     generator_version: int = GENERATOR_VERSION,
@@ -504,7 +513,10 @@ def build_plan(
     )
     execution_identity = build_execution_identity()
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
-    input_path = _absolute_stored_media_path(context.media_file.path)
+    input_path = _absolute_stored_media_path(
+        context.media_file.path,
+        relative_path_root=context.relative_path_root,
+    )
     source_fs_fingerprint = context.media_file.fs_fingerprint
     work_key = build_work_key(
         input_path=input_path,
@@ -519,8 +531,7 @@ def build_plan(
     video = select_video(context.normalized_probe, context.profile)
     audio = select_audio(context.normalized_probe, context.profile)
     subtitles = select_subtitles(context.normalized_probe, context.profile)
-    vpy_requirements = _vpy_requirements_for_data_dir(data_dir)
-    runtime_identity = build_runtime_identity(vpy_requirements)
+    runtime_identity = runtime_identity or default_planning_runtime_identity()
     encoder_args = add_sdr_color_encoder_args(parse_encoder_args(context.profile.av1an.video_args))
 
     plan = TranscodePlan(
@@ -667,23 +678,16 @@ def build_plan_paths(
     )
 
 
-def _vpy_requirements_for_data_dir(data_dir: Path) -> VpyRequirements:
-    workspace = _workspace_for_data_dir(data_dir)
-    if workspace is None or not workspace.vpy_requirements_toml.exists():
-        return VpyRequirements()
-    return load_requirements(workspace)
-
-
-def _workspace_for_data_dir(data_dir: Path) -> WorkspaceContext | None:
-    resolved = data_dir.resolve()
-    if resolved.name == "data" and resolved.parent.name == ".avarch":
-        return WorkspaceContext(resolved.parent.parent)
-    if resolved.name == ".avarch":
-        return WorkspaceContext(resolved.parent)
-    try:
-        return WorkspaceContext.discover(resolved)
-    except WorkspaceError:
-        return None
+def default_planning_runtime_identity() -> PlanningRuntimeIdentity:
+    return PlanningRuntimeIdentity(
+        manifest_hash="unknown",
+        avarch_image_digest="unknown",
+        python_version="unknown",
+        python_abi="unknown",
+        platform="unknown",
+        vapoursynth_version="unknown",
+        environment_id="unknown",
+    )
 
 
 def _primary_video(streams: list[VideoStream]) -> VideoStream:

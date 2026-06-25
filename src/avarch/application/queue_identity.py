@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from avarch.application.planning import build_execution_identity, build_profile_hash
 from avarch.application.vapoursynth_identity import (
     GENERATOR_VERSION,
     build_vapoursynth_identity_hash,
@@ -12,7 +13,6 @@ from avarch.application.vapoursynth_identity import (
 )
 from avarch.config import AppConfig
 from avarch.contracts import QUEUE_CONTRACT
-from avarch.planner import build_execution_identity, build_profile_hash
 from avarch.profiles.registry import ProfileRegistry, ResolvedProfile, UnknownProfileError
 from avarch.serialization import canonical_json
 
