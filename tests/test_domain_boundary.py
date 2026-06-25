@@ -35,6 +35,7 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "inventory.py",
         "job_lifecycle.py",
         "rejection_cleanup.py",
+        "scheduler.py",
         "size_policy.py",
     }
 )
@@ -284,6 +285,8 @@ def test_obsolete_function_definitions_are_not_reintroduced() -> None:
     violations: list[str] = []
     for module_name, obsolete_functions in OBSOLETE_FUNCTION_DEFINITIONS.items():
         path = _module_path(module_name)
+        if not path.exists():
+            continue
         defined_functions = set(_defined_functions(path))
         for function_name in sorted(obsolete_functions & defined_functions):
             relative_path = path.relative_to(PACKAGE_ROOT.parent.parent)

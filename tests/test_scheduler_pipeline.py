@@ -15,7 +15,7 @@ from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionStatus
 from avarch.promoter import PromotionResult
-from avarch.scheduler import execute_promotion_job
+from avarch.scheduler_workers import execute_promotion_job
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:

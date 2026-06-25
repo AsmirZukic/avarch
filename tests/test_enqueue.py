@@ -11,7 +11,7 @@ from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.probe import normalize_probe
-from avarch.scheduler import enqueue_inventory
+from avarch.scheduler_queue import enqueue_inventory
 from tests.probe_fixtures import sdr_probe_payload
 
 

@@ -125,17 +125,6 @@ from avarch.promoter import (
     validate_promotion_preflight,
 )
 from avarch.scanner import ScanError, ScanResult, scan_root
-from avarch.scheduler import (
-    MAX_CLI_LOG_TAIL_BYTES,
-    clear_queue,
-    cli_actor,
-    execute_validation_job,
-    new_runner_id,
-    retry_job,
-    retry_queue,
-    run_scheduler,
-    scheduler_status,
-)
 from avarch.scheduler_lifecycle import (
     SchedulerLifecycleError,
     SchedulerWorkspaceLock,
@@ -147,6 +136,19 @@ from avarch.scheduler_lifecycle import (
     verified_status,
     write_metadata,
 )
+from avarch.scheduler_queue import (
+    clear_queue,
+    retry_job,
+    retry_queue,
+)
+from avarch.scheduler_runner import (
+    MAX_CLI_LOG_TAIL_BYTES,
+    cli_actor,
+    new_runner_id,
+    run_scheduler,
+    scheduler_status,
+)
+from avarch.scheduler_workers import execute_validation_job
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
