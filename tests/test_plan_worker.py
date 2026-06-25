@@ -17,11 +17,12 @@ from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.vapoursynth import generate_vapoursynth_script
+from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
 from avarch.application.enqueue import enqueue_inventory
+from avarch.application.planning import build_plan
 from avarch.application.vapoursynth_identity import resolve_vapoursynth_template
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
-from avarch.planner import build_plan
 from avarch.profiles.registry import ProfileRegistry
 from tests.probe_fixtures import sdr_probe_payload
 
@@ -49,7 +50,13 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
             resolved_profile=ProfileRegistry.from_config(config).get("av1_1080p_sdr"),
         )
         template = resolve_vapoursynth_template(context.profile)
-        plan = build_plan(context, data_dir=Path(".avarch"), resolved_template=template)
+        data_dir = Path(".avarch")
+        plan = build_plan(
+            context,
+            data_dir=data_dir,
+            runtime_identity=planning_runtime_identity_for_data_dir(data_dir),
+            resolved_template=template,
+        )
         write_plan_artifacts(
             plan=plan,
             vapoursynth_script=generate_vapoursynth_script(plan, template=template),

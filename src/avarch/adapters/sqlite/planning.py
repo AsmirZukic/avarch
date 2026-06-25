@@ -7,8 +7,8 @@ from sqlmodel import Session, col, select
 
 from avarch.adapters.probe import ProbeError, parse_normalized_probe_json
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, MediaPlan, ProbeResult
+from avarch.application.planning import PlanningContext, PlanningError
 from avarch.models.plan import TranscodePlan
-from avarch.planner import PlanningContext, PlanningError
 from avarch.profiles.registry import ResolvedProfile
 from avarch.workspace import WorkspaceContext, WorkspaceError
 
@@ -51,6 +51,7 @@ def load_planning_context(
         normalized_probe=normalized_probe,
         profile_name=resolved_profile.name,
         profile=resolved_profile.profile,
+        relative_path_root=_relative_path_root(input_path),
     )
 
 
@@ -176,6 +177,13 @@ def _get_media_file_for_input(session: Session, input_path: Path) -> MediaFile |
         if media_file is not None:
             return media_file
     return None
+
+
+def _relative_path_root(input_path: Path) -> Path | None:
+    try:
+        return WorkspaceContext.discover(input_path.resolve().parent).root
+    except WorkspaceError:
+        return None
 
 
 def _status_value(status: MediaFileStatus | str) -> str:
