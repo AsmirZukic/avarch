@@ -40,7 +40,6 @@ from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_data
 from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
-    JobEvent,
     MediaFile,
     MediaFileStatus,
     MediaPlan,
@@ -66,6 +65,12 @@ from avarch.application.job_control import (
     hold_job,
     release_job,
     update_job_priority,
+)
+from avarch.application.job_views import (
+    JobListItem,
+    job_details,
+    latest_attempt,
+    list_jobs,
 )
 from avarch.application.manual_validation import run_validation_job
 from avarch.application.queue_control import (
@@ -101,6 +106,7 @@ from avarch.application.scheduler_run import (
 from avarch.application.scheduler_status import scheduler_status
 from avarch.bootstrap import (
     job_control_store,
+    job_view_store,
     manual_validation_worker,
     queue_control_store,
     queue_retry_store,
@@ -1013,30 +1019,17 @@ def jobs_list(
 
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        statement = select(Job).order_by(
-            col(Job.priority).desc(),
-            col(Job.created_at).asc(),
-            col(Job.id).asc(),
+        rows = list_jobs(
+            job_view_store(session),
+            statuses=status_filters,
+            stages=stage_filters,
+            profile=profile,
+            limit=limit,
         )
-        if status_filters is not None:
-            statement = statement.where(col(Job.status).in_(status_filters))
-        if stage_filters is not None:
-            statement = statement.where(col(Job.stage).in_(stage_filters))
-        if profile is not None:
-            statement = statement.where(Job.profile_name == profile)
-        if limit is not None:
-            statement = statement.limit(limit)
-        rows = list(session.exec(statement).all())
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
 
     typer.echo("ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE")
     for job in rows:
-        media_file = media_by_id.get(job.media_file_id)
-        path = Path(media_file.path).name if media_file is not None else "<missing>"
+        path = job.file_name
         control = _job_control_label(job)
         typer.echo(
             f"{job.id:<3} {_job_status_value(job.status):<10} {_job_stage_value(job.stage):<9} "
@@ -1060,27 +1053,14 @@ def jobs_show(
 
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        job = session.get(Job, job_id)
+        job = job_details(job_view_store(session), job_id=job_id)
         if job is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
-        media_file = session.get(MediaFile, job.media_file_id)
-        attempts = list(
-            session.exec(
-                select(JobAttempt)
-                .where(JobAttempt.job_id == job_id)
-                .order_by(col(JobAttempt.attempt_number).asc())
-            ).all()
-        )
-        events = list(
-            session.exec(
-                select(JobEvent).where(JobEvent.job_id == job_id).order_by(col(JobEvent.id).asc())
-            ).all()
-        )
 
     typer.echo(f"Job {job_id}")
     typer.echo("")
-    typer.echo(f"Source:       {media_file.path if media_file is not None else '<missing>'}")
+    typer.echo(f"Source:       {job.source_path}")
     typer.echo(f"Profile:      {job.profile_name}")
     typer.echo(f"Profile hash: {job.profile_hash}")
     typer.echo(f"Queue key:    {job.queue_key}")
@@ -1110,14 +1090,14 @@ def jobs_show(
         _echo_error_block(job.last_error_type, job.last_error_message, indent="  ")
     typer.echo("")
     typer.echo("Attempts:")
-    for attempt in attempts:
+    for attempt in job.attempt_history:
         typer.echo(
             f"  {attempt.attempt_number:<3} {_job_stage_value(attempt.stage):<9} "
             f"{_attempt_status_value(attempt.status):<11} {attempt.runner_id}"
         )
     typer.echo("")
     typer.echo("Events:")
-    for event in events:
+    for event in job.events:
         typer.echo(
             f"  {event.id:<3} {_display_optional_datetime(event.created_at)} "
             f"{_event_type_value(event.event_type):<16} {event.actor}"
@@ -1140,11 +1120,11 @@ def jobs_logs(
     _upgrade_database_or_exit(database_url)
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        statement = select(JobAttempt).where(JobAttempt.job_id == job_id)
-        if attempt_number is not None:
-            statement = statement.where(JobAttempt.attempt_number == attempt_number)
-        statement = statement.order_by(col(JobAttempt.attempt_number).desc())
-        attempt = session.exec(statement).first()
+        attempt = latest_attempt(
+            job_view_store(session),
+            job_id=job_id,
+            attempt_number=attempt_number,
+        )
     if attempt is None:
         typer.echo("No matching attempt.")
         raise typer.Exit(1)
@@ -2932,7 +2912,7 @@ def _parse_job_stages(value: str | None) -> set[JobStage] | None:
     return stages or None
 
 
-def _job_control_label(job: Job) -> str:
+def _job_control_label(job: JobListItem) -> str:
     if job.cancel_requested_at is not None and _job_status_value(job.status) != JobStatus.CANCELLED:
         return "cancel"
     if job.hold_requested_at is not None:
@@ -2942,7 +2922,7 @@ def _job_control_label(job: Job) -> str:
     return "-"
 
 
-def _job_outcome_summary(job: Job, *, path: str) -> str | None:
+def _job_outcome_summary(job: JobListItem, *, path: str) -> str | None:
     status = JobStatus(job.status)
     if status == JobStatus.ENCODING:
         return f"Encoding: {path}"
