@@ -33,6 +33,7 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     cleanup_rejected_output,
 )
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
+from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
@@ -47,10 +48,8 @@ from avarch.scheduler_support import (
     JobPreparationError,
     StaleJobProfileError,
     StaleJobSourceError,
-    build_queue_key,
     config_data_dir,
     load_job_plan,
-    planning_identity,
     require_id,
     require_profile,
     scheduler_error,

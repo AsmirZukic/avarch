@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from avarch.application.queue_identity import build_queue_key, planning_identity, resolve_profile
 from avarch.config import AppConfig
-from avarch.scheduler_support import build_queue_key, planning_identity, require_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +57,7 @@ def enqueue_inventory(
     now: datetime,
     media_file_ids: tuple[int, ...] | None = None,
 ) -> EnqueueSummary:
-    resolved_profile = require_profile(config, profile_name)
+    resolved_profile = resolve_profile(config, profile_name)
     identity = planning_identity(resolved_profile)
     candidates = store.enqueue_candidates(media_file_ids=media_file_ids)
     selected = 0

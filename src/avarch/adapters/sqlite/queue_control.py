@@ -12,6 +12,7 @@ from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import QueueSelectionError, select_queue_jobs
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.application.queue_control import QueueControlError, QueueJobSnapshot
+from avarch.application.queue_identity import planning_identity
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.domain.scheduler import RetryFacts
@@ -20,7 +21,6 @@ from avarch.scheduler_support import (
     StaleJobProfileError,
     load_job_plan,
     output_exists,
-    planning_identity,
     require_profile,
     source_media_file,
     status_value,
