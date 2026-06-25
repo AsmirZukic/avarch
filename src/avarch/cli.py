@@ -71,6 +71,7 @@ from avarch.application.job_control import (
     release_job,
     update_job_priority,
 )
+from avarch.application.manual_validation import run_validation_job
 from avarch.application.queue_control import (
     QueueControlError,
     clear_queue,
@@ -87,6 +88,7 @@ from avarch.application.scheduler_control import (
 from avarch.application.scheduler_status import scheduler_status
 from avarch.bootstrap import (
     job_control_store,
+    manual_validation_worker,
     queue_control_store,
     queue_retry_store,
     scheduler_control_store,
@@ -159,7 +161,6 @@ from avarch.scheduler_runner import (
     new_runner_id,
     run_scheduler,
 )
-from avarch.scheduler_workers import execute_validation_job
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
@@ -1347,7 +1348,8 @@ def jobs_validate(
             raise typer.Exit(1)
 
     result = asyncio.run(
-        execute_validation_job(
+        run_validation_job(
+            manual_validation_worker(),
             job_id=job_id,
             runner_id=new_runner_id(),
             config=runtime_config,
@@ -1613,7 +1615,8 @@ def validate_file(
             raise typer.Exit(1)
 
     result = asyncio.run(
-        execute_validation_job(
+        run_validation_job(
+            manual_validation_worker(),
             job_id=job_id,
             runner_id=new_runner_id(),
             config=runtime_config,
