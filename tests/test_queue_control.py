@@ -18,6 +18,8 @@ from avarch.adapters.sqlite.models import (
     ValidationResult,
 )
 from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore
+from avarch.application.queue_control import QueueControlError, clear_queue
 from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
 from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
@@ -26,7 +28,7 @@ from avarch.planner import build_execution_identity, build_profile_hash, finaliz
 from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
-from avarch.scheduler_queue import clear_queue, retry_job, retry_queue
+from avarch.scheduler_queue import retry_job, retry_queue
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
@@ -36,8 +38,8 @@ from tests.test_plan_models import sample_plan
 def test_queue_clear_requires_at_least_one_selector(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
 
-    with Session(engine) as session, session.begin(), pytest.raises(JobControlError):
-        clear_queue(session, actor="test", now=datetime.now(UTC))
+    with Session(engine) as session, session.begin(), pytest.raises(QueueControlError):
+        clear_queue(SqliteQueueControlStore(session), actor="test", now=datetime.now(UTC))
 
 
 def test_queue_clear_preview_does_not_mutate_jobs(tmp_path: Path) -> None:
@@ -51,7 +53,7 @@ def test_queue_clear_preview_does_not_mutate_jobs(tmp_path: Path) -> None:
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             statuses={JobStatus.QUEUED, JobStatus.HELD},
@@ -86,7 +88,7 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             statuses={
@@ -117,7 +119,7 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
 
     with Session(engine) as session, session.begin():
         preview = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             statuses={JobStatus.ENCODING},
@@ -129,7 +131,7 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
 
     with Session(engine) as session, session.begin():
         requested = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             statuses={JobStatus.ENCODING},
@@ -172,7 +174,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             all_jobs=True,
