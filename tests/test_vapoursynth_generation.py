@@ -2,14 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from avarch.vapoursynth import (
+from avarch.adapters.vapoursynth import (
     HdrProcessingNotImplementedError,
-    ResolvedVapourSynthFilter,
     UnsupportedSourceFormatError,
     generate_builtin_script,
     generate_custom_filter_script,
     validate_script_syntax,
 )
+from avarch.application.vapoursynth_identity import ResolvedVapourSynthFilter
 from tests.test_plan_models import sample_plan
 
 

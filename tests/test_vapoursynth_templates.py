@@ -2,15 +2,17 @@ from pathlib import Path
 
 import pytest
 
-from avarch.models.plan import TranscodePlan, VapourSynthPlan
-from avarch.vapoursynth import (
-    ResolvedVapourSynthTemplate,
+from avarch.adapters.vapoursynth import (
     VapourSynthTemplateError,
-    build_template_hash,
     generate_custom_script,
     generate_vapoursynth_script,
     validate_script_syntax,
 )
+from avarch.application.vapoursynth_identity import (
+    ResolvedVapourSynthTemplate,
+    build_template_hash,
+)
+from avarch.models.plan import TranscodePlan, VapourSynthPlan
 from tests.test_plan_models import sample_plan
 
 

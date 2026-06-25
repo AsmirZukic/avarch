@@ -7,8 +7,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from avarch.cli import app
-from avarch.vpy_env import (
+from avarch.adapters.vpy_env import (
     VpyRequirements,
     add_python_package,
     add_vsrepo_package,
@@ -19,6 +18,7 @@ from avarch.vpy_env import (
     runtime_environment_variables,
     sync_environment,
 )
+from avarch.cli import app
 from avarch.workspace import WorkspaceContext, create_workspace
 
 runner = CliRunner()

@@ -7,14 +7,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from avarch.adapters.vapoursynth import validate_script_syntax
+from avarch.application.vapoursynth_identity import (
+    ResolvedVapourSynthFilter,
+    ResolvedVapourSynthTemplate,
+)
 from avarch.models.plan import PlanArtifactPaths, TranscodePlan
 from avarch.planner import PlanningError
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import (
-    ResolvedVapourSynthFilter,
-    ResolvedVapourSynthTemplate,
-    validate_script_syntax,
-)
 
 
 class PlanArtifactConflictError(PlanningError):

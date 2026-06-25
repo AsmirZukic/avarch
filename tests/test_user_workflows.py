@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from avarch.adapters.vapoursynth import VspipeProcessError
 from avarch.cli import app
-from avarch.vapoursynth import VspipeProcessError
 from tests.probe_fixtures import representative_probe_payload, sdr_probe_payload
 
 runner = CliRunner()

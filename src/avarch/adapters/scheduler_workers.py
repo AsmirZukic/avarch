@@ -57,8 +57,17 @@ from avarch.adapters.validation import (
     failed_required_check_names,
     validate_output,
 )
+from avarch.adapters.vapoursynth import (
+    VapourSynthGenerationError,
+    generate_vapoursynth_script,
+    validate_script_syntax,
+)
 from avarch.application.promotion import promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
+from avarch.application.vapoursynth_identity import (
+    resolve_vapoursynth_filter,
+    resolve_vapoursynth_template,
+)
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
@@ -66,13 +75,6 @@ from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
 from avarch.planner import PlanningError, build_plan, match_profile
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import (
-    VapourSynthGenerationError,
-    generate_vapoursynth_script,
-    resolve_vapoursynth_filter,
-    resolve_vapoursynth_template,
-    validate_script_syntax,
-)
 
 ProgressCallback = Callable[[int, float | None], None]
 

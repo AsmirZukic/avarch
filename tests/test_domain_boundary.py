@@ -48,6 +48,9 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "scheduler_workers.py",
         "size_policy.py",
         "validation.py",
+        "vapoursynth.py",
+        "vpy_env.py",
+        "vpy_plugins.py",
     }
 )
 
@@ -77,6 +80,9 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
         "avarch.models.scheduler",
         "avarch.size_policy",
         "avarch.validation",
+        "avarch.vapoursynth",
+        "avarch.vpy_env",
+        "avarch.vpy_plugins",
     }
 )
 
