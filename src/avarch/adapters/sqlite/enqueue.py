@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from avarch.adapters.scheduler_support import status_value
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.probes import get_canonical_probe_result
 from avarch.adapters.sqlite.queue import (
@@ -13,7 +14,6 @@ from avarch.adapters.sqlite.queue import (
     find_existing_queue_job,
 )
 from avarch.application.enqueue import EnqueueCandidate
-from avarch.scheduler_support import status_value
 
 
 class SqliteEnqueueStore:

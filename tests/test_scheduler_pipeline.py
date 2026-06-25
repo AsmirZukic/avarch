@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.adapters.scheduler_workers import execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
@@ -15,7 +16,6 @@ from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionStatus
 from avarch.promoter import PromotionResult
-from avarch.scheduler_workers import execute_promotion_job
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ def test_scheduler_continues_after_promotion_failure(
             error_message="failed",
         )
 
-    monkeypatch.setattr("avarch.scheduler_workers.promote_job", fake_promote_job)
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.promote_job", fake_promote_job)
     database_path = tmp_path / "avarch.adapters.sqlite.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
     engine = create_db_engine(config.database.url)
