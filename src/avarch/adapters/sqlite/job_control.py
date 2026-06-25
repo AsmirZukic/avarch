@@ -11,7 +11,19 @@ from avarch.adapters.sqlite.job_transitions import (
     reset_job_for_retry,
 )
 from avarch.adapters.sqlite.models import Job
-from avarch.domain.jobs import JobEventType, JobStage, JobStatus
+from avarch.domain.jobs import (
+    JobEventType,
+    JobStage,
+    JobStatus,
+    job_can_be_held,
+    job_can_change_priority,
+    job_cancel_is_idempotent,
+    job_is_running,
+    job_is_running_promotion,
+    job_rejects_cancel,
+    plan_canceled_transition,
+    plan_job_transition,
+)
 from avarch.serialization import canonical_json
 
 __all__ = [
@@ -40,11 +52,11 @@ def cancel_job(
     details_json: str | None = None,
 ) -> None:
     job = require_job(session, job_id)
-    if job.status == JobStatus.CANCELED:
+    if job_cancel_is_idempotent(job.status):
         return
-    if job.status in {JobStatus.COMPLETED, JobStatus.SKIPPED}:
+    if job_rejects_cancel(job.status):
         raise JobControlError(f"Job {job_id} cannot be canceled from {job.status}.")
-    if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+    if job_is_running_promotion(job.status, job.stage):
         raise JobControlError(
             "This job has an active promotion transaction. Use promotion recovery or interrupt "
             "the owning promote command."
@@ -53,7 +65,7 @@ def cancel_job(
     job.cancel_requested_at = job.cancel_requested_at or now
     job.cancel_requested_by = job.cancel_requested_by or actor
     job.cancel_reason = reason
-    if job.status == JobStatus.RUNNING:
+    if job_is_running(job.status):
         add_job_event(
             session,
             job_id=job_id,
@@ -64,7 +76,8 @@ def cancel_job(
             now=now,
         )
     else:
-        job.status = JobStatus.CANCELED
+        transition = plan_canceled_transition(job.status, now=now)
+        job.status = transition.status
         job.canceled_at = now
         job.finished_at = now
         job.claimed_by = None
@@ -95,21 +108,15 @@ def hold_job(
     job = require_job(session, job_id)
     if job.status == JobStatus.HELD:
         return
-    if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+    if job_is_running_promotion(job.status, job.stage):
         raise JobControlError("Running promotion jobs cannot be held by the scheduler.")
-    if job.status in {
-        JobStatus.FAILED,
-        JobStatus.CANCELED,
-        JobStatus.COMPLETED,
-        JobStatus.SKIPPED,
-        JobStatus.VALIDATED,
-    }:
+    if not job_can_be_held(job.status, job.stage):
         raise JobControlError(f"Job {job_id} cannot be held from {job.status}.")
 
     job.hold_requested_at = job.hold_requested_at or now
     job.hold_requested_by = job.hold_requested_by or actor
     job.hold_reason = reason
-    if job.status == JobStatus.RUNNING:
+    if job_is_running(job.status):
         add_job_event(
             session,
             job_id=job_id,
@@ -119,7 +126,8 @@ def hold_job(
             now=now,
         )
     else:
-        job.status = JobStatus.HELD
+        transition = plan_job_transition(job.status, JobStatus.HELD, now=now)
+        job.status = transition.status
         job.held_at = now
         add_job_event(
             session,
@@ -139,7 +147,8 @@ def release_job(session: Session, *, job_id: int, actor: str, now: datetime) -> 
     if not had_hold:
         return False
     if job.status == JobStatus.HELD:
-        job.status = JobStatus.PENDING
+        transition = plan_job_transition(job.status, JobStatus.QUEUED, now=now)
+        job.status = transition.status
         job.finished_at = None
     clear_hold_fields(job)
     job.updated_at = now
@@ -192,7 +201,7 @@ def update_job_priority(
     now: datetime,
 ) -> None:
     job = require_job(session, job_id)
-    if job.status not in {JobStatus.PENDING, JobStatus.HELD}:
+    if not job_can_change_priority(job.status):
         raise JobControlError(f"Job {job_id} priority cannot change from {job.status}.")
     old_priority = job.priority
     job.priority = priority

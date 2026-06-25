@@ -85,6 +85,11 @@ from avarch.domain.jobs import (
     JobEventType,
     JobStage,
     JobStatus,
+    job_can_retry,
+    job_has_passed_validation,
+    job_is_running,
+    job_is_running_promotion,
+    job_is_terminal_history,
 )
 from avarch.domain.scheduler import (
     ResourceCapacity,
@@ -614,8 +619,7 @@ async def execute_validation_job(
         job = require_job(session, job_id)
         existing_validation = latest_validation(session, job)
         if (
-            job.status == JobStatus.VALIDATED
-            and job.stage == JobStage.PROMOTE
+            job_has_passed_validation(job.status, job.stage)
             and existing_validation is not None
             and existing_validation.passed
         ):
@@ -894,7 +898,7 @@ def retry_job(
     now: datetime,
 ) -> JobStage:
     job = require_job(session, job_id)
-    if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
+    if not job_can_retry(job.status):
         raise job_control.JobControlError(f"Job {job_id} cannot be retried from {job.status}.")
     next_stage = _resolve_retry_stage(session, job, config=config)
     if next_stage is None:
@@ -982,15 +986,15 @@ def clear_queue(
     completed_excluded = 0
     changed = 0
     for job in jobs:
-        if job.status in {JobStatus.COMPLETED, JobStatus.SKIPPED, JobStatus.CANCELED}:
+        if job_is_terminal_history(job.status):
             completed_excluded += 1
             continue
-        if job.status == JobStatus.RUNNING and job.stage == JobStage.PROMOTE:
+        if job_is_running_promotion(job.status, job.stage):
             promotion_excluded += 1
             continue
-        if job.status == JobStatus.RUNNING and not cancel_running:
+        if job_is_running(job.status) and not cancel_running:
             continue
-        if job.status == JobStatus.RUNNING:
+        if job_is_running(job.status):
             running += 1
         else:
             immediate += 1
@@ -1048,7 +1052,7 @@ def retry_queue(
     reset_to_validate = 0
     return_to_promote = 0
     for job in jobs:
-        if job.status not in {JobStatus.FAILED, JobStatus.CANCELED}:
+        if not job_can_retry(job.status):
             continue
         try:
             next_stage = _resolve_retry_stage(session, job, config=config)

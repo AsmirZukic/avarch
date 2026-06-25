@@ -8,7 +8,7 @@ from sqlmodel import Session, col, select
 from avarch.adapters.sqlite.inventory import PathResolver, select_inventory_files
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, MediaPlan
 from avarch.adapters.sqlite.planning import current_plan_for_file, find_plan
-from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
 
 
 class QueueSelectionError(ValueError):
@@ -79,7 +79,7 @@ def create_queue_job(
             queue_key=queue_key,
             probe_result_id=probe_result_id,
             probe_hash=probe_hash,
-            status=JobStatus.PENDING,
+            status=JobStatus.QUEUED,
             stage=JobStage.PLAN if probe_result_id is not None else JobStage.PROBE,
             priority=priority,
             attempts=0,
@@ -119,7 +119,10 @@ def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
             )
             or (
                 job.stage == JobStage.PROMOTE
-                and job.status in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTING}
+                and (
+                    job_has_passed_validation(job.status, job.stage)
+                    or job.status == JobStatus.PROMOTING
+                )
             )
         )
     ]
@@ -151,7 +154,7 @@ def select_queue_jobs(
         statement = statement.where(Job.profile_name == profile)
     if all_jobs:
         statement = statement.where(
-            col(Job.status).not_in([JobStatus.COMPLETED, JobStatus.SKIPPED, JobStatus.CANCELED])
+            col(Job.status).not_in([JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED])
         )
     return list(session.exec(statement).all())
 
@@ -226,7 +229,7 @@ def enqueue_plans(
         queue_key = plan.plan_hash
         existing = find_existing_queue_job(session, queue_key=queue_key)
         if existing is not None:
-            if existing.status in {JobStatus.COMPLETED, JobStatus.VALIDATED}:
+            if existing.status in {JobStatus.PROMOTED, JobStatus.READY_TO_PROMOTE}:
                 already_done += 1
             else:
                 already_queued += 1
@@ -243,7 +246,7 @@ def enqueue_plans(
                 plan_hash=plan.plan_hash,
                 plan_path=plan.plan_path,
                 output_path=plan.output_path,
-                status=JobStatus.PENDING,
+                status=JobStatus.QUEUED,
                 stage=JobStage.ENCODE,
                 priority=priority,
                 attempts=0,

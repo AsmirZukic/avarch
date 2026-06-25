@@ -58,8 +58,7 @@ from avarch.adapters.sqlite.promotions import (
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.config import AppConfig
 from avarch.domain.jobs import (
-    JobStage,
-    JobStatus,
+    job_has_passed_validation,
 )
 from avarch.domain.promotion import (
     PromotionPathConflictError,
@@ -314,7 +313,7 @@ def validate_promotion_preflight(
         raise PromotionEligibilityError("Job must be persisted before promotion.")
     if validation.id is None:
         raise PromotionEligibilityError("Validation result must be persisted before promotion.")
-    if job.status != JobStatus.VALIDATED or job.stage != JobStage.PROMOTE:
+    if not job_has_passed_validation(job.status, job.stage):
         raise PromotionEligibilityError("Job is not validated and ready for promotion.")
     if job.latest_validation_id != validation.id:
         raise PromotionEligibilityError("Validation result is not the latest job validation.")
@@ -404,7 +403,7 @@ def claim_promotion(
     now: datetime,
 ) -> PromotionRecord:
     job = _promotion_job(session, job_id)
-    if job.status != JobStatus.VALIDATED or job.stage != JobStage.PROMOTE:
+    if not job_has_passed_validation(job.status, job.stage):
         raise PromotionEligibilityError("Job is not validated and ready for promotion.")
     if has_completed_promotion(session, job):
         raise PromotionEligibilityError("Job already has a completed promotion.")

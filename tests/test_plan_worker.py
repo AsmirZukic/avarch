@@ -67,7 +67,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
         stored = session.get(Job, job.id)
 
     assert stored is not None
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
     assert stored.stage == JobStage.ENCODE
     assert stored.plan_hash == plan.plan_hash
 

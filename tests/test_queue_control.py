@@ -44,7 +44,7 @@ def test_queue_clear_preview_does_not_mutate_jobs(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        pending = _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now)
+        pending = _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now)
         held = _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now)
         pending_id = pending.id or 0
         held_id = held.id or 0
@@ -54,12 +54,12 @@ def test_queue_clear_preview_does_not_mutate_jobs(tmp_path: Path) -> None:
             session,
             actor="test",
             now=now,
-            statuses={JobStatus.PENDING, JobStatus.HELD},
+            statuses={JobStatus.QUEUED, JobStatus.HELD},
             confirm=False,
         )
 
     with Session(engine) as session:
-        assert _get_job(session, pending_id).status == JobStatus.PENDING
+        assert _get_job(session, pending_id).status == JobStatus.QUEUED
         assert _get_job(session, held_id).status == JobStatus.HELD
         assert session.exec(select(JobEvent)).all() == []
     assert summary.matched == 2
@@ -72,10 +72,16 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         ids = [
-            _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now).id,
+            _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now).id,
             _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now).id,
             _store_job(session, tmp_path, "failed", status=JobStatus.FAILED, now=now).id,
-            _store_job(session, tmp_path, "validated", status=JobStatus.VALIDATED, now=now).id,
+            _store_job(
+                session,
+                tmp_path,
+                "validated",
+                status=JobStatus.READY_TO_PROMOTE,
+                now=now,
+            ).id,
         ]
 
     with Session(engine) as session, session.begin():
@@ -84,10 +90,10 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
             actor="test",
             now=now,
             statuses={
-                JobStatus.PENDING,
+                JobStatus.QUEUED,
                 JobStatus.HELD,
                 JobStatus.FAILED,
-                JobStatus.VALIDATED,
+                JobStatus.READY_TO_PROMOTE,
             },
             confirm=True,
         )
@@ -97,7 +103,7 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
         events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert summary.changed == 4
-    assert statuses == [JobStatus.CANCELED] * 4
+    assert statuses == [JobStatus.CANCELLED] * 4
     assert [event.event_type for event in events] == [JobEventType.QUEUE_CLEARED] * 4
     assert all(event.details_json is not None for event in events)
 
@@ -106,7 +112,7 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        running = _store_job(session, tmp_path, "running", status=JobStatus.RUNNING, now=now)
+        running = _store_job(session, tmp_path, "running", status=JobStatus.ENCODING, now=now)
         running_id = running.id or 0
 
     with Session(engine) as session, session.begin():
@@ -114,19 +120,19 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
             session,
             actor="test",
             now=now,
-            statuses={JobStatus.RUNNING},
+            statuses={JobStatus.ENCODING},
             confirm=True,
             cancel_running=False,
         )
     with Session(engine) as session:
-        assert _get_job(session, running_id).status == JobStatus.RUNNING
+        assert _get_job(session, running_id).status == JobStatus.ENCODING
 
     with Session(engine) as session, session.begin():
         requested = clear_queue(
             session,
             actor="test",
             now=now,
-            statuses={JobStatus.RUNNING},
+            statuses={JobStatus.ENCODING},
             confirm=True,
             cancel_running=True,
         )
@@ -136,7 +142,7 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
 
     assert preview.running_requests == 0
     assert requested.running_requests == 1
-    assert stored.status == JobStatus.RUNNING
+    assert stored.status == JobStatus.ENCODING
     assert stored.cancel_requested_at == now.replace(tzinfo=None)
 
 
@@ -148,7 +154,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
             session,
             tmp_path,
             "promotion",
-            status=JobStatus.RUNNING,
+            status=JobStatus.ENCODING,
             stage=JobStage.PROMOTE,
             now=now,
         )
@@ -156,7 +162,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
             session,
             tmp_path,
             "completed",
-            status=JobStatus.COMPLETED,
+            status=JobStatus.PROMOTED,
             now=now,
         )
         skipped = _store_job(session, tmp_path, "skipped", status=JobStatus.SKIPPED, now=now)
@@ -175,8 +181,8 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
         )
 
     with Session(engine) as session:
-        assert _get_job(session, promotion_id).status == JobStatus.RUNNING
-        assert _get_job(session, completed_id).status == JobStatus.COMPLETED
+        assert _get_job(session, promotion_id).status == JobStatus.ENCODING
+        assert _get_job(session, completed_id).status == JobStatus.PROMOTED
         assert _get_job(session, skipped_id).status == JobStatus.SKIPPED
     assert summary.promotion_excluded == 1
     assert summary.completed_excluded == 0
@@ -251,7 +257,7 @@ def test_queue_retry_resolves_safe_resume_stage(
     assert getattr(summary, summary_field) == 1
     assert stored.stage == expected_stage
     assert stored.status == (
-        JobStatus.VALIDATED if expected_stage == JobStage.PROMOTE else JobStatus.PENDING
+        JobStatus.READY_TO_PROMOTE if expected_stage == JobStage.PROMOTE else JobStatus.QUEUED
     )
     assert [event.event_type for event in events] == [JobEventType.RETRY_REQUESTED]
 
@@ -324,7 +330,7 @@ def test_queue_retry_resets_to_plan_when_vapoursynth_identity_changed(tmp_path: 
 
     assert summary.reset_to_plan == 1
     assert stored.stage == JobStage.PLAN
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
 
 
 def test_retry_job_rejects_completed_promotion(tmp_path: Path) -> None:

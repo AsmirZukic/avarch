@@ -293,8 +293,8 @@ def test_scheduler_status_reports_counts_pending_controls_and_lease_state(
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now)
-        running = _store_job(session, tmp_path, "running", status=JobStatus.RUNNING, now=now)
+        _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now)
+        running = _store_job(session, tmp_path, "running", status=JobStatus.ENCODING, now=now)
         held = _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now)
         running.cancel_requested_at = now
         held.hold_requested_at = now
@@ -305,8 +305,8 @@ def test_scheduler_status_reports_counts_pending_controls_and_lease_state(
 
     assert status.lease_state == "active"
     assert status.runner_id == "runner"
-    assert status.counts_by_status[JobStatus.PENDING] == 1
-    assert status.counts_by_status[JobStatus.RUNNING] == 1
+    assert status.counts_by_status[JobStatus.QUEUED] == 1
+    assert status.counts_by_status[JobStatus.ENCODING] == 1
     assert status.counts_by_status[JobStatus.HELD] == 1
     assert status.cancel_pending == 1
     assert status.hold_pending == 0

@@ -33,7 +33,7 @@ def test_enqueue_creates_job_for_present_file(tmp_path: Path) -> None:
         job = session.exec(select(Job)).one()
 
     assert summary.created == 1
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
 
 
 def test_enqueue_excludes_missing_file(tmp_path: Path) -> None:

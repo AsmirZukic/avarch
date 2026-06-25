@@ -1,18 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import Session
 
+from avarch.adapters.sqlite.job_transitions import reset_job_for_retry
 from avarch.adapters.sqlite.models import Job, JobAttempt, ValidationResult
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
+from avarch.domain.jobs import (
+    AttemptStatus,
+    JobStage,
+    ManualValidationAction,
+    plan_manual_validation,
+    plan_validation_result_transition,
+)
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
 
 
 class ValidationPersistenceError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ManualValidationPreparation:
+    action: ManualValidationAction
+    existing_validation: ValidationResult | None = None
 
 
 def latest_validation(session: Session, job: Job) -> ValidationResult | None:
@@ -29,6 +44,29 @@ def latest_validation(session: Session, job: Job) -> ValidationResult | None:
 def latest_validation_passed(session: Session, job: Job) -> bool:
     result = latest_validation(session, job)
     return result is not None and result.passed
+
+
+def prepare_manual_validation(
+    session: Session,
+    *,
+    job: Job,
+    now: datetime,
+) -> ManualValidationPreparation:
+    existing = latest_validation(session, job)
+    decision = plan_manual_validation(
+        job.status,
+        job.stage,
+        has_passing_validation=existing is not None and existing.passed,
+    )
+    if decision.action == ManualValidationAction.RESET_FAILED_AND_RUN:
+        reset_job_for_retry(job, next_stage=JobStage.VALIDATE, now=now)
+        session.add(job)
+    return ManualValidationPreparation(
+        action=decision.action,
+        existing_validation=existing
+        if decision.action == ManualValidationAction.REUSE_EXISTING
+        else None,
+    )
 
 
 def persist_validation_result(
@@ -76,17 +114,21 @@ def persist_validation_result(
             "failed_checks": list(failed_checks),
         }
     )
+    transition = plan_validation_result_transition(
+        job.status,
+        passed=report.passed,
+        failed_summary=failed_summary,
+        now=now,
+    )
+    job.status = transition.status
+    job.stage = transition.stage
+    job.finished_at = transition.finished_at
     if report.passed:
-        job.status = JobStatus.VALIDATED
-        job.stage = JobStage.PROMOTE
         job.last_error_type = None
         job.last_error_message = None
     else:
-        job.status = JobStatus.FAILED
-        job.stage = JobStage.VALIDATE
-        job.finished_at = now
-        job.last_error_type = "ValidationFailed"
-        job.last_error_message = failed_summary
+        job.last_error_type = transition.last_error_type
+        job.last_error_message = transition.last_error_message
     session.add(job)
     session.add(attempt)
     return result

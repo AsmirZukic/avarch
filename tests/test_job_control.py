@@ -34,10 +34,10 @@ from avarch.domain.jobs import (
 @pytest.mark.parametrize(
     "status,stage",
     [
-        (JobStatus.PENDING, JobStage.PROBE),
+        (JobStatus.QUEUED, JobStage.PROBE),
         (JobStatus.HELD, JobStage.PLAN),
         (JobStatus.FAILED, JobStage.ENCODE),
-        (JobStatus.VALIDATED, JobStage.PROMOTE),
+        (JobStatus.READY_TO_PROMOTE, JobStage.PROMOTE),
     ],
 )
 def test_cancel_nonrunning_eligible_job_is_immediate(
@@ -52,7 +52,7 @@ def test_cancel_nonrunning_eligible_job_is_immediate(
         cancel_job(session, job_id=job_id, actor="test", reason="wrong profile", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert job.cancel_requested_at == now.replace(tzinfo=None)
     assert job.cancel_requested_by == "test"
     assert job.cancel_reason == "wrong profile"
@@ -61,7 +61,7 @@ def test_cancel_nonrunning_eligible_job_is_immediate(
     assert [event.event_type for event in events] == [JobEventType.CANCELED]
 
 
-@pytest.mark.parametrize("status", [JobStatus.COMPLETED, JobStatus.SKIPPED])
+@pytest.mark.parametrize("status", [JobStatus.PROMOTED, JobStatus.SKIPPED])
 def test_cancel_rejects_terminal_history_states(tmp_path: Path, status: JobStatus) -> None:
     engine, job_id = _stored_job(tmp_path, status=status)
 
@@ -70,7 +70,7 @@ def test_cancel_rejects_terminal_history_states(tmp_path: Path, status: JobStatu
 
 
 def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.PENDING)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
@@ -78,7 +78,7 @@ def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
         cancel_job(session, job_id=job_id, actor="test", reason="stop this", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.cancel_requested_at == now.replace(tzinfo=None)
     assert job.cancel_requested_by == "test"
     assert job.canceled_at is None
@@ -88,7 +88,7 @@ def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
 def test_cancel_running_promotion_is_rejected(tmp_path: Path) -> None:
     engine, job_id = _stored_job(
         tmp_path,
-        status=JobStatus.RUNNING,
+        status=JobStatus.ENCODING,
         stage=JobStage.PROMOTE,
     )
 
@@ -97,7 +97,7 @@ def test_cancel_running_promotion_is_rejected(tmp_path: Path) -> None:
 
 
 def test_cancel_is_idempotent_for_already_canceled_job(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.CANCELED)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.CANCELLED)
 
     with Session(engine) as session, session.begin():
         cancel_job(session, job_id=job_id, actor="test", now=datetime.now(UTC))
@@ -131,7 +131,7 @@ def test_hold_running_job_records_request_without_interrupting(tmp_path: Path) -
         hold_job(session, job_id=job_id, actor="test", reason="later", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.hold_requested_at == now.replace(tzinfo=None)
     assert job.held_at is None
     assert [event.event_type for event in events] == [JobEventType.HOLD_REQUESTED]
@@ -141,10 +141,10 @@ def test_hold_running_job_records_request_without_interrupting(tmp_path: Path) -
     "status",
     [
         JobStatus.FAILED,
-        JobStatus.CANCELED,
-        JobStatus.COMPLETED,
+        JobStatus.CANCELLED,
+        JobStatus.PROMOTED,
         JobStatus.SKIPPED,
-        JobStatus.VALIDATED,
+        JobStatus.READY_TO_PROMOTE,
     ],
 )
 def test_hold_rejects_nonrunnable_states(tmp_path: Path, status: JobStatus) -> None:
@@ -167,7 +167,7 @@ def test_hold_is_idempotent_for_already_held_job(tmp_path: Path) -> None:
 def test_hold_running_promotion_is_rejected(tmp_path: Path) -> None:
     engine, job_id = _stored_job(
         tmp_path,
-        status=JobStatus.RUNNING,
+        status=JobStatus.ENCODING,
         stage=JobStage.PROMOTE,
     )
 
@@ -185,7 +185,7 @@ def test_release_held_job_returns_to_pending_and_clears_request(tmp_path: Path) 
 
     job, events = _job_and_events(engine, job_id)
     assert changed is True
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.hold_requested_at is None
     assert job.held_at is None
     assert [event.event_type for event in events] == [
@@ -205,7 +205,7 @@ def test_release_running_job_clears_pending_hold_request(tmp_path: Path) -> None
 
     job, events = _job_and_events(engine, job_id)
     assert changed is True
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.hold_requested_at is None
     assert [event.event_type for event in events] == [
         JobEventType.HOLD_REQUESTED,
@@ -243,7 +243,7 @@ def test_completion_with_cancel_request_marks_attempt_canceled(tmp_path: Path) -
         attempt = session.exec(select(JobAttempt)).one()
 
     assert job is not None
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert attempt.status == AttemptStatus.CANCELED
 
 
@@ -308,7 +308,7 @@ def test_failure_clears_pending_hold_request(tmp_path: Path) -> None:
     assert job.held_at is None
 
 
-@pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.HELD])
+@pytest.mark.parametrize("status", [JobStatus.QUEUED, JobStatus.HELD])
 def test_priority_update_allowed_for_pending_and_held(
     tmp_path: Path,
     status: JobStatus,
@@ -328,11 +328,11 @@ def test_priority_update_allowed_for_pending_and_held(
 @pytest.mark.parametrize(
     "status",
     [
-        JobStatus.RUNNING,
+        JobStatus.ENCODING,
         JobStatus.FAILED,
-        JobStatus.CANCELED,
-        JobStatus.VALIDATED,
-        JobStatus.COMPLETED,
+        JobStatus.CANCELLED,
+        JobStatus.READY_TO_PROMOTE,
+        JobStatus.PROMOTED,
         JobStatus.SKIPPED,
     ],
 )
@@ -360,7 +360,7 @@ def test_recovery_cancels_abandoned_job_with_cancel_request(tmp_path: Path) -> N
 
     assert summary.recovered_jobs == 1
     assert job is not None
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert attempt.status == AttemptStatus.CANCELED
 
 
@@ -395,7 +395,7 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.ENCODE
 
 
@@ -542,7 +542,7 @@ def _encoded_output_exists(job: Job) -> bool:
 def _stored_job(
     tmp_path: Path,
     *,
-    status: JobStatus = JobStatus.PENDING,
+    status: JobStatus = JobStatus.QUEUED,
     stage: JobStage = JobStage.PROBE,
     output_path: Path | None = None,
 ) -> tuple[Engine, int]:

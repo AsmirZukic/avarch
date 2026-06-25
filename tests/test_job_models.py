@@ -43,7 +43,7 @@ def test_insert_pending_probe_job(tmp_path: Path) -> None:
 
         stored = session.exec(select(Job)).one()
 
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
     assert stored.stage == JobStage.PROBE
 
 
@@ -187,7 +187,7 @@ def test_job_enums_round_trip_through_sqlite(tmp_path: Path) -> None:
         stored = session.exec(select(Job)).one()
 
     assert stored.stage == JobStage.PLAN
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
 
 
 def test_validated_promote_job_enums_round_trip(tmp_path: Path) -> None:
@@ -203,7 +203,7 @@ def test_validated_promote_job_enums_round_trip(tmp_path: Path) -> None:
             _job(
                 media_file.id or 0,
                 now,
-                status=JobStatus.VALIDATED,
+                status=JobStatus.READY_TO_PROMOTE,
                 stage=JobStage.PROMOTE,
             )
         )
@@ -211,7 +211,7 @@ def test_validated_promote_job_enums_round_trip(tmp_path: Path) -> None:
 
         stored = session.exec(select(Job)).one()
 
-    assert stored.status == JobStatus.VALIDATED
+    assert stored.status == JobStatus.READY_TO_PROMOTE
     assert stored.stage == JobStage.PROMOTE
 
 
@@ -328,7 +328,7 @@ def _job(
     *,
     queue_key: str = "queue-key",
     plan_hash: str | None = None,
-    status: JobStatus = JobStatus.PENDING,
+    status: JobStatus = JobStatus.QUEUED,
     stage: JobStage = JobStage.PROBE,
 ) -> Job:
     return Job(
