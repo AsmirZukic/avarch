@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlmodel import Session
 
 from avarch.adapters.manual_validation import SchedulerManualValidationWorker
+from avarch.adapters.scheduler_process import SchedulerProcessAdapter
 from avarch.adapters.scheduler_run import SchedulerRuntimeAdapter
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
@@ -38,6 +39,10 @@ def scheduler_status_store(session: Session) -> SqliteSchedulerStatusStore:
 
 def manual_validation_worker() -> SchedulerManualValidationWorker:
     return SchedulerManualValidationWorker()
+
+
+def scheduler_process_controller() -> SchedulerProcessAdapter:
+    return SchedulerProcessAdapter()
 
 
 def scheduler_runner() -> SchedulerRuntimeAdapter:
