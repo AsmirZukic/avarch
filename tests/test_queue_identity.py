@@ -8,8 +8,8 @@ from sqlmodel import Session
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import find_existing_queue_job
+from avarch.application.queue_identity import build_queue_key
 from avarch.domain.jobs import JobStage, JobStatus
-from avarch.scheduler_support import build_queue_key
 
 
 def test_queue_key_is_deterministic(tmp_path: Path) -> None:

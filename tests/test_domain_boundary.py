@@ -330,6 +330,7 @@ def test_application_modules_do_not_import_concrete_boundaries() -> None:
     forbidden_roots = frozenset(
         {
             "avarch.adapters",
+            "avarch.scheduler_support",
             "sqlmodel",
             "sqlalchemy",
             "subprocess",
