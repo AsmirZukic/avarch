@@ -83,7 +83,7 @@ def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
                 profile_hash="profile-hash",
                 source_fs_fingerprint="fingerprint",
                 queue_key=queue_key,
-                status=JobStatus.COMPLETED,
+                status=JobStatus.PROMOTED,
                 stage=JobStage.ENCODE,
                 created_at=now,
                 updated_at=now,
@@ -95,7 +95,7 @@ def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
         found = find_existing_queue_job(session, queue_key=queue_key)
 
     assert found is not None
-    assert found.status == JobStatus.COMPLETED
+    assert found.status == JobStatus.PROMOTED
 
 
 def _queue_key(

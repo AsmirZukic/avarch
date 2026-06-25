@@ -345,7 +345,7 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
     assert result.exit_code == 0
     assert "Failed jobs retry prepared: 1" in result.output
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.VALIDATE
 
 
@@ -377,7 +377,7 @@ def test_validation_report_workflow_for_missing_output_fails_required_checks(
         queue_key="queue",
         plan_hash=plan.plan_hash,
         output_path=str(plan.output_path),
-        status=JobStatus.PENDING,
+        status=JobStatus.QUEUED,
         stage=JobStage.VALIDATE,
         created_at=now,
         updated_at=now,
@@ -529,7 +529,7 @@ def _store_completed_validation_job(
         plan_hash=plan.plan_hash,
         plan_path=str(plan.artifacts.plan_json),
         output_path=str(plan.output_path),
-        status=JobStatus.VALIDATED,
+        status=JobStatus.READY_TO_PROMOTE,
         stage=JobStage.PROMOTE,
         attempts=1,
         created_at=now,

@@ -144,10 +144,13 @@ def next_promotion_attempt_number(session: Session, *, job: Job, job_id: int) ->
         .where(JobAttempt.job_id == job_id)
         .order_by(col(JobAttempt.attempt_number).desc())
     ).first()
-    return max(
-        job.attempts,
-        latest_attempt.attempt_number if latest_attempt is not None else 0,
-    ) + 1
+    return (
+        max(
+            job.attempts,
+            latest_attempt.attempt_number if latest_attempt is not None else 0,
+        )
+        + 1
+    )
 
 
 def persist_promotion_claim(

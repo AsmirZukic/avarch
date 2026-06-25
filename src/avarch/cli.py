@@ -74,14 +74,20 @@ from avarch.adapters.sqlite.scheduler_state import (
     stop_scheduler,
 )
 from avarch.adapters.sqlite.urls import resolve_database_url
-from avarch.adapters.sqlite.validations import latest_validation
+from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
 from avarch.config import (
     WORKSPACE_CONFIG_TEXT,
     AppConfig,
     load_config,
     resolve_data_dir,
 )
-from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
+from avarch.domain.jobs import (
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ManualValidationAction,
+    job_has_passed_validation,
+)
 from avarch.execution import (
     build_av1an_command,
     build_ffmpeg_mux_command,
@@ -1124,7 +1130,7 @@ def jobs_cancel(
         with Session(engine) as session, session.begin():
             if running:
                 running_jobs = list(
-                    session.exec(select(Job).where(Job.status == JobStatus.RUNNING)).all()
+                    session.exec(select(Job).where(Job.status == JobStatus.ENCODING)).all()
                 )
                 for job in running_jobs:
                     if job.id is not None:
@@ -1149,7 +1155,7 @@ def jobs_cancel(
     if (
         wait
         and job_id is not None
-        and not _wait_for_job_status(engine, job_id, JobStatus.CANCELED, timeout_seconds)
+        and not _wait_for_job_status(engine, job_id, JobStatus.CANCELLED, timeout_seconds)
     ):
         typer.echo("Timed out waiting for job cancellation.")
         raise typer.Exit(1)
@@ -1266,7 +1272,7 @@ def jobs_clear(
     _upgrade_database_or_exit(database_url)
     statuses: set[JobStatus] = set()
     if completed:
-        statuses.add(JobStatus.COMPLETED)
+        statuses.add(JobStatus.PROMOTED)
     if failed:
         statuses.add(JobStatus.FAILED)
     if not statuses:
@@ -1297,46 +1303,25 @@ def jobs_validate(
     _upgrade_database_or_exit(database_url)
     runtime_config = _runtime_config(app_config, config)
     engine = create_db_engine(database_url)
-    with Session(engine) as session:
+    with Session(engine) as session, session.begin():
         job = session.get(Job, job_id)
         if job is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
-        if job.status == JobStatus.RUNNING:
+        preparation = prepare_manual_validation(session, job=job, now=_utc_now())
+        if preparation.action == ManualValidationAction.REJECT_RUNNING:
             typer.echo("Validation cannot run while the job is running.")
             raise typer.Exit(1)
-        existing = latest_validation(session, job)
-        if (
-            job.status == JobStatus.VALIDATED
-            and job.stage == JobStage.PROMOTE
-            and existing is not None
-            and existing.passed
-        ):
-            report = ValidationReport.model_validate_json(existing.details_json)
+        if preparation.action == ManualValidationAction.REUSE_EXISTING:
+            assert preparation.existing_validation is not None
+            report = ValidationReport.model_validate_json(
+                preparation.existing_validation.details_json
+            )
             typer.echo(format_validation_report_summary(report, reused=True))
             return
-        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
-            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
-        )
-        was_failed = job.status == JobStatus.FAILED
-        if not eligible:
+        if preparation.action == ManualValidationAction.REJECT_INELIGIBLE:
             typer.echo("Job is not eligible for validation.")
             raise typer.Exit(1)
-
-    if was_failed:
-        with Session(engine) as session, session.begin():
-            stored = session.get(Job, job_id)
-            if stored is None:
-                typer.echo("Job disappeared before validation could run.")
-                raise typer.Exit(1)
-            stored.status = JobStatus.PENDING
-            stored.stage = JobStage.VALIDATE
-            stored.claimed_by = None
-            stored.last_error_type = None
-            stored.last_error_message = None
-            stored.finished_at = None
-            stored.updated_at = _utc_now()
-            session.add(stored)
 
     result = asyncio.run(
         execute_validation_job(
@@ -1556,7 +1541,7 @@ def validate_file(
     workspace_root = _workspace_root_for_storage(config) or Path.cwd()
     engine = create_db_engine(database_url)
 
-    with Session(engine) as session:
+    with Session(engine) as session, session.begin():
         selection = select_inventory_files(
             session,
             file_selectors=[source_path],
@@ -1585,45 +1570,24 @@ def validate_file(
             typer.echo("Job is missing a database id.")
             raise typer.Exit(1)
         job_id = job.id
-        if job.status == JobStatus.RUNNING:
+        preparation = prepare_manual_validation(session, job=job, now=_utc_now())
+        if preparation.action == ManualValidationAction.REJECT_RUNNING:
             typer.echo("Validation cannot run while the job is running.")
             raise typer.Exit(1)
-        existing = latest_validation(session, job)
-        if (
-            job.status == JobStatus.VALIDATED
-            and job.stage == JobStage.PROMOTE
-            and existing is not None
-            and existing.passed
-        ):
-            report = ValidationReport.model_validate_json(existing.details_json)
+        if preparation.action == ManualValidationAction.REUSE_EXISTING:
+            assert preparation.existing_validation is not None
+            report = ValidationReport.model_validate_json(
+                preparation.existing_validation.details_json
+            )
             typer.echo(format_validation_report_summary(report, reused=True))
             typer.echo("")
             typer.echo("Structured report:")
             report_path = validation_report_path_for_plan_artifact(job.plan_path)
             typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
             return
-        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
-            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
-        )
-        was_failed = job.status == JobStatus.FAILED
-        if not eligible:
+        if preparation.action == ManualValidationAction.REJECT_INELIGIBLE:
             typer.echo("Job is not eligible for validation.")
             raise typer.Exit(1)
-
-    if was_failed:
-        with Session(engine) as session, session.begin():
-            stored = session.get(Job, job_id)
-            if stored is None:
-                typer.echo("Job disappeared before validation could run.")
-                raise typer.Exit(1)
-            stored.status = JobStatus.PENDING
-            stored.stage = JobStage.VALIDATE
-            stored.claimed_by = None
-            stored.last_error_type = None
-            stored.last_error_message = None
-            stored.finished_at = None
-            stored.updated_at = _utc_now()
-            session.add(stored)
 
     result = asyncio.run(
         execute_validation_job(
@@ -1979,15 +1943,13 @@ def workflow_run(
     promotable_jobs = [
         job
         for job in jobs
-        if job.status == JobStatus.VALIDATED
-        and job.stage == JobStage.PROMOTE
-        and job.id is not None
+        if job_has_passed_validation(job.status, job.stage) and job.id is not None
     ]
     failed_jobs = [job for job in jobs if job.status == JobStatus.FAILED]
     blocked_jobs = [
         job
         for job in jobs
-        if job.status not in {JobStatus.VALIDATED, JobStatus.COMPLETED}
+        if job.status not in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTED}
         and job.status != JobStatus.FAILED
     ]
 
@@ -2932,7 +2894,7 @@ def _parse_job_stages(value: str | None) -> set[JobStage] | None:
 
 
 def _job_control_label(job: Job) -> str:
-    if job.cancel_requested_at is not None and _job_status_value(job.status) != JobStatus.CANCELED:
+    if job.cancel_requested_at is not None and _job_status_value(job.status) != JobStatus.CANCELLED:
         return "cancel"
     if job.hold_requested_at is not None:
         return "hold"
@@ -3015,7 +2977,7 @@ def _wait_for_queue_clear(engine: Engine, *, timeout_seconds: float) -> bool:
         with Session(engine) as session:
             pending = session.exec(
                 select(Job).where(
-                    Job.status == JobStatus.RUNNING,
+                    Job.status == JobStatus.ENCODING,
                     col(Job.cancel_requested_at).is_not(None),
                 )
             ).first()

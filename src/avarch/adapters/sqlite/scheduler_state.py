@@ -214,7 +214,7 @@ def active_scheduler_jobs(session: Session) -> list[Job]:
     return list(
         session.exec(
             select(Job)
-            .where(Job.status == JobStatus.RUNNING)
+            .where(Job.status == JobStatus.ENCODING)
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
         ).all()
     )
@@ -225,7 +225,7 @@ def pending_cancel_count(session: Session) -> int:
         session.exec(
             select(Job).where(
                 col(Job.cancel_requested_at).is_not(None),
-                Job.status == JobStatus.RUNNING,
+                Job.status == JobStatus.ENCODING,
             )
         ).all()
     )
@@ -236,19 +236,19 @@ def pending_hold_count(session: Session) -> int:
         session.exec(
             select(Job).where(
                 col(Job.hold_requested_at).is_not(None),
-                Job.status == JobStatus.RUNNING,
+                Job.status == JobStatus.ENCODING,
             )
         ).all()
     )
 
 
 def has_pending_jobs(session: Session) -> bool:
-    return session.exec(select(Job).where(Job.status == JobStatus.PENDING)).first() is not None
+    return session.exec(select(Job).where(Job.status == JobStatus.QUEUED)).first() is not None
 
 
 def terminal_job_counts(session: Session) -> TerminalJobCounts:
     return TerminalJobCounts(
-        completed=len(session.exec(select(Job).where(Job.status == JobStatus.COMPLETED)).all()),
+        completed=len(session.exec(select(Job).where(Job.status == JobStatus.PROMOTED)).all()),
         failed=len(session.exec(select(Job).where(Job.status == JobStatus.FAILED)).all()),
         skipped=len(session.exec(select(Job).where(Job.status == JobStatus.SKIPPED)).all()),
     )

@@ -20,12 +20,7 @@ class JobStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
-    PENDING = "queued"
-    RUNNING = "encoding"
     HELD = "held"
-    VALIDATED = "ready_to_promote"
-    COMPLETED = "promoted"
-    CANCELED = "cancelled"
 
     @classmethod
     def _missing_(cls, value: object) -> JobStatus | None:
@@ -89,6 +84,14 @@ class InterruptionReason(StrEnum):
     CTRL_C = "ctrl_c"
 
 
+class ManualValidationAction(StrEnum):
+    REUSE_EXISTING = "reuse_existing"
+    RUN = "run"
+    RESET_FAILED_AND_RUN = "reset_failed_and_run"
+    REJECT_RUNNING = "reject_running"
+    REJECT_INELIGIBLE = "reject_ineligible"
+
+
 class JobTransitionError(ValueError):
     pass
 
@@ -98,6 +101,40 @@ class JobTransition:
     status: JobStatus
     outcome_reason: JobOutcomeReason | None = None
     updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedStageTransition:
+    status: JobStatus
+    stage: JobStage | None
+    finished_at: datetime | None
+    record_held_event: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptedStageTransition:
+    status: JobStatus
+    record_held_event: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RetryTransition:
+    status: JobStatus
+    stage: JobStage
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResultTransition:
+    status: JobStatus
+    stage: JobStage
+    finished_at: datetime | None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManualValidationDecision:
+    action: ManualValidationAction
 
 
 def active_status_for_stage(stage: JobStage | str) -> JobStatus:
@@ -120,6 +157,83 @@ def job_can_be_claimed_for_stage(status: JobStatus | str, stage: JobStage | str)
     }
 
 
+def job_is_running(status: JobStatus | str) -> bool:
+    return JobStatus(status) == JobStatus.ENCODING
+
+
+def job_is_running_promotion(status: JobStatus | str, stage: JobStage | str) -> bool:
+    return job_is_running(status) and JobStage(stage) == JobStage.PROMOTE
+
+
+def job_is_terminal_history(status: JobStatus | str) -> bool:
+    return JobStatus(status) in {JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED}
+
+
+def job_cancel_is_idempotent(status: JobStatus | str) -> bool:
+    return JobStatus(status) == JobStatus.CANCELLED
+
+
+def job_rejects_cancel(status: JobStatus | str) -> bool:
+    return JobStatus(status) in {JobStatus.PROMOTED, JobStatus.SKIPPED}
+
+
+def job_has_passed_validation(status: JobStatus | str, stage: JobStage | str) -> bool:
+    return JobStatus(status) == JobStatus.READY_TO_PROMOTE and JobStage(stage) == JobStage.PROMOTE
+
+
+def job_can_be_held(status: JobStatus | str, stage: JobStage | str) -> bool:
+    normalized_status = JobStatus(status)
+    if normalized_status == JobStatus.HELD:
+        return True
+    if job_is_running_promotion(normalized_status, stage):
+        return False
+    return normalized_status not in {
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.PROMOTED,
+        JobStatus.SKIPPED,
+        JobStatus.READY_TO_PROMOTE,
+    }
+
+
+def job_can_change_priority(status: JobStatus | str) -> bool:
+    return JobStatus(status) in {JobStatus.QUEUED, JobStatus.HELD}
+
+
+def job_can_retry(status: JobStatus | str) -> bool:
+    return JobStatus(status) in {JobStatus.FAILED, JobStatus.CANCELLED}
+
+
+def job_can_run_manual_validation(status: JobStatus | str, stage: JobStage | str) -> bool:
+    normalized_stage = JobStage(stage)
+    if normalized_stage != JobStage.VALIDATE:
+        return False
+    return JobStatus(status) in {JobStatus.QUEUED, JobStatus.FAILED}
+
+
+def plan_manual_validation(
+    status: JobStatus | str,
+    stage: JobStage | str,
+    *,
+    has_passing_validation: bool,
+) -> ManualValidationDecision:
+    normalized_status = JobStatus(status)
+    normalized_stage = JobStage(stage)
+    if normalized_status == JobStatus.ENCODING:
+        return ManualValidationDecision(ManualValidationAction.REJECT_RUNNING)
+    if (
+        has_passing_validation
+        and normalized_status == JobStatus.READY_TO_PROMOTE
+        and normalized_stage == JobStage.PROMOTE
+    ):
+        return ManualValidationDecision(ManualValidationAction.REUSE_EXISTING)
+    if normalized_stage == JobStage.VALIDATE and normalized_status == JobStatus.FAILED:
+        return ManualValidationDecision(ManualValidationAction.RESET_FAILED_AND_RUN)
+    if job_can_run_manual_validation(normalized_status, normalized_stage):
+        return ManualValidationDecision(ManualValidationAction.RUN)
+    return ManualValidationDecision(ManualValidationAction.REJECT_INELIGIBLE)
+
+
 _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     JobStatus.QUEUED: frozenset(
         {
@@ -127,6 +241,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
             JobStatus.ENCODING,
             JobStatus.VALIDATING,
             JobStatus.READY_TO_PROMOTE,
+            JobStatus.PROMOTING,
             JobStatus.SKIPPED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
@@ -139,6 +254,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
             JobStatus.ENCODED,
             JobStatus.QUEUED,
             JobStatus.HELD,
+            JobStatus.SKIPPED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
         }
@@ -154,6 +270,8 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     JobStatus.VALIDATING: frozenset(
         {
             JobStatus.VALIDATING,
+            JobStatus.QUEUED,
+            JobStatus.HELD,
             JobStatus.READY_TO_PROMOTE,
             JobStatus.VALIDATION_FAILED,
             JobStatus.SIZE_REJECTED,
@@ -188,11 +306,129 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
             JobStatus.QUEUED,
             JobStatus.VALIDATING,
             JobStatus.READY_TO_PROMOTE,
+            JobStatus.CANCELLED,
         }
     ),
     JobStatus.CANCELLED: frozenset({JobStatus.CANCELLED, JobStatus.QUEUED}),
     JobStatus.HELD: frozenset({JobStatus.HELD, JobStatus.QUEUED, JobStatus.CANCELLED}),
-}
+    }
+
+
+def plan_completed_stage_transition(
+    current_status: JobStatus | str,
+    completed_stage: JobStage | str,
+    *,
+    next_stage: JobStage | str | None,
+    hold_requested: bool,
+    now: datetime,
+) -> CompletedStageTransition:
+    normalized_stage = JobStage(completed_stage)
+    if next_stage is None:
+        normalized_current = JobStatus(current_status)
+        if normalized_current == JobStatus.PROMOTING:
+            status = plan_job_transition(normalized_current, JobStatus.PROMOTED, now=now).status
+        else:
+            status = JobStatus.PROMOTED
+        return CompletedStageTransition(
+            status=status,
+            stage=None,
+            finished_at=now,
+        )
+
+    normalized_next_stage = JobStage(next_stage)
+    if hold_requested:
+        transition = plan_job_transition(current_status, JobStatus.HELD, now=now)
+        return CompletedStageTransition(
+            status=transition.status,
+            stage=normalized_next_stage,
+            finished_at=None,
+            record_held_event=True,
+        )
+
+    if normalized_stage == JobStage.ENCODE and normalized_next_stage == JobStage.VALIDATE:
+        target_status = JobStatus.ENCODED
+    else:
+        target_status = JobStatus.QUEUED
+    transition = plan_job_transition(current_status, target_status, now=now)
+    return CompletedStageTransition(
+        status=transition.status,
+        stage=normalized_next_stage,
+        finished_at=None,
+    )
+
+
+def plan_failed_stage_transition(
+    current_status: JobStatus | str,
+    *,
+    now: datetime,
+) -> JobTransition:
+    return plan_job_transition(current_status, JobStatus.FAILED, now=now)
+
+
+def plan_interrupted_stage_transition(
+    current_status: JobStatus | str,
+    *,
+    hold_requested: bool,
+    now: datetime,
+) -> InterruptedStageTransition:
+    target_status = JobStatus.HELD if hold_requested else JobStatus.QUEUED
+    transition = plan_job_transition(current_status, target_status, now=now)
+    return InterruptedStageTransition(
+        status=transition.status,
+        record_held_event=hold_requested,
+    )
+
+
+def plan_canceled_transition(current_status: JobStatus | str, *, now: datetime) -> JobTransition:
+    return plan_job_transition(
+        current_status,
+        JobStatus.CANCELLED,
+        reason=JobOutcomeReason.CANCELLED_BY_USER,
+        now=now,
+    )
+
+
+def plan_skipped_transition(
+    current_status: JobStatus | str,
+    *,
+    reason: JobOutcomeReason | str | None,
+    now: datetime,
+) -> JobTransition:
+    return plan_job_transition(current_status, JobStatus.SKIPPED, reason=reason, now=now)
+
+
+def plan_retry_transition(next_stage: JobStage | str) -> RetryTransition:
+    normalized_stage = JobStage(next_stage)
+    return RetryTransition(
+        status=JobStatus.READY_TO_PROMOTE
+        if normalized_stage == JobStage.PROMOTE
+        else JobStatus.QUEUED,
+        stage=normalized_stage,
+    )
+
+
+def plan_validation_result_transition(
+    current_status: JobStatus | str,
+    *,
+    passed: bool,
+    failed_summary: str,
+    now: datetime,
+) -> ValidationResultTransition:
+    if passed:
+        transition = plan_job_transition(current_status, JobStatus.READY_TO_PROMOTE, now=now)
+        return ValidationResultTransition(
+            status=transition.status,
+            stage=JobStage.PROMOTE,
+            finished_at=None,
+        )
+    transition = plan_job_transition(current_status, JobStatus.FAILED, now=now)
+    return ValidationResultTransition(
+        status=transition.status,
+        stage=JobStage.VALIDATE,
+        finished_at=now,
+        last_error_type="ValidationFailed",
+        last_error_message=failed_summary,
+    )
 
 
 def plan_job_transition(

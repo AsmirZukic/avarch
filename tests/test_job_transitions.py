@@ -37,7 +37,7 @@ def test_claim_sets_job_running(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.claimed_by == "runner"
 
 
@@ -79,7 +79,7 @@ def test_claim_sets_first_started_at_only_once(tmp_path: Path) -> None:
 
 
 def test_claim_rejects_nonpending_job(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.COMPLETED)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.PROMOTED)
 
     with Session(engine) as session, pytest.raises(JobClaimError):
         claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
@@ -100,7 +100,7 @@ def test_completion_advances_stage(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.PLAN
 
 
@@ -119,7 +119,7 @@ def test_final_completion_marks_job_completed(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.COMPLETED
+    assert job.status == JobStatus.PROMOTED
     assert job.finished_at is not None
 
 
@@ -177,7 +177,7 @@ def test_interruption_returns_job_to_pending(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
 
 
 def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
@@ -255,7 +255,7 @@ def test_invalid_transition_is_rejected(tmp_path: Path) -> None:
 def _stored_job(
     tmp_path: Path,
     *,
-    status: JobStatus = JobStatus.PENDING,
+    status: JobStatus = JobStatus.QUEUED,
     stage: JobStage = JobStage.PROBE,
     started_at: datetime | None = None,
 ) -> tuple[Engine, int]:

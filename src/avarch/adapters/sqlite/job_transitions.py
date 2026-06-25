@@ -17,7 +17,14 @@ from avarch.domain.jobs import (
     JobTransitionError,
     active_status_for_stage,
     job_can_be_claimed_for_stage,
+    job_has_passed_validation,
+    plan_canceled_transition,
+    plan_completed_stage_transition,
+    plan_failed_stage_transition,
+    plan_interrupted_stage_transition,
     plan_job_transition,
+    plan_retry_transition,
+    plan_skipped_transition,
 )
 from avarch.domain.scheduler import resource_for_stage
 from avarch.serialization import canonical_json
@@ -89,7 +96,8 @@ def claim_job_stage(
     if not job_can_be_claimed_for_stage(job.status, job.stage):
         raise JobClaimError(f"Job is not claimable: {job_id}")
 
-    job.status = active_status_for_stage(job.stage)
+    transition = plan_job_transition(job.status, active_status_for_stage(job.stage), now=now)
+    job.status = transition.status
     job.claimed_by = runner_id
     job.attempts += 1
     job.started_at = job.started_at or now
@@ -130,29 +138,37 @@ def complete_job_stage(
     job.last_error_type = None
     job.last_error_message = None
     job.claimed_by = None
-    job.updated_at = now
     if next_stage is None:
-        job.status = JobStatus.COMPLETED
-        job.finished_at = now
+        transition = plan_completed_stage_transition(
+            job.status,
+            attempt.stage,
+            next_stage=None,
+            hold_requested=False,
+            now=now,
+        )
     else:
-        if job.hold_requested_at is not None:
-            job.status = JobStatus.HELD
-        elif attempt.stage == JobStage.ENCODE and next_stage == JobStage.VALIDATE:
-            job.status = JobStatus.ENCODED
-        else:
-            job.status = JobStatus.PENDING
-        job.stage = next_stage
-        job.finished_at = None
-        if job.status == JobStatus.HELD:
-            job.held_at = now
-            add_job_event(
-                session,
-                job_id=job_id,
-                event_type=JobEventType.HELD,
-                actor=job.hold_requested_by or "scheduler",
-                reason=job.hold_reason,
-                now=now,
-            )
+        transition = plan_completed_stage_transition(
+            job.status,
+            attempt.stage,
+            next_stage=next_stage,
+            hold_requested=job.hold_requested_at is not None,
+            now=now,
+        )
+    job.status = transition.status
+    if transition.stage is not None:
+        job.stage = transition.stage
+    job.finished_at = transition.finished_at
+    job.updated_at = now
+    if transition.record_held_event:
+        job.held_at = now
+        add_job_event(
+            session,
+            job_id=job_id,
+            event_type=JobEventType.HELD,
+            actor=job.hold_requested_by or "scheduler",
+            reason=job.hold_reason,
+            now=now,
+        )
     session.add(job)
     session.add(attempt)
 
@@ -177,7 +193,8 @@ def fail_job_stage(
     attempt.error_message = str(error)
     attempt.exit_code = exit_code
     attempt.finished_at = now
-    job.status = JobStatus.FAILED
+    transition = plan_failed_stage_transition(job.status, now=now)
+    job.status = transition.status
     job.claimed_by = None
     job.last_error_type = attempt.error_type
     job.last_error_message = attempt.error_message
@@ -204,8 +221,13 @@ def interrupt_job_stage(
     attempt.status = AttemptStatus.INTERRUPTED
     attempt.finished_at = now
     attempt.exit_code = 130
-    if job.hold_requested_at is not None:
-        job.status = JobStatus.HELD
+    transition = plan_interrupted_stage_transition(
+        job.status,
+        hold_requested=job.hold_requested_at is not None,
+        now=now,
+    )
+    job.status = transition.status
+    if transition.record_held_event:
         job.held_at = now
         add_job_event(
             session,
@@ -215,8 +237,6 @@ def interrupt_job_stage(
             reason=job.hold_reason,
             now=now,
         )
-    else:
-        job.status = JobStatus.PENDING
     job.claimed_by = None
     job.updated_at = now
     job.finished_at = None
@@ -227,7 +247,7 @@ def interrupt_job_stage(
 def interrupt_running_job(engine: Engine, *, job_id: int, now: datetime) -> None:
     with Session(engine) as session, session.begin():
         job = session.get(SQLiteJob, job_id)
-        if job is None or job.status != JobStatus.RUNNING:
+        if job is None or job.status != JobStatus.ENCODING:
             return
         attempt = session.exec(
             select(SQLiteJobAttempt)
@@ -238,7 +258,12 @@ def interrupt_running_job(engine: Engine, *, job_id: int, now: datetime) -> None
             .order_by(col(SQLiteJobAttempt.attempt_number).desc())
         ).first()
         if attempt is None:
-            job.status = JobStatus.PENDING
+            transition = plan_interrupted_stage_transition(
+                job.status,
+                hold_requested=False,
+                now=now,
+            )
+            job.status = transition.status
             job.claimed_by = None
             job.updated_at = now
             session.add(job)
@@ -271,7 +296,8 @@ def skip_claimed_job(
     attempt.status = AttemptStatus.COMPLETED
     attempt.finished_at = now
     attempt.details_json = canonical_json({"skip_reason": reason})
-    job.status = JobStatus.SKIPPED
+    transition = plan_skipped_transition(job.status, reason=None, now=now)
+    job.status = transition.status
     job.claimed_by = None
     job.skip_reason = reason
     job.updated_at = now
@@ -329,7 +355,7 @@ def recover_abandoned_jobs(
 ) -> RecoverySummary:
     recovered_jobs = 0
     interrupted_attempts = 0
-    jobs = list(session.exec(select(SQLiteJob).where(SQLiteJob.status == JobStatus.RUNNING)).all())
+    jobs = list(session.exec(select(SQLiteJob).where(SQLiteJob.status == JobStatus.ENCODING)).all())
     jobs.extend(
         session.exec(
             select(SQLiteJob).where(
@@ -352,7 +378,8 @@ def recover_abandoned_jobs(
         seen_job_ids.add(job_id)
         if job.status == JobStatus.ENCODED:
             if not encoded_output_exists(job):
-                job.status = JobStatus.FAILED
+                transition = plan_failed_stage_transition(job.status, now=now)
+                job.status = transition.status
                 job.last_error_type = "SchedulerRecovered"
                 job.last_error_message = "Encoded output was missing during scheduler recovery."
                 job.claimed_by = None
@@ -362,7 +389,8 @@ def recover_abandoned_jobs(
                 recovered_jobs += 1
                 continue
             job.stage = JobStage.VALIDATE
-            job.status = JobStatus.VALIDATING
+            transition = plan_job_transition(job.status, JobStatus.VALIDATING, now=now)
+            job.status = transition.status
             job.claimed_by = None
             job.finished_at = None
             job.updated_at = now
@@ -384,7 +412,7 @@ def recover_abandoned_jobs(
             session.add(job)
             recovered_jobs += 1
             continue
-        if job.status == JobStatus.READY_TO_PROMOTE and job.stage == JobStage.PROMOTE:
+        if job_has_passed_validation(job.status, job.stage):
             job.claimed_by = None
             job.finished_at = None
             job.updated_at = now
@@ -409,8 +437,13 @@ def recover_abandoned_jobs(
             attempt.error_message = "Running attempt was recovered after scheduler restart."
             session.add(attempt)
             interrupted_attempts += 1
-            job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
-            if job.status == JobStatus.HELD:
+            transition = plan_interrupted_stage_transition(
+                job.status,
+                hold_requested=job.hold_requested_at is not None,
+                now=now,
+            )
+            job.status = transition.status
+            if transition.record_held_event:
                 job.held_at = now
                 add_job_event(
                     session,
@@ -425,9 +458,15 @@ def recover_abandoned_jobs(
             job.updated_at = now
             session.add(job)
         else:
-            job.status = JobStatus.HELD if job.hold_requested_at is not None else JobStatus.PENDING
+            transition = plan_interrupted_stage_transition(
+                job.status,
+                hold_requested=job.hold_requested_at is not None,
+                now=now,
+            )
+            job.status = transition.status
             if job.cancel_requested_at is not None:
-                job.status = JobStatus.CANCELED
+                transition = plan_canceled_transition(job.status, now=now)
+                job.status = transition.status
                 job.canceled_at = now
                 job.finished_at = now
                 add_job_event(
@@ -438,7 +477,7 @@ def recover_abandoned_jobs(
                     reason=job.cancel_reason,
                     now=now,
                 )
-            elif job.status == JobStatus.HELD:
+            elif transition.record_held_event:
                 job.held_at = now
                 add_job_event(
                     session,
@@ -488,7 +527,8 @@ def cancel_claimed_job(
     attempt.status = AttemptStatus.CANCELED
     attempt.finished_at = now
     attempt.exit_code = 130
-    job.status = JobStatus.CANCELED
+    transition = plan_canceled_transition(job.status, now=now)
+    job.status = transition.status
     job.claimed_by = None
     job.canceled_at = now
     job.finished_at = now
@@ -523,8 +563,9 @@ def clear_cancel_fields(job: Job) -> None:
 def reset_job_for_retry(job: Job, *, next_stage: JobStage, now: datetime) -> None:
     clear_cancel_fields(job)
     clear_hold_fields(job)
-    job.status = JobStatus.VALIDATED if next_stage == JobStage.PROMOTE else JobStatus.PENDING
-    job.stage = next_stage
+    transition = plan_retry_transition(next_stage)
+    job.status = transition.status
+    job.stage = transition.stage
     job.last_error_type = None
     job.last_error_message = None
     job.claimed_by = None
