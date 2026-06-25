@@ -6,6 +6,12 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.promotion_service import (
+    claim_promotion,
+    mark_promotion_failed_or_validated,
+    promote_job,
+)
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
 from avarch.adapters.sqlite.models import (
@@ -25,8 +31,6 @@ from avarch.domain.jobs import (
     ResourceClass,
 )
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.promoter import claim_promotion, mark_promotion_failed_or_validated, promote_job
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from tests.test_plan_models import sample_plan
 

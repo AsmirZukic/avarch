@@ -5,6 +5,13 @@ from pathlib import Path
 from sqlmodel import Session
 
 from avarch.adapters.filesystem.plans import PlanArtifactLoadError, load_plan_artifact
+from avarch.adapters.promotion_service import (
+    PromotionError,
+    execute_promotion,
+    promote_job,
+    recover_promotion,
+    validate_promotion_preflight,
+)
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import JobClaimError, require_job
 from avarch.adapters.sqlite.models import PromotionRecord
@@ -18,13 +25,6 @@ from avarch.application.promotion import (
 )
 from avarch.config import AppConfig
 from avarch.models.promotion import PromotionMode
-from avarch.promoter import (
-    PromotionError,
-    execute_promotion,
-    promote_job,
-    recover_promotion,
-    validate_promotion_preflight,
-)
 
 
 class PromotionWorkflowAdapter:

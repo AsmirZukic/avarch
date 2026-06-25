@@ -2,8 +2,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from avarch.adapters.probe import format_probe_summary
 from avarch.models.probe import AudioStream, NormalizedProbe, VideoStream
-from avarch.probe import format_probe_summary
 from avarch.serialization import canonical_json
 
 

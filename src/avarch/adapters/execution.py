@@ -14,6 +14,7 @@ from typing import BinaryIO
 
 from pydantic import BaseModel, ValidationError
 
+from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
 from avarch.models.execution import (
     Av1anStageError,
@@ -36,7 +37,6 @@ from avarch.models.plan import (
     TranscodePlan,
 )
 from avarch.planner import SUPPORTED_AV1AN_VERSION_FAMILY
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
 MAX_PROCESS_TAIL_BYTES = 16_384

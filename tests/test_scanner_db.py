@@ -7,10 +7,15 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from avarch.adapters.filesystem.scanner import (
+    ScanError,
+    ScanResult,
+    create_file_snapshot,
+    scan_root,
+)
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.inventory import update_inventory
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus
-from avarch.scanner import ScanError, ScanResult, create_file_snapshot, scan_root
 
 
 def test_initial_scan_inserts_media_files(tmp_path: Path) -> None:

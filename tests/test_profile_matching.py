@@ -6,13 +6,13 @@ import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlmodel import Session
 
+from avarch.adapters.probe import build_probe_hash
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.models.probe import NormalizedProbe, VideoStream
 from avarch.planner import PlanningError, match_profile
-from avarch.probe import build_probe_hash
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json

@@ -1,5 +1,5 @@
+from avarch.adapters.probe import build_probe_hash
 from avarch.models.probe import NormalizedProbe, VideoStream
-from avarch.probe import build_probe_hash
 
 
 def test_probe_hash_is_deterministic() -> None:

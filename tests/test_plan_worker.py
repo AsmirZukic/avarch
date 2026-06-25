@@ -8,6 +8,8 @@ import pytest
 from sqlmodel import Session, select
 
 from avarch.adapters.filesystem.plans import write_plan_artifacts
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import normalize_probe
 from avarch.adapters.scheduler_workers import execute_plan_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
@@ -18,9 +20,7 @@ from avarch.application.enqueue import enqueue_inventory
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.planner import build_plan
-from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
-from avarch.scanner import create_file_snapshot
 from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
 from tests.probe_fixtures import sdr_probe_payload
 

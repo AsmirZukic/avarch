@@ -11,6 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import (
+    ProbeError,
+    ProbeExecutableNotFoundError,
+    build_ffprobe_command,
+    normalize_probe,
+    run_ffprobe,
+)
 from avarch.domain.validation import ValidationCheckStatus, checks_pass
 from avarch.models.plan import ExecutionRuntimePaths, TranscodePlan
 from avarch.models.validation import (
@@ -19,15 +27,7 @@ from avarch.models.validation import (
     ValidationPolicy,
     ValidationReport,
 )
-from avarch.probe import (
-    ProbeError,
-    ProbeExecutableNotFoundError,
-    build_ffprobe_command,
-    normalize_probe,
-    run_ffprobe,
-)
 from avarch.profiles.models import EncodingProfile
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
 Clock = Callable[[], datetime]

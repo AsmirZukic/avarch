@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from avarch.adapters.probe import ProbeNormalizationError, format_probe_summary, normalize_probe
 from avarch.models.probe import AudioStream, NormalizedProbe, SubtitleStream, VideoStream
-from avarch.probe import ProbeNormalizationError, format_probe_summary, normalize_probe
 
 
 def test_normalize_container_metadata() -> None:

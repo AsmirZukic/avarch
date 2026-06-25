@@ -7,6 +7,8 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import normalize_probe
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import (
     Job,
@@ -24,9 +26,7 @@ from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
-from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload

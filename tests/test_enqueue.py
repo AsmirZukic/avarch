@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from avarch.adapters.probe import normalize_probe
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
@@ -12,7 +13,6 @@ from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.application.enqueue import enqueue_inventory
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
-from avarch.probe import normalize_probe
 from tests.probe_fixtures import sdr_probe_payload
 
 

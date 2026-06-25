@@ -6,9 +6,9 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.adapters.probe import build_probe_hash
 from avarch.adapters.sqlite.models import MediaFile, ProbeResult
 from avarch.models.probe import NormalizedProbe
-from avarch.probe import build_probe_hash
 from avarch.serialization import canonical_json
 
 

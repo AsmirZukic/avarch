@@ -5,11 +5,11 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from avarch.adapters.filesystem.scanner import ScanError, scan_root
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.inventory import update_inventory
 from avarch.application.inventory_scan import InventoryScanError, InventoryScanResult
 from avarch.config import AppConfig
-from avarch.scanner import ScanError, scan_root
 
 
 class SqliteInventoryScanWorkflow:

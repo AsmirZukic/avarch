@@ -18,10 +18,23 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from avarch import __version__
+from avarch.adapters.execution import (
+    build_av1an_command,
+    build_ffmpeg_mux_command,
+    create_mux_temporary_path,
+    execute_plan,
+)
 from avarch.adapters.filesystem.plans import (
     PlanArtifactConflictError,
     validation_report_path_for_plan_artifact,
     write_plan_artifacts,
+)
+from avarch.adapters.probe import (
+    ProbeError,
+    format_probe_summary,
+    normalize_probe,
+    parse_normalized_probe_json,
+    run_ffprobe,
 )
 from avarch.adapters.sqlite.db import (
     UnsupportedDatabaseSchemaError,
@@ -54,6 +67,7 @@ from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_prob
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import prepare_manual_validation
+from avarch.adapters.validation import format_validation_report_summary
 from avarch.application.inventory_scan import (
     InventoryScanError,
     InventoryScanResult,
@@ -138,12 +152,6 @@ from avarch.domain.jobs import (
     ManualValidationAction,
     job_has_passed_validation,
 )
-from avarch.execution import (
-    build_av1an_command,
-    build_ffmpeg_mux_command,
-    create_mux_temporary_path,
-    execute_plan,
-)
 from avarch.logging import configure_logging
 from avarch.models.execution import ExecutionError
 from avarch.models.plan import TranscodePlan
@@ -153,13 +161,6 @@ from avarch.planner import (
     PlanningError,
     build_plan,
 )
-from avarch.probe import (
-    ProbeError,
-    format_probe_summary,
-    normalize_probe,
-    parse_normalized_probe_json,
-    run_ffprobe,
-)
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import (
     ProfileOrigin,
@@ -167,7 +168,6 @@ from avarch.profiles.registry import (
     ProfileRegistryError,
     UnknownProfileError,
 )
-from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
     VapourSynthScriptPathError,
