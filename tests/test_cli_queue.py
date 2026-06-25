@@ -17,6 +17,7 @@ from avarch.adapters.sqlite.models import (
     ProbeResult,
 )
 from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.application.scheduler_run import SchedulerRunSummary
 from avarch.cli import app
 from avarch.config import load_config
 from avarch.domain.jobs import (
@@ -26,7 +27,6 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
-from avarch.scheduler_runner import SchedulerRunSummary
 
 runner = CliRunner()
 
@@ -92,7 +92,7 @@ def test_run_command_invokes_scheduler(
     _init_config(tmp_path)
     calls: list[str] = []
 
-    async def fake_run_scheduler(**_kwargs: object) -> SchedulerRunSummary:
+    async def fake_run_scheduler(*_args: object, **_kwargs: object) -> SchedulerRunSummary:
         calls.append("called")
         return SchedulerRunSummary(completed=0, failed=0, skipped=0, idle=True)
 
@@ -170,7 +170,7 @@ def test_run_command_prints_failed_job_error_details(
             )
         )
 
-    async def fake_run_scheduler(**_kwargs: object) -> SchedulerRunSummary:
+    async def fake_run_scheduler(*_args: object, **_kwargs: object) -> SchedulerRunSummary:
         return SchedulerRunSummary(completed=0, failed=1, skipped=0, idle=True)
 
     monkeypatch.setattr("avarch.cli.run_scheduler", fake_run_scheduler)
