@@ -84,11 +84,13 @@ from avarch.application.scheduler_control import (
     resume_scheduler,
     stop_scheduler,
 )
+from avarch.application.scheduler_status import scheduler_status
 from avarch.bootstrap import (
     job_control_store,
     queue_control_store,
     queue_retry_store,
     scheduler_control_store,
+    scheduler_status_store,
 )
 from avarch.config import (
     WORKSPACE_CONFIG_TEXT,
@@ -156,7 +158,6 @@ from avarch.scheduler_runner import (
     cli_actor,
     new_runner_id,
     run_scheduler,
-    scheduler_status,
 )
 from avarch.scheduler_workers import execute_validation_job
 from avarch.validation import format_validation_report_summary
@@ -910,12 +911,7 @@ def scheduler_status_command() -> None:
     process_status = verified_status(workspace)
     engine = create_db_engine(database_url)
     with Session(engine) as session:
-        status = scheduler_status(session, now=_utc_now())
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
+        status = scheduler_status(scheduler_status_store(session), now=_utc_now())
     typer.echo(f"Scheduler: {process_status.state}")
     if process_status.metadata is not None:
         typer.echo(f"PID:       {process_status.metadata.pid}")
@@ -941,9 +937,8 @@ def scheduler_status_command() -> None:
         typer.echo("")
         typer.echo("Active:")
         for job in status.active_jobs:
-            media_file = media_by_id.get(job.media_file_id)
-            path = Path(media_file.path).name if media_file is not None else "<missing>"
-            typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
+            job_id = str(job.job_id) if job.job_id is not None else "-"
+            typer.echo(f"  {job_id:<3} {_job_stage_value(job.stage):<9} {job.file_name}")
 
 
 @scheduler_app.command("restart")
@@ -2976,7 +2971,7 @@ def _wait_for_scheduler_inactive(engine: Engine, *, timeout_seconds: float) -> b
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() <= deadline:
         with Session(engine) as session:
-            status = scheduler_status(session, now=_utc_now())
+            status = scheduler_status(scheduler_status_store(session), now=_utc_now())
             if status.lease_state == "inactive":
                 return True
         time.sleep(0.25)
