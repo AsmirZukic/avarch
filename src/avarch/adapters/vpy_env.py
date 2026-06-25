@@ -15,9 +15,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from avarch.adapters.filesystem.workspace import (
+    WorkspaceContext,
+    WorkspaceError,
+    ensure_workspace_layout,
+)
 from avarch.application.planning import PlanningRuntimeIdentity
 from avarch.serialization import canonical_json
-from avarch.workspace import WorkspaceContext, WorkspaceError, ensure_workspace_layout
 
 VPY_REQUIREMENTS_SCHEMA_VERSION = 1
 VPY_LOCK_SCHEMA_VERSION = 1

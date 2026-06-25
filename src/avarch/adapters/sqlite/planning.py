@@ -5,12 +5,12 @@ from pathlib import Path
 
 from sqlmodel import Session, col, select
 
+from avarch.adapters.filesystem.workspace import WorkspaceContext, WorkspaceError
 from avarch.adapters.probe import ProbeError, parse_normalized_probe_json
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, MediaPlan, ProbeResult
 from avarch.application.planning import PlanningContext, PlanningError
 from avarch.models.plan import TranscodePlan
 from avarch.profiles.registry import ResolvedProfile
-from avarch.workspace import WorkspaceContext, WorkspaceError
 
 
 def load_planning_context(

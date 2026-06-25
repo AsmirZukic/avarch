@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
-
-from avarch.workspace import WorkspaceContext
 
 
 class SchedulerLifecycleError(RuntimeError):
@@ -36,41 +35,46 @@ class SchedulerProcessLock(Protocol):
     def release(self) -> None: ...
 
 
+class SchedulerWorkspace(Protocol):
+    @property
+    def root(self) -> Path: ...
+
+
 class SchedulerProcessController(Protocol):
     def launch_detached(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         argv: Sequence[str],
         timeout_seconds: float = 10.0,
     ) -> SchedulerProcessMetadata: ...
 
-    def verified_status(self, *, workspace: WorkspaceContext) -> SchedulerProcessStatus: ...
+    def verified_status(self, *, workspace: SchedulerWorkspace) -> SchedulerProcessStatus: ...
 
     def terminate_scheduler(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         force: bool,
         timeout_seconds: float,
     ) -> bool: ...
 
-    def workspace_lock(self, *, workspace: WorkspaceContext) -> SchedulerProcessLock: ...
+    def workspace_lock(self, *, workspace: SchedulerWorkspace) -> SchedulerProcessLock: ...
 
     def write_current_metadata(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         mode: str,
     ) -> SchedulerProcessMetadata: ...
 
-    def remove_metadata(self, *, workspace: WorkspaceContext) -> None: ...
+    def remove_metadata(self, *, workspace: SchedulerWorkspace) -> None: ...
 
 
 def launch_detached(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     argv: Sequence[str],
     timeout_seconds: float = 10.0,
 ) -> SchedulerProcessMetadata:
@@ -84,7 +88,7 @@ def launch_detached(
 def verified_status(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
 ) -> SchedulerProcessStatus:
     return controller.verified_status(workspace=workspace)
 
@@ -92,7 +96,7 @@ def verified_status(
 def terminate_scheduler(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     force: bool,
     timeout_seconds: float,
 ) -> bool:
@@ -106,7 +110,7 @@ def terminate_scheduler(
 def workspace_lock(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
 ) -> SchedulerProcessLock:
     return controller.workspace_lock(workspace=workspace)
 
@@ -114,7 +118,7 @@ def workspace_lock(
 def write_current_metadata(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     mode: str,
 ) -> SchedulerProcessMetadata:
     return controller.write_current_metadata(workspace=workspace, mode=mode)
@@ -123,6 +127,6 @@ def write_current_metadata(
 def remove_metadata(
     controller: SchedulerProcessController,
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
 ) -> None:
     controller.remove_metadata(workspace=workspace)

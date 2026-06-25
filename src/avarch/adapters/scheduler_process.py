@@ -7,15 +7,15 @@ from avarch.application.scheduler_process import (
     SchedulerLifecycleError,
     SchedulerProcessMetadata,
     SchedulerProcessStatus,
+    SchedulerWorkspace,
 )
-from avarch.workspace import WorkspaceContext
 
 
 class SchedulerProcessAdapter:
     def launch_detached(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         argv: Sequence[str],
         timeout_seconds: float = 10.0,
     ) -> SchedulerProcessMetadata:
@@ -29,7 +29,7 @@ class SchedulerProcessAdapter:
             raise SchedulerLifecycleError(str(exc)) from exc
         return _metadata(metadata)
 
-    def verified_status(self, *, workspace: WorkspaceContext) -> SchedulerProcessStatus:
+    def verified_status(self, *, workspace: SchedulerWorkspace) -> SchedulerProcessStatus:
         try:
             status = scheduler_lifecycle.verified_status(workspace)
         except scheduler_lifecycle.SchedulerLifecycleError as exc:
@@ -43,7 +43,7 @@ class SchedulerProcessAdapter:
     def terminate_scheduler(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         force: bool,
         timeout_seconds: float,
     ) -> bool:
@@ -56,7 +56,7 @@ class SchedulerProcessAdapter:
         except scheduler_lifecycle.SchedulerLifecycleError as exc:
             raise SchedulerLifecycleError(str(exc)) from exc
 
-    def workspace_lock(self, *, workspace: WorkspaceContext) -> SchedulerProcessLockAdapter:
+    def workspace_lock(self, *, workspace: SchedulerWorkspace) -> SchedulerProcessLockAdapter:
         paths = scheduler_lifecycle.runtime_paths(workspace)
         return SchedulerProcessLockAdapter(
             scheduler_lifecycle.SchedulerWorkspaceLock(paths.lock_path)
@@ -65,7 +65,7 @@ class SchedulerProcessAdapter:
     def write_current_metadata(
         self,
         *,
-        workspace: WorkspaceContext,
+        workspace: SchedulerWorkspace,
         mode: str,
     ) -> SchedulerProcessMetadata:
         paths = scheduler_lifecycle.runtime_paths(workspace)
@@ -76,7 +76,7 @@ class SchedulerProcessAdapter:
             raise SchedulerLifecycleError(str(exc)) from exc
         return _metadata(metadata)
 
-    def remove_metadata(self, *, workspace: WorkspaceContext) -> None:
+    def remove_metadata(self, *, workspace: SchedulerWorkspace) -> None:
         scheduler_lifecycle.remove_metadata(scheduler_lifecycle.runtime_paths(workspace))
 
 

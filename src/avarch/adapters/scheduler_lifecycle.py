@@ -14,7 +14,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-from avarch.workspace import WorkspaceContext
+from avarch.application.scheduler_process import SchedulerWorkspace
 
 
 class SchedulerLifecycleError(RuntimeError):
@@ -86,7 +86,7 @@ class SchedulerWorkspaceLock:
         self.release()
 
 
-def runtime_paths(workspace: WorkspaceContext) -> SchedulerRuntimePaths:
+def runtime_paths(workspace: SchedulerWorkspace) -> SchedulerRuntimePaths:
     run_dir = workspace.root / ".avarch" / "run"
     logs_dir = workspace.root / ".avarch" / "logs"
     return SchedulerRuntimePaths(
@@ -97,7 +97,7 @@ def runtime_paths(workspace: WorkspaceContext) -> SchedulerRuntimePaths:
     )
 
 
-def workspace_id(workspace: WorkspaceContext) -> str:
+def workspace_id(workspace: SchedulerWorkspace) -> str:
     return str(workspace.root.resolve())
 
 
@@ -115,7 +115,7 @@ def boot_id() -> str:
 
 def current_process_metadata(
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     mode: str,
     state: str = "running",
 ) -> SchedulerProcessMetadata:
@@ -166,7 +166,7 @@ def read_metadata(paths: SchedulerRuntimePaths) -> SchedulerProcessMetadata | No
     )
 
 
-def verified_status(workspace: WorkspaceContext) -> SchedulerRuntimeStatus:
+def verified_status(workspace: SchedulerWorkspace) -> SchedulerRuntimeStatus:
     paths = runtime_paths(workspace)
     metadata = read_metadata(paths)
     if metadata is None:
@@ -177,7 +177,7 @@ def verified_status(workspace: WorkspaceContext) -> SchedulerRuntimeStatus:
     return SchedulerRuntimeStatus(state="running", metadata=metadata)
 
 
-def process_matches(metadata: SchedulerProcessMetadata, *, workspace: WorkspaceContext) -> bool:
+def process_matches(metadata: SchedulerProcessMetadata, *, workspace: SchedulerWorkspace) -> bool:
     if metadata.workspace_id != workspace_id(workspace):
         return False
     if metadata.boot_id != boot_id():
@@ -192,7 +192,7 @@ def process_matches(metadata: SchedulerProcessMetadata, *, workspace: WorkspaceC
 
 def launch_detached(
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     argv: Sequence[str],
     timeout_seconds: float = 10.0,
 ) -> SchedulerProcessMetadata:
@@ -233,7 +233,7 @@ def launch_detached(
 
 def terminate_scheduler(
     *,
-    workspace: WorkspaceContext,
+    workspace: SchedulerWorkspace,
     force: bool,
     timeout_seconds: float,
 ) -> bool:
