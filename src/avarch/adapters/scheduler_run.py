@@ -24,7 +24,10 @@ from avarch.adapters.sqlite.scheduler_state import (
     terminal_job_counts,
 )
 from avarch.application.scheduler_run import (
+    SchedulerAlreadyRunningError,
+    SchedulerControlError,
     SchedulerControlSnapshot,
+    SchedulerLeaseLostError,
     SchedulerRunStore,
     SchedulerTerminalCounts,
 )
@@ -46,13 +49,18 @@ class SqliteSchedulerRunStore:
         self._engine = create_db_engine(config.database.url)
 
     def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
-        with Session(self._engine) as session, session.begin():
-            scheduler_state_adapter.acquire_scheduler_lease(
-                session,
-                runner_id=runner_id,
-                now=now,
-                resume=resume,
-            )
+        try:
+            with Session(self._engine) as session, session.begin():
+                scheduler_state_adapter.acquire_scheduler_lease(
+                    session,
+                    runner_id=runner_id,
+                    now=now,
+                    resume=resume,
+                )
+        except scheduler_state_adapter.SchedulerAlreadyRunningError as exc:
+            raise SchedulerAlreadyRunningError(str(exc)) from exc
+        except scheduler_state_adapter.SchedulerControlError as exc:
+            raise SchedulerControlError(str(exc)) from exc
 
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         with Session(self._engine) as session, session.begin():
@@ -63,12 +71,15 @@ class SqliteSchedulerRunStore:
             )
 
     def renew_lease(self, *, runner_id: str, now: datetime) -> None:
-        with Session(self._engine) as session, session.begin():
-            scheduler_state_adapter.renew_scheduler_lease(
-                session,
-                runner_id=runner_id,
-                now=now,
-            )
+        try:
+            with Session(self._engine) as session, session.begin():
+                scheduler_state_adapter.renew_scheduler_lease(
+                    session,
+                    runner_id=runner_id,
+                    now=now,
+                )
+        except scheduler_state_adapter.SchedulerLeaseLostError as exc:
+            raise SchedulerLeaseLostError(str(exc)) from exc
 
     def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot:
         with Session(self._engine) as session:
@@ -81,12 +92,15 @@ class SqliteSchedulerRunStore:
             )
 
     def acknowledge_control(self, *, runner_id: str, now: datetime) -> None:
-        with Session(self._engine) as session, session.begin():
-            scheduler_state_adapter.acknowledge_scheduler_control(
-                session,
-                runner_id=runner_id,
-                now=now,
-            )
+        try:
+            with Session(self._engine) as session, session.begin():
+                scheduler_state_adapter.acknowledge_scheduler_control(
+                    session,
+                    runner_id=runner_id,
+                    now=now,
+                )
+        except scheduler_state_adapter.SchedulerLeaseLostError as exc:
+            raise SchedulerLeaseLostError(str(exc)) from exc
 
     def cancel_requested_job_ids(self, *, job_ids: set[int]) -> set[int]:
         with Session(self._engine) as session:

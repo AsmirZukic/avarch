@@ -58,10 +58,6 @@ from avarch.adapters.sqlite.planning import (
 from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
-from avarch.adapters.sqlite.scheduler_state import (
-    SchedulerAlreadyRunningError,
-    SchedulerControlError,
-)
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
 from avarch.application.job_control import (
@@ -96,6 +92,8 @@ from avarch.application.scheduler_process import (
 )
 from avarch.application.scheduler_run import (
     MAX_CLI_LOG_TAIL_BYTES,
+    SchedulerAlreadyRunningError,
+    SchedulerControlError,
     cli_actor,
     new_runner_id,
     run_scheduler,

@@ -91,7 +91,19 @@ class SchedulerRuntime(Protocol):
     def workers(self) -> SchedulerWorkerRegistry: ...
 
 
-class SchedulerLeaseLostError(RuntimeError):
+class SchedulerRunError(RuntimeError):
+    pass
+
+
+class SchedulerAlreadyRunningError(SchedulerRunError):
+    pass
+
+
+class SchedulerControlError(SchedulerRunError):
+    pass
+
+
+class SchedulerLeaseLostError(SchedulerRunError):
     pass
 
 
