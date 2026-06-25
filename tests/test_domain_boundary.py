@@ -38,6 +38,7 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "rejection_cleanup.py",
         "scheduler.py",
         "scheduler_queue.py",
+        "scheduler_runner.py",
         "size_policy.py",
     }
 )
@@ -56,6 +57,7 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
         "avarch.inventory",
         "avarch.job_lifecycle",
         "avarch.rejection_cleanup",
+        "avarch.scheduler_runner",
         "avarch.models.db",
         "avarch.models.scheduler",
         "avarch.size_policy",

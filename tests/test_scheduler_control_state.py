@@ -21,9 +21,10 @@ from avarch.adapters.sqlite.scheduler_state import (
     resume_scheduler,
     stop_scheduler,
 )
+from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
+from avarch.application.scheduler_status import scheduler_status
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
-from avarch.scheduler_runner import scheduler_status
 
 
 def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> None:
@@ -301,7 +302,7 @@ def test_scheduler_status_reports_counts_pending_controls_and_lease_state(
         acquire_scheduler_lease(session, runner_id="runner", now=now)
 
     with Session(engine) as session:
-        status = scheduler_status(session, now=now)
+        status = scheduler_status(SqliteSchedulerStatusStore(session), now=now)
 
     assert status.lease_state == "active"
     assert status.runner_id == "runner"
@@ -310,7 +311,7 @@ def test_scheduler_status_reports_counts_pending_controls_and_lease_state(
     assert status.counts_by_status[JobStatus.HELD] == 1
     assert status.cancel_pending == 1
     assert status.hold_pending == 0
-    assert [job.profile_name for job in status.active_jobs] == ["running"]
+    assert [job.file_name for job in status.active_jobs] == ["running.mkv"]
 
 
 def test_scheduler_status_reports_stale_lease(tmp_path: Path) -> None:
@@ -328,7 +329,7 @@ def test_scheduler_status_reports_stale_lease(tmp_path: Path) -> None:
         )
 
     with Session(engine) as session:
-        status = scheduler_status(session, now=now)
+        status = scheduler_status(SqliteSchedulerStatusStore(session), now=now)
 
     assert status.lease_state == "stale"
 
