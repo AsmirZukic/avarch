@@ -65,7 +65,7 @@ from avarch.adapters.sqlite.planning import (
 from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
-from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore
+from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.adapters.sqlite.scheduler_state import (
     SchedulerAlreadyRunningError,
     SchedulerControlError,
@@ -76,7 +76,12 @@ from avarch.adapters.sqlite.scheduler_state import (
 )
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
-from avarch.application.queue_control import QueueControlError, clear_queue
+from avarch.application.queue_control import (
+    QueueControlError,
+    clear_queue,
+    retry_job,
+    retry_queue,
+)
 from avarch.config import (
     WORKSPACE_CONFIG_TEXT,
     AppConfig,
@@ -137,10 +142,6 @@ from avarch.scheduler_lifecycle import (
     terminate_scheduler,
     verified_status,
     write_metadata,
-)
-from avarch.scheduler_queue import (
-    retry_job,
-    retry_queue,
 )
 from avarch.scheduler_runner import (
     MAX_CLI_LOG_TAIL_BYTES,
@@ -743,8 +744,7 @@ def queue_retry_command(
     try:
         with Session(engine) as session, session.begin():
             summary = retry_queue(
-                session,
-                config=runtime_config,
+                SqliteQueueRetryStore(session, config=runtime_config),
                 actor=cli_actor(),
                 now=_utc_now(),
                 job_ids=set(job_id or []) or None,
@@ -754,7 +754,7 @@ def queue_retry_command(
                 all_jobs=all_jobs,
                 confirm=confirm,
             )
-    except JobControlError as exc:
+    except QueueControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -1177,7 +1177,7 @@ def jobs_hold(
     try:
         with Session(engine) as session, session.begin():
             hold_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
-    except JobControlError as exc:
+    except QueueControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job hold requested")
@@ -1212,8 +1212,7 @@ def jobs_retry(
         with Session(engine) as session, session.begin():
             if failed:
                 summary = retry_queue(
-                    session,
-                    config=runtime_config,
+                    SqliteQueueRetryStore(session, config=runtime_config),
                     actor=cli_actor(),
                     now=_utc_now(),
                     statuses={JobStatus.FAILED},
@@ -1226,13 +1225,12 @@ def jobs_retry(
                 typer.echo("Provide JOB_ID or --failed.")
                 raise typer.Exit(1)
             next_stage = retry_job(
-                session,
+                SqliteQueueRetryStore(session, config=runtime_config),
                 job_id=job_id,
-                config=runtime_config,
                 actor=cli_actor(),
                 now=_utc_now(),
             )
-    except JobControlError as exc:
+    except QueueControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"Job retry prepared at {_job_stage_value(next_stage)}")
