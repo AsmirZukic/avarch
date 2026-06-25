@@ -11,11 +11,11 @@ from avarch.adapters.scheduler_workers import execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.application.promotion import PromotionResultView
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionStatus
-from avarch.promoter import PromotionResult
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -97,8 +97,8 @@ def test_scheduler_continues_after_promotion_failure(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    async def fake_promote_job(**_kwargs: object) -> PromotionResult:
-        return PromotionResult(
+    async def fake_promote_job(**_kwargs: object) -> PromotionResultView:
+        return PromotionResultView(
             job_id=1,
             promotion_id=0,
             status=PromotionStatus.FAILED,

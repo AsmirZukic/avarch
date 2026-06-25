@@ -9,6 +9,7 @@ from typing import Any
 from sqlmodel import Session
 
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
+from avarch.adapters.promotion import PromotionWorkflowAdapter
 from avarch.adapters.scheduler_support import (
     JobPreparationError,
     StaleJobProfileError,
@@ -47,6 +48,7 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     cleanup_rejected_output,
 )
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
+from avarch.application.promotion import promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
@@ -56,7 +58,6 @@ from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
 from avarch.planner import PlanningError, build_plan, match_profile
 from avarch.probe import build_ffprobe_command, normalize_probe, run_ffprobe
-from avarch.promoter import promote_job, recover_promotion
 from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 from avarch.validation import ValidationError as OutputValidationError
@@ -469,9 +470,19 @@ async def execute_promotion_job(
         job = require_job(session, job_id)
         recovering = job.status == JobStatus.PROMOTING
     if recovering:
-        await recover_promotion(job_id=job_id, config=config, owner_token=runner_id)
+        await recover_promotion(
+            workflow=PromotionWorkflowAdapter(),
+            job_id=job_id,
+            config=config,
+            owner_token=runner_id,
+        )
         return
-    await promote_job(job_id=job_id, config=config, owner_token=runner_id)
+    await promote_job(
+        workflow=PromotionWorkflowAdapter(),
+        job_id=job_id,
+        config=config,
+        owner_token=runner_id,
+    )
 
 
 def _attach_probe_and_advance(
