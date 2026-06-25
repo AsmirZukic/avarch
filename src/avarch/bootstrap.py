@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlmodel import Session
 
+from avarch.adapters.manual_validation import SchedulerManualValidationWorker
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
@@ -32,3 +33,7 @@ def scheduler_control_store(session: Session) -> SqliteSchedulerControlStore:
 
 def scheduler_status_store(session: Session) -> SqliteSchedulerStatusStore:
     return SqliteSchedulerStatusStore(session)
+
+
+def manual_validation_worker() -> SchedulerManualValidationWorker:
+    return SchedulerManualValidationWorker()

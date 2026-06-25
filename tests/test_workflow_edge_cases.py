@@ -278,7 +278,7 @@ def test_existing_passing_validation_is_reused_without_running_worker(
     async def fail_if_called(**_kwargs: object) -> object:
         raise AssertionError("completed PASS validation should be reused")
 
-    monkeypatch.setattr("avarch.cli.execute_validation_job", fail_if_called)
+    monkeypatch.setattr("avarch.cli.run_validation_job", fail_if_called)
 
     result = runner.invoke(
         app,
