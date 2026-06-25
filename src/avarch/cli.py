@@ -20,8 +20,6 @@ from sqlmodel import Session, col, select
 from avarch import __version__
 from avarch.adapters.filesystem.plans import (
     PlanArtifactConflictError,
-    PlanArtifactLoadError,
-    load_plan_artifact,
     validation_report_path_for_plan_artifact,
     write_plan_artifacts,
 )
@@ -44,7 +42,6 @@ from avarch.adapters.sqlite.models import (
     MediaFileStatus,
     MediaPlan,
     ProbeResult,
-    PromotionRecord,
 )
 from avarch.adapters.sqlite.planning import (
     current_plan_for_file,
@@ -55,10 +52,9 @@ from avarch.adapters.sqlite.planning import (
     persist_media_plan,
 )
 from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
-from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
 from avarch.adapters.sqlite.urls import resolve_database_url
-from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
+from avarch.adapters.sqlite.validations import prepare_manual_validation
 from avarch.application.job_control import (
     JobControlWorkflowError,
     cancel_jobs,
@@ -73,6 +69,14 @@ from avarch.application.job_views import (
     list_jobs,
 )
 from avarch.application.manual_validation import run_validation_job
+from avarch.application.promotion import (
+    PromotionPreflightView,
+    PromotionRecordView,
+    PromotionWorkflowError,
+    execute_promotion,
+    promotion_preflight,
+    recover_promotion,
+)
 from avarch.application.queue_control import (
     QueueControlError,
     clear_queue,
@@ -108,6 +112,7 @@ from avarch.bootstrap import (
     job_control_store,
     job_view_store,
     manual_validation_worker,
+    promotion_workflow,
     queue_control_store,
     queue_retry_store,
     scheduler_control_store,
@@ -156,13 +161,6 @@ from avarch.profiles.registry import (
     ProfileRegistry,
     ProfileRegistryError,
     UnknownProfileError,
-)
-from avarch.promoter import (
-    PromotionError,
-    PromotionPreflightResult,
-    execute_promotion,
-    recover_promotion,
-    validate_promotion_preflight,
 )
 from avarch.scanner import ScanError, ScanResult, scan_root
 from avarch.validation import format_validation_report_summary
@@ -1663,47 +1661,27 @@ def promote_job(
         try:
             record = asyncio.run(
                 recover_promotion(
+                    promotion_workflow(),
                     job_id=job_id,
                     config=runtime_config,
                     owner_token=owner_token,
                 )
             )
-        except PromotionError as exc:
+        except PromotionWorkflowError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
         _echo_promotion_complete(record)
         return
 
-    engine = create_db_engine(database_url)
     try:
-        with Session(engine) as session:
-            job = session.get(Job, job_id)
-            if job is None:
-                typer.echo(f"Job not found: {job_id}")
-                raise typer.Exit(1)
-            if job.plan_path is None:
-                typer.echo("Job has no plan artifact.")
-                raise typer.Exit(1)
-            try:
-                plan = load_plan_artifact(Path(job.plan_path))
-            except PlanArtifactLoadError as exc:
-                typer.echo("Job plan artifact is not usable. Regenerate the plan for this job.")
-                raise typer.Exit(1) from exc
-            validation = latest_validation(session, job)
-            if validation is None:
-                typer.echo("Job has no current validation result.")
-                raise typer.Exit(1)
-            if has_completed_promotion(session, job):
-                typer.echo("Job already has a completed promotion.")
-                raise typer.Exit(1)
-            preflight = validate_promotion_preflight(
-                job=job,
-                plan=plan,
-                validation=validation,
-                mode=mode,
-                operation_id=new_runner_id(),
-            )
-    except PromotionError as exc:
+        preflight = promotion_preflight(
+            promotion_workflow(),
+            job_id=job_id,
+            mode=mode,
+            config=runtime_config,
+            operation_id=new_runner_id(),
+        )
+    except PromotionWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -1714,13 +1692,14 @@ def promote_job(
     try:
         record = asyncio.run(
             execute_promotion(
+                promotion_workflow(),
                 job_id=job_id,
                 mode=mode,
                 config=runtime_config,
                 owner_token=owner_token,
             )
         )
-    except PromotionError as exc:
+    except PromotionWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -3090,7 +3069,7 @@ def _echo_encode_dry_run(plan: TranscodePlan) -> None:
     typer.echo("No encoding was started.")
 
 
-def _echo_promotion_preview(preflight: PromotionPreflightResult, *, dry_run: bool) -> None:
+def _echo_promotion_preview(preflight: PromotionPreflightView, *, dry_run: bool) -> None:
     result = preflight
     typer.echo("Promotion dry run" if dry_run else "Promotion preview")
     typer.echo("")
@@ -3120,7 +3099,7 @@ def _echo_promotion_preview(preflight: PromotionPreflightResult, *, dry_run: boo
     typer.echo("No files were changed.")
 
 
-def _echo_promotion_complete(record: PromotionRecord) -> None:
+def _echo_promotion_complete(record: PromotionRecordView) -> None:
     typer.echo("Promotion complete")
     typer.echo("")
     typer.echo(f"Job:               {record.job_id}")
@@ -3154,7 +3133,7 @@ def _promotion_mode_value(mode: object) -> str:
     return str(getattr(mode, "value", mode))
 
 
-def _source_retained_path(record: PromotionRecord) -> str:
+def _source_retained_path(record: PromotionRecordView) -> str:
     mode = _promotion_mode_value(record.mode)
     if mode == PromotionMode.KEEP_ORIGINAL.value:
         return record.source_path
