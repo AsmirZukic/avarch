@@ -9,16 +9,17 @@ from sqlmodel import Session, select
 
 from avarch.adapters.filesystem.plans import write_plan_artifacts
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.application.enqueue import enqueue_inventory
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.planner import build_plan
 from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
-from avarch.scheduler_queue import enqueue_inventory
 from avarch.scheduler_workers import execute_plan_job
 from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
 from tests.probe_fixtures import sdr_probe_payload
@@ -53,7 +54,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
             vapoursynth_script=generate_vapoursynth_script(plan, template=template),
         )
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=config,
             profile_name="av1_1080p_sdr",
             priority=0,
