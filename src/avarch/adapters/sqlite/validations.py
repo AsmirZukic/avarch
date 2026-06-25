@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from sqlmodel import Session
 
@@ -36,6 +37,7 @@ def persist_validation_result(
     job: Job,
     attempt: JobAttempt,
     report: ValidationReport,
+    report_path: Path | None = None,
     failed_checks: Sequence[str],
     failed_summary: str,
 ) -> ValidationResult:
@@ -68,7 +70,7 @@ def persist_validation_result(
     attempt.details_json = canonical_json(
         {
             "result_id": result.id,
-            "report_path": str(report.output_path),
+            "report_path": str(report_path or report.output_path),
             "plan_hash": report.plan_hash,
             "policy_hash": report.policy_hash,
             "failed_checks": list(failed_checks),

@@ -8,7 +8,15 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
-from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
+from avarch.adapters.sqlite.job_transitions import (
+    JobClaimError,
+    JobTransitionError,
+    claim_job_stage,
+    complete_job_stage,
+    fail_job_stage,
+    interrupt_job_stage,
+    transition_job,
+)
 from avarch.adapters.sqlite.models import Job, JobAttempt, MediaFile, MediaFileStatus
 from avarch.domain.jobs import (
     AttemptStatus,
@@ -16,13 +24,6 @@ from avarch.domain.jobs import (
     JobStage,
     JobStatus,
     ResourceClass,
-)
-from avarch.scheduler import (
-    JobClaimError,
-    claim_job_stage,
-    complete_job_stage,
-    fail_job_stage,
-    interrupt_job_stage,
 )
 
 

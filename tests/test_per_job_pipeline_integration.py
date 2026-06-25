@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlmodel import Session
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_transitions import recover_abandoned_jobs
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.rejection_cleanup import cleanup_rejected_output
@@ -21,7 +22,6 @@ from avarch.profiles.models import (
     ProfileSubtitleSettings,
     ProfileVideoSettings,
 )
-from avarch.scheduler import recover_abandoned_jobs
 from avarch.validation import validate_encoded_file
 
 
@@ -163,7 +163,11 @@ def test_scheduler_restart_mid_promotion(tmp_path: Path) -> None:
         )
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=now)
+        summary = recover_abandoned_jobs(
+            session,
+            now=now,
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     assert summary.recovered_jobs == 1
     assert backup.read_bytes() == b"original"
@@ -173,6 +177,10 @@ def _engine(tmp_path: Path):
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
+
+
+def _encoded_output_exists(job: Job) -> bool:
+    return job.output_path is not None and Path(job.output_path).exists()
 
 
 def _media_file(path: Path, now: datetime) -> MediaFile:

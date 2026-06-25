@@ -10,9 +10,7 @@ from sqlmodel import Session
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, SchedulerState
-from avarch.domain.jobs import JobStage, JobStatus
-from avarch.domain.scheduler import SchedulerMode
-from avarch.scheduler import (
+from avarch.adapters.sqlite.scheduler_state import (
     SCHEDULER_LEASE_SECONDS,
     SchedulerAlreadyRunningError,
     SchedulerControlError,
@@ -21,9 +19,11 @@ from avarch.scheduler import (
     pause_scheduler,
     release_scheduler_lease,
     resume_scheduler,
-    scheduler_status,
     stop_scheduler,
 )
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.scheduler import SchedulerMode
+from avarch.scheduler import scheduler_status
 
 
 def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> None:
