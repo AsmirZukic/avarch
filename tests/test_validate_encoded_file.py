@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from avarch.probe import ProbeProcessError
+from avarch.adapters.probe import ProbeProcessError
+from avarch.adapters.validation import validate_encoded_file
 from avarch.profiles.models import (
     EncodingProfile,
     ProfileAudioSettings,
@@ -12,7 +13,6 @@ from avarch.profiles.models import (
     ProfileSubtitleSettings,
     ProfileVideoSettings,
 )
-from avarch.validation import validate_encoded_file
 
 
 def test_validation_fails_when_output_missing(tmp_path: Path) -> None:

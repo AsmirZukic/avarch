@@ -33,9 +33,13 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
     {
         "db.py",
         "db_migrations.py",
+        "execution.py",
         "inventory.py",
         "job_lifecycle.py",
+        "probe.py",
+        "promoter.py",
         "rejection_cleanup.py",
+        "scanner.py",
         "scheduler.py",
         "scheduler_lifecycle.py",
         "scheduler_queue.py",
@@ -43,6 +47,7 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "scheduler_support.py",
         "scheduler_workers.py",
         "size_policy.py",
+        "validation.py",
     }
 )
 
@@ -57,9 +62,13 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
     {
         "avarch.db",
         "avarch.db_migrations",
+        "avarch.execution",
         "avarch.inventory",
         "avarch.job_lifecycle",
+        "avarch.probe",
+        "avarch.promoter",
         "avarch.rejection_cleanup",
+        "avarch.scanner",
         "avarch.scheduler_lifecycle",
         "avarch.scheduler_runner",
         "avarch.scheduler_support",
@@ -67,6 +76,7 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
         "avarch.models.db",
         "avarch.models.scheduler",
         "avarch.size_policy",
+        "avarch.validation",
     }
 )
 
@@ -324,14 +334,8 @@ def test_obsolete_function_definitions_are_not_reintroduced() -> None:
     assert violations == []
 
 
-def test_validation_module_does_not_import_adapters() -> None:
-    imported_adapters = sorted(
-        imported_name
-        for imported_name in _imported_names(PACKAGE_ROOT / "validation.py")
-        if imported_name == "avarch.adapters" or imported_name.startswith("avarch.adapters.")
-    )
-
-    assert imported_adapters == []
+def test_validation_shell_module_stays_deleted() -> None:
+    assert not (PACKAGE_ROOT / "validation.py").exists()
 
 
 def test_application_modules_do_not_import_concrete_boundaries() -> None:

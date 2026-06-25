@@ -9,12 +9,12 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from avarch.adapters.probe import ProbeProcessError
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
 from avarch.config import load_config
-from avarch.probe import ProbeProcessError
 from tests.probe_fixtures import representative_probe_payload
 
 runner = CliRunner()

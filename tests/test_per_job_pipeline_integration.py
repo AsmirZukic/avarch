@@ -5,15 +5,16 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from avarch.adapters.probe import ProbeProcessError
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import recover_abandoned_jobs
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.rejection_cleanup import cleanup_rejected_output
+from avarch.adapters.validation import validate_encoded_file
 from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
-from avarch.probe import ProbeProcessError
 from avarch.profiles.models import (
     EncodingProfile,
     ProfileAudioSettings,
@@ -22,7 +23,6 @@ from avarch.profiles.models import (
     ProfileSubtitleSettings,
     ProfileVideoSettings,
 )
-from avarch.validation import validate_encoded_file
 
 
 def test_batch_with_success_failure_and_size_rejection(tmp_path: Path) -> None:

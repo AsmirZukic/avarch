@@ -22,6 +22,7 @@ from avarch.adapters.filesystem.promotion import (
     fsync_directory,
     write_promotion_journal,
 )
+from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.models import (
     Job,
@@ -75,7 +76,6 @@ from avarch.models.promotion import (
     PromotionPhase,
     PromotionStatus,
 )
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
 
 PROMOTION_LEASE_SECONDS = 30.0

@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from avarch.scanner import ScanError, build_fs_fingerprint, create_file_snapshot, scan_root
+from avarch.adapters.filesystem.scanner import (
+    ScanError,
+    build_fs_fingerprint,
+    create_file_snapshot,
+    scan_root,
+)
 
 
 def test_fs_fingerprint_is_deterministic(tmp_path: Path) -> None:

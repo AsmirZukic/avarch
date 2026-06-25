@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from avarch.adapters.probe import build_probe_hash, normalize_probe
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
 from avarch.planner import (
     PlanningContext,
@@ -11,7 +12,6 @@ from avarch.planner import (
     build_plan_hash_payload,
     build_work_key,
 )
-from avarch.probe import build_probe_hash, normalize_probe
 from avarch.profiles.models import ProfileDocument
 from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json

@@ -7,8 +7,8 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from avarch.adapters.filesystem.scanner import FileSnapshot, ScanResult
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
-from avarch.scanner import FileSnapshot, ScanResult
 
 
 @dataclass(frozen=True, slots=True)

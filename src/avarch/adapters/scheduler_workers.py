@@ -8,7 +8,10 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import build_ffprobe_command, normalize_probe, run_ffprobe
 from avarch.adapters.promotion import PromotionWorkflowAdapter
 from avarch.adapters.scheduler_support import (
     JobPreparationError,
@@ -48,20 +51,21 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     cleanup_rejected_output,
 )
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
+from avarch.adapters.validation import ValidationError as OutputValidationError
+from avarch.adapters.validation import (
+    failed_check_summary,
+    failed_required_check_names,
+    validate_output,
+)
 from avarch.application.promotion import promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
-from avarch.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
 from avarch.planner import PlanningError, build_plan, match_profile
-from avarch.probe import build_ffprobe_command, normalize_probe, run_ffprobe
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
-from avarch.validation import ValidationError as OutputValidationError
-from avarch.validation import failed_check_summary, failed_required_check_names, validate_output
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
     generate_vapoursynth_script,
