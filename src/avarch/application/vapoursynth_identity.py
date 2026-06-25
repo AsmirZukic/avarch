@@ -16,7 +16,6 @@ from avarch.models.plan import (
 )
 from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
-from avarch.workspace import WorkspaceContext
 
 GENERATOR_VERSION = 4
 
@@ -99,9 +98,9 @@ def resolve_vapoursynth_filter(
     )
 
 
-def resolve_workspace_script_path(workspace: WorkspaceContext, path: Path) -> Path:
-    candidate = path if path.is_absolute() else workspace.scripts_dir / path
-    scripts_dir = workspace.scripts_dir.resolve()
+def resolve_workspace_script_path(scripts_dir: Path, path: Path) -> Path:
+    candidate = path if path.is_absolute() else scripts_dir / path
+    scripts_dir = scripts_dir.resolve()
     resolved = candidate.resolve(strict=candidate.exists())
     try:
         resolved.relative_to(scripts_dir)

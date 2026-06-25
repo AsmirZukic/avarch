@@ -6,19 +6,19 @@ from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 from typer.testing import CliRunner
 
-from avarch.adapters.sqlite.db import create_db_engine
-from avarch.adapters.sqlite.models import Job, MediaFile
-from avarch.adapters.sqlite.urls import resolve_database_url
-from avarch.cli import app
-from avarch.config import load_config
-from avarch.domain.jobs import JobStage, JobStatus
-from avarch.workspace import (
+from avarch.adapters.filesystem.workspace import (
     WorkspaceContext,
     WorkspaceCreateError,
     WorkspaceError,
     WorkspacePathError,
     create_workspace,
 )
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import Job, MediaFile
+from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.cli import app
+from avarch.config import load_config
+from avarch.domain.jobs import JobStage, JobStatus
 
 runner = CliRunner()
 
@@ -52,7 +52,7 @@ def test_create_workspace_reports_permission_denied(
     def fail_mkdtemp(*_args: object, **_kwargs: object) -> str:
         raise PermissionError(13, "Permission denied", str(denied_path))
 
-    monkeypatch.setattr("avarch.workspace.tempfile.mkdtemp", fail_mkdtemp)
+    monkeypatch.setattr("avarch.adapters.filesystem.workspace.tempfile.mkdtemp", fail_mkdtemp)
 
     with pytest.raises(WorkspaceCreateError, match="Cannot initialize Avarch workspace"):
         create_workspace(tmp_path)

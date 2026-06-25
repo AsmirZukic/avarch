@@ -29,6 +29,11 @@ from avarch.adapters.filesystem.plans import (
     validation_report_path_for_plan_artifact,
     write_plan_artifacts,
 )
+from avarch.adapters.filesystem.workspace import (
+    WorkspaceContext,
+    WorkspaceError,
+    create_workspace,
+)
 from avarch.adapters.probe import (
     ProbeError,
     format_probe_summary,
@@ -194,11 +199,6 @@ from avarch.profiles.registry import (
     ProfileRegistry,
     ProfileRegistryError,
     UnknownProfileError,
-)
-from avarch.workspace import (
-    WorkspaceContext,
-    WorkspaceError,
-    create_workspace,
 )
 
 log = structlog.get_logger(__name__)
@@ -2094,7 +2094,7 @@ def _validate_vapoursynth_profile_scripts(
     if settings.mode == "custom_filter":
         if settings.script is None:
             raise VapourSynthScriptPathError("custom_filter profile is missing script")
-        script_path = resolve_workspace_script_path(workspace, settings.script)
+        script_path = resolve_workspace_script_path(workspace.scripts_dir, settings.script)
         script_text = _read_required_script(script_path)
         validate_script_syntax(script_text)
         _validate_filter_entrypoint(script_text, settings.entrypoint)
@@ -2102,7 +2102,7 @@ def _validate_vapoursynth_profile_scripts(
 
     if settings.template is None:
         raise VapourSynthScriptPathError("custom_template profile is missing template")
-    template_path = resolve_workspace_script_path(workspace, settings.template)
+    template_path = resolve_workspace_script_path(workspace.scripts_dir, settings.template)
     template_text = _read_required_script(template_path)
     validate_script_syntax(template_text)
 
