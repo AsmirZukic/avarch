@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlmodel import Session
 
+from avarch.adapters.inventory_scan import SqliteInventoryScanWorkflow
 from avarch.adapters.manual_validation import SchedulerManualValidationWorker
 from avarch.adapters.promotion import PromotionWorkflowAdapter
 from avarch.adapters.scheduler_process import SchedulerProcessAdapter
@@ -25,6 +26,10 @@ def job_control_store(session: Session) -> SqliteJobControlStore:
 
 def job_view_store(session: Session) -> SqliteJobViewStore:
     return SqliteJobViewStore(session)
+
+
+def inventory_scan_workflow(*, database_url: str) -> SqliteInventoryScanWorkflow:
+    return SqliteInventoryScanWorkflow(database_url=database_url)
 
 
 def queue_control_store(session: Session) -> SqliteQueueControlStore:

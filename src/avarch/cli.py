@@ -32,7 +32,6 @@ from avarch.adapters.sqlite.inventory import (
     active_inventory_files_with_missing_or_stale_probe,
     probe_is_missing_or_stale,
     select_inventory_files,
-    update_inventory,
 )
 from avarch.adapters.sqlite.migrations import get_current_revision, upgrade_database
 from avarch.adapters.sqlite.models import (
@@ -55,6 +54,11 @@ from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_prob
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import prepare_manual_validation
+from avarch.application.inventory_scan import (
+    InventoryScanError,
+    InventoryScanResult,
+    scan_inventory_root,
+)
 from avarch.application.job_control import (
     JobControlWorkflowError,
     cancel_jobs,
@@ -109,6 +113,7 @@ from avarch.application.scheduler_run import (
 )
 from avarch.application.scheduler_status import scheduler_status
 from avarch.bootstrap import (
+    inventory_scan_workflow,
     job_control_store,
     job_view_store,
     manual_validation_worker,
@@ -162,7 +167,6 @@ from avarch.profiles.registry import (
     ProfileRegistryError,
     UnknownProfileError,
 )
-from avarch.scanner import ScanError, ScanResult, scan_root
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
     VapourSynthGenerationError,
@@ -403,27 +407,21 @@ def scan(
         typer.echo("No scan roots provided or configured.")
         raise typer.Exit(1)
 
-    engine = create_db_engine(database_url)
-    results: list[ScanResult] = []
+    scan_workflow = inventory_scan_workflow(database_url=database_url)
+    results: list[InventoryScanResult] = []
     for root in roots_to_scan:
         root = _resolve_cli_path(root)
         log.info("scan_started", root=str(root))
         try:
-            snapshots = scan_root(
-                root,
-                extensions=app_config.scanner.extensions,
-                exclude_directories=app_config.scanner.exclude_directories,
+            result = scan_inventory_root(
+                scan_workflow,
+                root=root,
+                config=app_config,
+                workspace_root=workspace_root,
+                scanned_at=_utc_now(),
             )
-            with Session(engine) as session, session.begin():
-                result = update_inventory(
-                    session,
-                    root=root,
-                    snapshots=snapshots,
-                    scanned_at=_utc_now(),
-                    workspace_root=workspace_root,
-                )
             results.append(result)
-        except ScanError as exc:
+        except InventoryScanError as exc:
             log.error("scan_failed", root=str(root), reason=str(exc))
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
@@ -2762,7 +2760,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _echo_scan_result(result: ScanResult) -> None:
+def _echo_scan_result(result: InventoryScanResult) -> None:
     typer.echo(f"Scanning {result.root}")
     _echo_scan_counts(
         added=result.added,
