@@ -85,6 +85,12 @@ from avarch.application.scheduler_control import (
     resume_scheduler,
     stop_scheduler,
 )
+from avarch.application.scheduler_run import (
+    MAX_CLI_LOG_TAIL_BYTES,
+    cli_actor,
+    new_runner_id,
+    run_scheduler,
+)
 from avarch.application.scheduler_status import scheduler_status
 from avarch.bootstrap import (
     job_control_store,
@@ -92,6 +98,7 @@ from avarch.bootstrap import (
     queue_control_store,
     queue_retry_store,
     scheduler_control_store,
+    scheduler_runner,
     scheduler_status_store,
 )
 from avarch.config import (
@@ -154,12 +161,6 @@ from avarch.scheduler_lifecycle import (
     terminate_scheduler,
     verified_status,
     write_metadata,
-)
-from avarch.scheduler_runner import (
-    MAX_CLI_LOG_TAIL_BYTES,
-    cli_actor,
-    new_runner_id,
-    run_scheduler,
 )
 from avarch.validation import format_validation_report_summary
 from avarch.vapoursynth import (
@@ -707,7 +708,12 @@ def run_queue(
         write_metadata(paths, metadata)
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
-            run_scheduler(config=runtime_config, runner_id=runner_id, resume=resume)
+            run_scheduler(
+                scheduler_runner(),
+                config=runtime_config,
+                runner_id=runner_id,
+                resume=resume,
+            )
         )
     except SchedulerLifecycleError as exc:
         typer.echo(str(exc))

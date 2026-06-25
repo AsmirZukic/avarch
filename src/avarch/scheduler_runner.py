@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import socket
-import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,7 +48,6 @@ SCHEDULER_HEARTBEAT_SECONDS = 5.0
 SCHEDULER_POLL_SECONDS = 1.0
 SCHEDULER_IDLE_EXIT_SECONDS = 2.0
 SCHEDULER_CONTROL_POLL_SECONDS = 0.5
-MAX_CLI_LOG_TAIL_BYTES = 64 * 1024
 
 JobWorker = Callable[..., Coroutine[Any, Any, Any]]
 
@@ -81,10 +77,6 @@ class SchedulerStatus:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def cli_actor() -> str:
-    return f"cli:{socket.gethostname()}:{os.getpid()}"
 
 
 async def run_scheduler(
@@ -236,10 +228,6 @@ def scheduler_status(session: Session, *, now: datetime) -> SchedulerStatus:
         hold_pending=hold_pending,
         active_jobs=active_jobs,
     )
-
-
-def new_runner_id() -> str:
-    return uuid.uuid4().hex
 
 
 def _scheduler_workers() -> dict[JobStage, JobWorker]:
