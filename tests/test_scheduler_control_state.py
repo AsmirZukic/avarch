@@ -23,7 +23,7 @@ from avarch.adapters.sqlite.scheduler_state import (
 )
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
-from avarch.scheduler import scheduler_status
+from avarch.scheduler_runner import scheduler_status
 
 
 def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> None:

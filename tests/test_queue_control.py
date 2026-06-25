@@ -26,7 +26,7 @@ from avarch.planner import build_execution_identity, build_profile_hash, finaliz
 from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
-from avarch.scheduler import clear_queue, retry_job, retry_queue
+from avarch.scheduler_queue import clear_queue, retry_job, retry_queue
 from avarch.serialization import canonical_json
 from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload

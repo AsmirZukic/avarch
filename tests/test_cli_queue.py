@@ -26,7 +26,7 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
-from avarch.scheduler import SchedulerRunSummary
+from avarch.scheduler_runner import SchedulerRunSummary
 
 runner = CliRunner()
 

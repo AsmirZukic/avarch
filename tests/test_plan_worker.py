@@ -18,7 +18,8 @@ from avarch.planner import build_plan
 from avarch.probe import normalize_probe
 from avarch.profiles.registry import ProfileRegistry
 from avarch.scanner import create_file_snapshot
-from avarch.scheduler import enqueue_inventory, execute_plan_job
+from avarch.scheduler_queue import enqueue_inventory
+from avarch.scheduler_workers import execute_plan_job
 from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
 from tests.probe_fixtures import sdr_probe_payload
 
