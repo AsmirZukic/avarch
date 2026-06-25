@@ -6,6 +6,7 @@ from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
+from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
 from avarch.config import AppConfig
 
 
@@ -27,3 +28,7 @@ def queue_retry_store(session: Session, *, config: AppConfig) -> SqliteQueueRetr
 
 def scheduler_control_store(session: Session) -> SqliteSchedulerControlStore:
     return SqliteSchedulerControlStore(session)
+
+
+def scheduler_status_store(session: Session) -> SqliteSchedulerStatusStore:
+    return SqliteSchedulerStatusStore(session)
