@@ -60,13 +60,10 @@ from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_prob
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import enqueue_plans, select_plans_for_enqueue
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
+from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
 from avarch.adapters.sqlite.scheduler_state import (
     SchedulerAlreadyRunningError,
     SchedulerControlError,
-    drain_scheduler,
-    pause_scheduler,
-    resume_scheduler,
-    stop_scheduler,
 )
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.sqlite.validations import latest_validation, prepare_manual_validation
@@ -82,6 +79,13 @@ from avarch.application.queue_control import (
     clear_queue,
     retry_job,
     retry_queue,
+)
+from avarch.application.scheduler_control import (
+    SchedulerControlWorkflowError,
+    drain_scheduler,
+    pause_scheduler,
+    resume_scheduler,
+    stop_scheduler,
 )
 from avarch.config import (
     WORKSPACE_CONFIG_TEXT,
@@ -684,8 +688,12 @@ def run_queue(
         engine = create_db_engine(database_url)
         try:
             with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason="SIGTERM")
-        except SchedulerControlError:
+                stop_scheduler(
+                    SqliteSchedulerControlStore(session),
+                    now=_utc_now(),
+                    reason="SIGTERM",
+                )
+        except SchedulerControlWorkflowError:
             pass
 
     try:
@@ -790,8 +798,12 @@ def pause(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            pause_scheduler(session, now=_utc_now(), reason=reason)
-    except SchedulerControlError as exc:
+            pause_scheduler(
+                SqliteSchedulerControlStore(session),
+                now=_utc_now(),
+                reason=reason,
+            )
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -812,8 +824,8 @@ def resume_scheduler_command() -> None:
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            resume_scheduler(session, now=_utc_now())
-    except SchedulerControlError as exc:
+            resume_scheduler(SqliteSchedulerControlStore(session), now=_utc_now())
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Scheduler resumed")
@@ -832,8 +844,12 @@ def drain_scheduler_command(
     engine = create_db_engine(database_url)
     try:
         with Session(engine) as session, session.begin():
-            drain_scheduler(session, now=_utc_now(), reason=reason)
-    except SchedulerControlError as exc:
+            drain_scheduler(
+                SqliteSchedulerControlStore(session),
+                now=_utc_now(),
+                reason=reason,
+            )
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Scheduler drain requested")
@@ -862,8 +878,12 @@ def stop_scheduler_command(
     if live and not force:
         try:
             with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason=reason)
-        except SchedulerControlError as exc:
+                stop_scheduler(
+                    SqliteSchedulerControlStore(session),
+                    now=_utc_now(),
+                    reason=reason,
+                )
+        except SchedulerControlWorkflowError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
     stopped = terminate_scheduler(
@@ -936,8 +956,12 @@ def scheduler_restart_command(
     if verified_status(workspace).metadata is not None:
         try:
             with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason="restart")
-        except SchedulerControlError:
+                stop_scheduler(
+                    SqliteSchedulerControlStore(session),
+                    now=_utc_now(),
+                    reason="restart",
+                )
+        except SchedulerControlWorkflowError:
             pass
         if not terminate_scheduler(
             workspace=workspace,
