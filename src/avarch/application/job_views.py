@@ -34,6 +34,25 @@ class JobAttemptView:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowJobItem:
+    id: int | None
+    status: JobStatus
+    stage: JobStage
+    output_path: str | None
+    plan_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentFailedJob:
+    id: int | None
+    stage: JobStage
+    file_name: str
+    last_error_type: str | None
+    last_error_message: str | None
+    latest_attempt: JobAttemptView | None
+
+
+@dataclass(frozen=True, slots=True)
 class JobEventView:
     id: int | None
     created_at: datetime
@@ -82,6 +101,14 @@ class JobViewStore(Protocol):
 
     def job_details(self, *, job_id: int) -> JobDetails | None: ...
 
+    def workflow_jobs_for_plan_hashes(
+        self,
+        *,
+        plan_hashes: tuple[str, ...],
+    ) -> list[WorkflowJobItem]: ...
+
+    def recent_failed_jobs(self, *, limit: int) -> list[RecentFailedJob]: ...
+
     def latest_attempt(
         self,
         *,
@@ -103,6 +130,18 @@ def list_jobs(
 
 def job_details(store: JobViewStore, *, job_id: int) -> JobDetails | None:
     return store.job_details(job_id=job_id)
+
+
+def workflow_jobs_for_plan_hashes(
+    store: JobViewStore,
+    *,
+    plan_hashes: tuple[str, ...],
+) -> list[WorkflowJobItem]:
+    return store.workflow_jobs_for_plan_hashes(plan_hashes=plan_hashes)
+
+
+def recent_failed_jobs(store: JobViewStore, *, limit: int) -> list[RecentFailedJob]:
+    return store.recent_failed_jobs(limit=limit)
 
 
 def latest_attempt(

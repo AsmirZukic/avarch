@@ -68,6 +68,16 @@ class ProbeNormalizationError(ProbeError):
     pass
 
 
+class FfprobeCollector:
+    def __init__(self, *, probe_runner: Any | None = None) -> None:
+        self._probe_runner = run_ffprobe if probe_runner is None else probe_runner
+
+    def collect(self, path: Path) -> tuple[Mapping[str, Any], NormalizedProbe]:
+        raw_probe = self._probe_runner(path)
+        normalized_probe = normalize_probe(raw_probe)
+        return raw_probe, normalized_probe
+
+
 def build_ffprobe_command(path: Path, *, executable: str = "ffprobe") -> list[str]:
     return [
         executable,
@@ -188,77 +198,6 @@ def build_probe_hash(normalized: NormalizedProbe) -> str:
     normalized_json = canonical_json(normalized)
     payload = b"probe-v1\0" + normalized_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
-
-
-def format_probe_summary(path: Path, normalized: NormalizedProbe, probe_hash: str) -> str:
-    lines = [
-        f"File: {path}",
-        f"Container: {_display(normalized.container)}",
-        f"Duration: {_display_seconds(normalized.duration_seconds)}",
-        f"Bitrate: {_display_bitrate(normalized.bitrate_bps)}",
-        "",
-        "Video streams:",
-    ]
-
-    for stream in sorted(normalized.video_streams, key=lambda item: item.index):
-        lines.append(
-            "  "
-            f"[{stream.index}] {_display(stream.codec)} "
-            f"{_display_dimensions(stream.width, stream.height)} "
-            f"{_display(stream.fps)} fps "
-            f"{_display_bit_depth(stream.bit_depth)} "
-            f"{_display(stream.pix_fmt)}"
-        )
-        lines.append(
-            "      "
-            f"color={_display(stream.color_space)}/{_display(stream.color_primaries)}/"
-            f"{_display(stream.color_transfer)} "
-            f"hdr_metadata={'yes' if stream.hdr_metadata_present else 'no'}"
-        )
-
-    lines.append("")
-    lines.append("Audio streams:")
-    for stream in sorted(normalized.audio_streams, key=lambda item: item.index):
-        flags = _stream_flags(
-            default=stream.default,
-            forced=stream.forced,
-            commentary=stream.commentary,
-        )
-        lines.append(
-            "  "
-            f"[{stream.index}] {_display(stream.codec)} {_display(stream.language)} "
-            f"{_display_channels(stream.channels)}{flags}"
-        )
-
-    lines.append("")
-    lines.append("Subtitle streams:")
-    for stream in sorted(normalized.subtitle_streams, key=lambda item: item.index):
-        flags = _stream_flags(default=stream.default, forced=stream.forced)
-        lines.append(
-            f"  [{stream.index}] {_display(stream.codec)} {_display(stream.language)}{flags}"
-        )
-
-    lines.extend(
-        [
-            "",
-            f"Attachments: {len(normalized.attachments)}",
-            f"Chapters: {len(normalized.chapters)}",
-            f"Probe hash: {probe_hash}",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def parse_normalized_probe_json(value: str) -> NormalizedProbe:
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ProbeOutputError("Stored normalized probe JSON is invalid") from exc
-    try:
-        normalized = NormalizedProbe.model_validate(data)
-    except ValidationError as exc:
-        raise ProbeOutputError("Stored normalized probe JSON is not supported") from exc
-    return normalized
 
 
 def _normalize_video_stream(stream: Mapping[str, Any]) -> VideoStream:
@@ -466,52 +405,3 @@ def _truncate(value: str) -> str:
     if len(value) <= _MAX_STDERR_LENGTH:
         return value
     return f"{value[:_MAX_STDERR_LENGTH]}..."
-
-
-def _display(value: object | None) -> str:
-    if value is None:
-        return "-"
-    return str(value)
-
-
-def _display_seconds(value: float | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value:g} s"
-
-
-def _display_bitrate(value: int | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value} bps"
-
-
-def _display_dimensions(width: int | None, height: int | None) -> str:
-    if width is None or height is None:
-        return "-"
-    return f"{width}x{height}"
-
-
-def _display_bit_depth(value: int | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value}-bit"
-
-
-def _display_channels(value: int | None) -> str:
-    if value is None:
-        return "- channels"
-    return f"{value} channels"
-
-
-def _stream_flags(*, default: bool, forced: bool, commentary: bool = False) -> str:
-    flags: list[str] = []
-    if default:
-        flags.append("default")
-    if forced:
-        flags.append("forced")
-    if commentary:
-        flags.append("commentary")
-    if not flags:
-        return ""
-    return " " + " ".join(flags)

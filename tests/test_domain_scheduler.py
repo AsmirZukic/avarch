@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.jobs import JobStage, JobStatus, ResourceClass
 from avarch.domain.scheduler import (
     ActiveJob,
     ClaimableJob,
@@ -10,6 +10,7 @@ from avarch.domain.scheduler import (
     SchedulerMode,
     classify_queue_clear_job,
     jobs_to_cancel,
+    resource_for_stage,
     scheduler_can_launch_jobs,
     select_launchable_jobs,
     select_retry_stage,
@@ -67,6 +68,10 @@ def test_select_launchable_jobs_accounts_for_active_and_newly_selected_jobs() ->
         ClaimableJob(job_id=1, stage=JobStage.VALIDATE),
         ClaimableJob(job_id=4, stage=JobStage.PROMOTE),
     )
+
+
+def test_cleanup_uses_file_operation_capacity() -> None:
+    assert resource_for_stage(JobStage.CLEANUP) == ResourceClass.FILE_OP
 
 
 def test_classify_queue_clear_job_excludes_terminal_and_running_promotion() -> None:

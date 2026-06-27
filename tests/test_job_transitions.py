@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
@@ -15,6 +16,7 @@ from avarch.adapters.sqlite.job_transitions import (
     complete_job_stage,
     fail_job_stage,
     interrupt_job_stage,
+    queue_rejected_output_cleanup,
     transition_job,
 )
 from avarch.adapters.sqlite.models import Job, JobAttempt, MediaFile, MediaFileStatus
@@ -250,6 +252,48 @@ def test_invalid_transition_is_rejected(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
         assert job is not None
         transition_job(job, JobStatus.PROMOTED)
+
+
+def test_stale_job_write_is_rejected(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
+    first = Session(engine)
+    second = Session(engine)
+    try:
+        first_job = first.get(Job, job_id)
+        second_job = second.get(Job, job_id)
+        assert first_job is not None
+        assert second_job is not None
+
+        transition_job(first_job, JobStatus.ENCODING, now=datetime.now(UTC))
+        first.commit()
+
+        transition_job(second_job, JobStatus.CANCELLED, now=datetime.now(UTC))
+        with pytest.raises(StaleDataError):
+            second.commit()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_rejected_output_cleanup_handoff_queues_cleanup_stage(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.READY_TO_PROMOTE,
+        stage=JobStage.PROMOTE,
+    )
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        queue_rejected_output_cleanup(job, now=now)
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.QUEUED
+    assert job.stage == JobStage.CLEANUP
 
 
 def _stored_job(

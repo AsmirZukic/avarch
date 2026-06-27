@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -98,6 +100,59 @@ class PlanningProbeResult(Protocol):
     probe_hash: str
 
 
+class PlanningProfile(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def profile(self) -> EncodingProfile: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningInputFile:
+    id: int | None
+    path: str
+    size_bytes: int
+    fs_fingerprint: str
+    probe_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningInputSelection:
+    selected: tuple[PlanningInputFile, ...]
+    missing: tuple[Path, ...]
+
+
+class PlanningStore(Protocol):
+    def select_inputs(
+        self,
+        *,
+        file_selectors: Sequence[Path],
+        workspace_root: Path,
+        resolve_path: Callable[[Path], Path],
+    ) -> PlanningInputSelection: ...
+
+    def eligible_inputs(self) -> list[PlanningInputFile]: ...
+
+    def load_context(
+        self,
+        *,
+        input_path: Path,
+        resolved_profile: PlanningProfile,
+    ) -> PlanningContext: ...
+
+    def equivalent_current_plan_exists(
+        self,
+        *,
+        media_file_id: int | None,
+        probe_hash: str,
+        profile_hash: str,
+        execution_identity_hash: str,
+    ) -> bool: ...
+
+    def persist_plan(self, *, plan: TranscodePlan, now: datetime) -> None: ...
+
+
 SUPPORTED_AV1AN_VERSION_FAMILY = "0.5.x"
 ACCEPTED_CONTAINER_NAMES = {
     "mkv": ["matroska,webm"],
@@ -173,6 +228,53 @@ def build_work_key(
     )
     payload = f"{WORK_KEY_CONTRACT}\0".encode() + payload_json.encode("utf-8")
     return hashlib.blake2b(payload, digest_size=20).hexdigest()
+
+
+def select_planning_inputs(
+    store: PlanningStore,
+    *,
+    file_selectors: Sequence[Path],
+    workspace_root: Path,
+    resolve_path: Callable[[Path], Path],
+) -> PlanningInputSelection:
+    return store.select_inputs(
+        file_selectors=file_selectors,
+        workspace_root=workspace_root,
+        resolve_path=resolve_path,
+    )
+
+
+def eligible_planning_inputs(store: PlanningStore) -> list[PlanningInputFile]:
+    return store.eligible_inputs()
+
+
+def load_stored_planning_context(
+    store: PlanningStore,
+    *,
+    input_path: Path,
+    resolved_profile: PlanningProfile,
+) -> PlanningContext:
+    return store.load_context(input_path=input_path, resolved_profile=resolved_profile)
+
+
+def equivalent_plan_exists(
+    store: PlanningStore,
+    *,
+    media_file_id: int | None,
+    probe_hash: str,
+    profile_hash: str,
+    execution_identity_hash: str,
+) -> bool:
+    return store.equivalent_current_plan_exists(
+        media_file_id=media_file_id,
+        probe_hash=probe_hash,
+        profile_hash=profile_hash,
+        execution_identity_hash=execution_identity_hash,
+    )
+
+
+def save_plan(store: PlanningStore, *, plan: TranscodePlan, now: datetime) -> None:
+    store.persist_plan(plan=plan, now=now)
 
 
 def build_execution_identity() -> ExecutionIdentity:

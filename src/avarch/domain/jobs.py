@@ -15,6 +15,7 @@ class JobStatus(StrEnum):
     SIZE_REJECTED = "size_rejected"
     READY_TO_PROMOTE = "ready_to_promote"
     PROMOTING = "promoting"
+    CLEANING = "cleaning"
     PROMOTED = "promoted"
     SKIPPED = "skipped"
     FAILED = "failed"
@@ -50,6 +51,7 @@ class JobStage(StrEnum):
     ENCODE = "encode"
     VALIDATE = "validate"
     PROMOTE = "promote"
+    CLEANUP = "cleanup"
 
 
 class ResourceClass(StrEnum):
@@ -75,13 +77,6 @@ class JobEventType(StrEnum):
     RETRY_REQUESTED = "retry_requested"
     PRIORITY_CHANGED = "priority_changed"
     QUEUE_CLEARED = "queue_cleared"
-
-
-class InterruptionReason(StrEnum):
-    USER_CANCEL = "user_cancel"
-    SCHEDULER_STOP = "scheduler_stop"
-    LEASE_LOST = "lease_lost"
-    CTRL_C = "ctrl_c"
 
 
 class ManualValidationAction(StrEnum):
@@ -143,6 +138,8 @@ def active_status_for_stage(stage: JobStage | str) -> JobStatus:
         return JobStatus.VALIDATING
     if normalized_stage == JobStage.PROMOTE:
         return JobStatus.PROMOTING
+    if normalized_stage == JobStage.CLEANUP:
+        return JobStatus.CLEANING
     return JobStatus.ENCODING
 
 
@@ -242,6 +239,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
             JobStatus.VALIDATING,
             JobStatus.READY_TO_PROMOTE,
             JobStatus.PROMOTING,
+            JobStatus.CLEANING,
             JobStatus.SKIPPED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,
@@ -284,6 +282,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     JobStatus.READY_TO_PROMOTE: frozenset(
         {
             JobStatus.READY_TO_PROMOTE,
+            JobStatus.QUEUED,
             JobStatus.PROMOTING,
             JobStatus.SIZE_REJECTED,
             JobStatus.FAILED,
@@ -296,6 +295,16 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
             JobStatus.PROMOTED,
             JobStatus.READY_TO_PROMOTE,
             JobStatus.FAILED,
+        }
+    ),
+    JobStatus.CLEANING: frozenset(
+        {
+            JobStatus.CLEANING,
+            JobStatus.QUEUED,
+            JobStatus.HELD,
+            JobStatus.SIZE_REJECTED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
         }
     ),
     JobStatus.PROMOTED: frozenset({JobStatus.PROMOTED}),

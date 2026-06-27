@@ -22,6 +22,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0002_media_plan.py",
         "0003_job_outcome_reason.py",
         "0004_promotion_target_lock.py",
+        "0005_job_state_version.py",
     ]
 
 
@@ -60,10 +61,18 @@ def test_job_outcome_reason_revision_depends_on_media_plan() -> None:
 
 def test_promotion_target_lock_revision_depends_on_job_outcome_reason() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0004_promotion_target_lock")
 
     assert revision is not None
     assert revision.down_revision == "0003_job_outcome_reason"
+
+
+def test_job_state_version_revision_depends_on_promotion_target_lock() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0004_promotion_target_lock"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -273,6 +282,18 @@ def test_upgrade_adds_promotion_target_lock_key(tmp_path: Path) -> None:
     assert "promotion_target_path" in columns
 
 
+def test_upgrade_adds_job_state_version(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(create_db_engine(database_url)).get_columns("job")
+    }
+    assert columns["state_version"]["nullable"] is False
+
+
 def test_alembic_has_one_head() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
 
@@ -345,6 +366,7 @@ def _job_values(media_id: int, probe_id: int, now: datetime) -> dict[str, object
         "stage": "encode",
         "priority": 0,
         "attempts": 0,
+        "state_version": 1,
         "created_at": now,
         "updated_at": now,
     }

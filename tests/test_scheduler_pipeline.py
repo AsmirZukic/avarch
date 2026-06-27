@@ -11,11 +11,15 @@ from avarch.adapters.scheduler_workers import execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
-from avarch.application.promotion import PromotionResultView
+from avarch.application.promotion import (
+    PromotionPreflightView,
+    PromotionRecordView,
+    PromotionResultView,
+)
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
-from avarch.models.promotion import PromotionStatus
+from avarch.models.promotion import PromotionMode, PromotionStatus
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -38,6 +42,34 @@ def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
         claimable = claimable_jobs(session, active_job_ids={2})
 
     assert [job.stage for job in claimable] == [JobStage.PROMOTE]
+    assert has_resource_capacity(
+        claimable[0].stage,
+        [JobStage.ENCODE],
+        capacity=ResourceCapacity(cheap_workers=4, av1an_jobs=1, file_ops=1),
+    )
+
+
+def test_cleanup_can_run_while_another_job_encodes(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = _media_file(tmp_path / "movie-a.mkv", now)
+        session.add(media_file)
+        session.flush()
+        session.add(
+            _job(
+                media_file.id or 0,
+                now,
+                queue_key="cleanup",
+                status=JobStatus.QUEUED,
+                stage=JobStage.CLEANUP,
+            )
+        )
+
+    with Session(engine) as session:
+        claimable = claimable_jobs(session, active_job_ids={2})
+
+    assert [job.stage for job in claimable] == [JobStage.CLEANUP]
     assert has_resource_capacity(
         claimable[0].stage,
         [JobStage.ENCODE],
@@ -127,13 +159,95 @@ def test_scheduler_continues_after_promotion_failure(
             )
         )
 
-    asyncio.run(execute_promotion_job(job_id=1, runner_id="runner", config=config))
+    asyncio.run(
+        execute_promotion_job(
+            job_id=1,
+            runner_id="runner",
+            config=config,
+            promotion_workflow=_PromotionWorkflowStub(),
+        )
+    )
+
+
+class _PromotionWorkflowStub:
+    def preflight(
+        self,
+        *,
+        job_id: int,
+        mode: PromotionMode,
+        config: AppConfig,
+        operation_id: str,
+    ) -> PromotionPreflightView:
+        del config, operation_id
+        return PromotionPreflightView(
+            job_id=job_id,
+            validation_result_id=1,
+            mode=mode,
+            source_path=Path(),
+            validated_output_path=Path(),
+            final_path=Path(),
+            staging_path=Path(),
+            backup_path=None,
+            warnings=(),
+        )
+
+    async def execute(
+        self,
+        *,
+        job_id: int,
+        mode: PromotionMode,
+        config: AppConfig,
+        owner_token: str,
+    ) -> PromotionRecordView:
+        del mode, config, owner_token
+        return _promotion_record(job_id)
+
+    async def recover(
+        self,
+        *,
+        job_id: int,
+        config: AppConfig,
+        owner_token: str,
+    ) -> PromotionRecordView:
+        del config, owner_token
+        return _promotion_record(job_id)
+
+    async def promote(
+        self,
+        *,
+        job_id: int,
+        config: AppConfig,
+        mode: PromotionMode = PromotionMode.REPLACE_ATOMIC,
+        owner_token: str | None = None,
+    ) -> PromotionResultView:
+        del config, mode, owner_token
+        return PromotionResultView(
+            job_id=job_id,
+            promotion_id=0,
+            status=PromotionStatus.COMPLETED,
+            final_path=Path(),
+            promoted=True,
+        )
 
 
 def _engine(tmp_path: Path) -> Any:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
+
+
+def _promotion_record(job_id: int) -> PromotionRecordView:
+    return PromotionRecordView(
+        id=1,
+        job_id=job_id,
+        mode=PromotionMode.REPLACE_ATOMIC,
+        source_path="",
+        backup_path=None,
+        final_path="",
+        validation_result_id=1,
+        cleanup_completed=True,
+        cleanup_error=None,
+    )
 
 
 def _media_file(path: Path, now: datetime) -> MediaFile:

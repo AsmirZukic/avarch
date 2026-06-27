@@ -33,10 +33,3 @@ def evaluate_size_policy(
         return SizeDecision.REJECT_MINIMUM_SAVINGS_NOT_MET
     return SizeDecision.ACCEPT
 
-
-def outcome_reason_for_size_decision(decision: SizeDecision) -> str:
-    if decision == SizeDecision.REJECT_NOT_SMALLER:
-        return "skipped_size_not_smaller"
-    if decision == SizeDecision.REJECT_MINIMUM_SAVINGS_NOT_MET:
-        return "skipped_minimum_savings_not_met"
-    raise ValueError(f"Size decision does not have a rejection reason: {decision}")

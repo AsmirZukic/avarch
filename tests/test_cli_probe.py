@@ -26,7 +26,7 @@ def test_probe_command_stores_result_for_tracked_file(
 ) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -41,7 +41,7 @@ def test_probe_command_stores_source_fs_fingerprint(
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
     tracked = _load_media_file(config_path, media_file)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -56,7 +56,7 @@ def test_probe_command_sets_latest_probe_id(
 ) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -72,7 +72,7 @@ def test_probe_command_prints_normalized_summary(
 ) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -134,7 +134,7 @@ def test_probe_command_does_not_store_failed_probe(
     def fail_probe(_path: Path) -> dict[str, Any]:
         raise ProbeProcessError("ffprobe failed")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -148,14 +148,14 @@ def test_failed_probe_does_not_change_latest_probe_id(
 ) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
     first_result = runner.invoke(app, ["probe", "--file", str(media_file)])
     before = _load_media_file(config_path, media_file)
 
     def fail_probe(_path: Path) -> dict[str, Any]:
         raise ProbeProcessError("ffprobe failed")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 
@@ -174,7 +174,7 @@ def test_probe_command_does_not_mutate_media_file_state(
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(tmp_path, config_path, status=MediaFileStatus.ADDED)
     before = _load_media_file(config_path, media_file)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     result = runner.invoke(app, ["probe", "--file", str(media_file)])
 

@@ -25,6 +25,7 @@ from avarch.domain.jobs import (
     plan_job_transition,
     plan_retry_transition,
     plan_skipped_transition,
+    plan_validation_result_transition,
 )
 from avarch.domain.scheduler import resource_for_stage
 from avarch.serialization import canonical_json
@@ -51,6 +52,8 @@ __all__ = [
     "interrupt_job_stage",
     "interrupt_running_job",
     "mark_job_skipped",
+    "record_validation_result_transition",
+    "queue_rejected_output_cleanup",
     "require_attempt",
     "require_job",
     "recover_abandoned_jobs",
@@ -75,10 +78,13 @@ def transition_job(
     target_status: JobStatus,
     reason: JobOutcomeReason | None = None,
     *,
+    stage: JobStage | None = None,
     now: datetime | None = None,
 ) -> None:
     transition = plan_job_transition(job.status, target_status, reason=reason, now=now)
     job.status = transition.status
+    if stage is not None:
+        job.stage = stage
     if transition.outcome_reason is not None:
         job.outcome_reason = transition.outcome_reason
     if transition.updated_at is not None:
@@ -284,6 +290,15 @@ def mark_job_skipped(
         skip_claimed_job(session, job=job, attempt_id=attempt_id, reason=reason, now=now)
 
 
+def queue_rejected_output_cleanup(job: Job, *, now: datetime) -> None:
+    transition = plan_job_transition(job.status, JobStatus.QUEUED, now=now)
+    job.status = transition.status
+    job.stage = JobStage.CLEANUP
+    job.claimed_by = None
+    job.finished_at = None
+    job.updated_at = now
+
+
 def skip_claimed_job(
     session: Session,
     *,
@@ -304,6 +319,30 @@ def skip_claimed_job(
     job.finished_at = now
     session.add(job)
     session.add(attempt)
+
+
+def record_validation_result_transition(
+    job: Job,
+    *,
+    passed: bool,
+    failed_summary: str,
+    now: datetime,
+) -> None:
+    transition = plan_validation_result_transition(
+        job.status,
+        passed=passed,
+        failed_summary=failed_summary,
+        now=now,
+    )
+    job.status = transition.status
+    job.stage = transition.stage
+    job.finished_at = transition.finished_at
+    if passed:
+        job.last_error_type = None
+        job.last_error_message = None
+    else:
+        job.last_error_type = transition.last_error_type
+        job.last_error_message = transition.last_error_message
 
 
 def fail_job_after_external(

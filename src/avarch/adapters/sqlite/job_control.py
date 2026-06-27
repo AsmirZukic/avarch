@@ -9,10 +9,12 @@ from avarch.adapters.sqlite.job_transitions import (
     clear_hold_fields,
     require_job,
     reset_job_for_retry,
+    transition_job,
 )
 from avarch.adapters.sqlite.models import Job
 from avarch.domain.jobs import (
     JobEventType,
+    JobOutcomeReason,
     JobStage,
     JobStatus,
     job_can_be_held,
@@ -21,8 +23,6 @@ from avarch.domain.jobs import (
     job_is_running,
     job_is_running_promotion,
     job_rejects_cancel,
-    plan_canceled_transition,
-    plan_job_transition,
 )
 from avarch.serialization import canonical_json
 
@@ -76,8 +76,12 @@ def cancel_job(
             now=now,
         )
     else:
-        transition = plan_canceled_transition(job.status, now=now)
-        job.status = transition.status
+        transition_job(
+            job,
+            JobStatus.CANCELLED,
+            reason=JobOutcomeReason.CANCELLED_BY_USER,
+            now=now,
+        )
         job.canceled_at = now
         job.finished_at = now
         job.claimed_by = None
@@ -126,8 +130,7 @@ def hold_job(
             now=now,
         )
     else:
-        transition = plan_job_transition(job.status, JobStatus.HELD, now=now)
-        job.status = transition.status
+        transition_job(job, JobStatus.HELD, now=now)
         job.held_at = now
         add_job_event(
             session,
@@ -147,8 +150,7 @@ def release_job(session: Session, *, job_id: int, actor: str, now: datetime) -> 
     if not had_hold:
         return False
     if job.status == JobStatus.HELD:
-        transition = plan_job_transition(job.status, JobStatus.QUEUED, now=now)
-        job.status = transition.status
+        transition_job(job, JobStatus.QUEUED, now=now)
         job.finished_at = None
     clear_hold_fields(job)
     job.updated_at = now

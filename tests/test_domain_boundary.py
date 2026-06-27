@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 DOMAIN_ROOT = Path(__file__).resolve().parents[1] / "src" / "avarch" / "domain"
@@ -45,6 +46,7 @@ OBSOLETE_TOP_LEVEL_MODULES = frozenset(
         "scheduler_lifecycle.py",
         "scheduler_queue.py",
         "scheduler_runner.py",
+        "adapters/scheduler_support.py",
         "scheduler_support.py",
         "scheduler_workers.py",
         "size_policy.py",
@@ -78,6 +80,7 @@ OBSOLETE_IMPORT_ROOTS = frozenset(
         "avarch.scheduler_lifecycle",
         "avarch.scheduler_runner",
         "avarch.scheduler_support",
+        "avarch.adapters.scheduler_support",
         "avarch.scheduler_workers",
         "avarch.models.db",
         "avarch.models.scheduler",
@@ -100,6 +103,19 @@ OBSOLETE_IMPORT_MEMBERS = {
         {
             "get_canonical_probe_result",
             "store_probe_result",
+        }
+    ),
+    "avarch.adapters.probe": frozenset(
+        {
+            "format_probe_summary",
+            "parse_normalized_probe_json",
+        }
+    ),
+    "avarch.adapters.validation": frozenset(
+        {
+            "failed_check_summary",
+            "failed_required_check_names",
+            "format_validation_report_summary",
         }
     ),
     "avarch.scanner": frozenset(
@@ -194,7 +210,49 @@ OBSOLETE_IMPORT_MEMBERS = {
     ),
 }
 
+OBSOLETE_BOOTSTRAP_EXPORTS = frozenset(
+    {
+        "FfprobeCollector",
+        "ProbeError",
+        "VpyEnvironmentError",
+        "VpyPluginInventoryError",
+        "VsrepoUnavailableError",
+        "add_python_package",
+        "add_vsrepo_package",
+        "build_runtime_identity",
+        "check_vapoursynth_script",
+        "format_probe_summary",
+        "format_validation_report_summary",
+        "generate_vapoursynth_script",
+        "list_vapoursynth_plugins",
+        "load_requirements",
+        "parse_normalized_probe_json",
+        "planning_runtime_identity_for_data_dir",
+        "remove_python_package",
+        "remove_vsrepo_package",
+        "run_ffprobe",
+        "runtime_environment_variables",
+        "search_vsrepo_packages",
+        "sync_environment",
+        "validate_script_syntax",
+        "write_plan_artifacts",
+    }
+)
+
 OBSOLETE_FUNCTION_DEFINITIONS = {
+    "avarch.adapters.probe": frozenset(
+        {
+            "format_probe_summary",
+            "parse_normalized_probe_json",
+        }
+    ),
+    "avarch.adapters.validation": frozenset(
+        {
+            "failed_check_summary",
+            "failed_required_check_names",
+            "format_validation_report_summary",
+        }
+    ),
     "avarch.promoter": frozenset(
         {
             "_recoverable_promotion",
@@ -344,6 +402,13 @@ def test_obsolete_function_definitions_are_not_reintroduced() -> None:
     assert violations == []
 
 
+def test_bootstrap_does_not_export_low_level_adapter_helpers() -> None:
+    bootstrap = _load_module("avarch.bootstrap")
+    exported = set(getattr(bootstrap, "__all__", ()))
+
+    assert sorted(exported & OBSOLETE_BOOTSTRAP_EXPORTS) == []
+
+
 def test_validation_shell_module_stays_deleted() -> None:
     assert not (PACKAGE_ROOT / "validation.py").exists()
 
@@ -381,6 +446,73 @@ def test_config_module_does_not_import_sqlalchemy() -> None:
     assert imported_sqlalchemy == []
 
 
+def test_cli_module_does_not_import_database_driver_boundaries() -> None:
+    cli_path = PACKAGE_ROOT / "cli.py"
+    forbidden_imports = {
+        "avarch.adapters",
+        "avarch.adapters.sqlite",
+        "sqlalchemy",
+        "sqlmodel",
+    }
+    forbidden_members = {
+        ("avarch.bootstrap", "FfprobeCollector"),
+        ("avarch.bootstrap", "ProbeError"),
+        ("avarch.bootstrap", "VpyEnvironmentError"),
+        ("avarch.bootstrap", "VpyPluginInventoryError"),
+        ("avarch.bootstrap", "VsrepoUnavailableError"),
+        ("avarch.bootstrap", "format_validation_report_summary"),
+        ("avarch.bootstrap", "format_probe_summary"),
+        ("avarch.bootstrap", "parse_normalized_probe_json"),
+        ("avarch.bootstrap", "planning_runtime_identity_for_data_dir"),
+        ("avarch.bootstrap", "runtime_environment_variables"),
+        ("avarch.adapters.sqlite.db", "create_db_engine"),
+        ("avarch.adapters.sqlite.db", "verify_database_revision"),
+        ("avarch.adapters.sqlite.migrations", "get_current_revision"),
+    }
+    violations = [
+        f"cli.py imports {imported_name}"
+        for imported_name in _imported_names(cli_path)
+        if any(
+            imported_name == forbidden or imported_name.startswith(f"{forbidden}.")
+            for forbidden in forbidden_imports
+        )
+    ]
+    violations.extend(
+        f"cli.py imports {module_name}.{imported_member}"
+        for module_name, imported_member in _imported_members(cli_path)
+        if (module_name, imported_member) in forbidden_members
+    )
+
+    assert violations == []
+
+
+def test_package_modules_do_not_form_import_cycles() -> None:
+    modules = {_module_name_for_path(path) for path in _package_module_paths()}
+    graph = {
+        _module_name_for_path(path): _package_import_targets(path, modules)
+        for path in _package_module_paths()
+    }
+
+    cycles = _import_cycles(graph)
+
+    assert cycles == []
+
+
+def test_job_state_fields_are_mutated_only_by_transition_adapter() -> None:
+    allowed_paths = {
+        PACKAGE_ROOT / "adapters" / "sqlite" / "job_transitions.py",
+    }
+    violations: list[str] = []
+    for path in _package_module_paths():
+        if path in allowed_paths:
+            continue
+        for line_number, field_name in _job_state_assignments(path):
+            relative_path = path.relative_to(PACKAGE_ROOT.parent.parent)
+            violations.append(f"{relative_path}:{line_number} assigns job.{field_name}")
+
+    assert violations == []
+
+
 def _domain_module_paths() -> list[Path]:
     return sorted(path for path in DOMAIN_ROOT.rglob("*.py") if path.is_file())
 
@@ -407,6 +539,20 @@ def _module_path(module_name: str) -> Path:
     return PACKAGE_ROOT / f"{relative_module}.py"
 
 
+def _load_module(module_name: str) -> object:
+    return importlib.import_module(module_name)
+
+
+def _module_name_for_path(path: Path) -> str:
+    relative = path.relative_to(PACKAGE_ROOT).with_suffix("")
+    parts = relative.parts
+    if parts == ("__init__",):
+        return "avarch"
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(("avarch", *parts))
+
+
 def _imported_names(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     imported_names: list[str] = []
@@ -427,9 +573,104 @@ def _imported_members(path: Path) -> list[tuple[str, str]]:
     return imported_members
 
 
+def _package_import_targets(path: Path, modules: set[str]) -> set[str]:
+    module_name = _module_name_for_path(path)
+    tree = ast.parse(path.read_text(), filename=str(path))
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        for imported_name in _node_imported_modules(node, module_name):
+            target = _resolve_existing_module(imported_name, modules)
+            if target is not None and target != module_name:
+                targets.add(target)
+    return targets
+
+
+def _node_imported_modules(node: ast.AST, module_name: str) -> list[str]:
+    if isinstance(node, ast.Import):
+        return [
+            alias.name
+            for alias in node.names
+            if alias.name == "avarch" or alias.name.startswith("avarch.")
+        ]
+    if isinstance(node, ast.ImportFrom) and node.module is not None:
+        if node.level:
+            base_parts = module_name.split(".")[:-node.level]
+            return [".".join((*base_parts, node.module))]
+        return [node.module]
+    return []
+
+
+def _resolve_existing_module(imported_name: str, modules: set[str]) -> str | None:
+    if imported_name != "avarch" and not imported_name.startswith("avarch."):
+        return None
+    parts = imported_name.split(".")
+    for length in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:length])
+        if candidate in modules:
+            return candidate
+    return None
+
+
+def _import_cycles(graph: dict[str, set[str]]) -> list[str]:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+    cycles: list[str] = []
+
+    def visit(module_name: str) -> None:
+        visiting.add(module_name)
+        stack.append(module_name)
+        for target in sorted(graph[module_name]):
+            if target in visiting:
+                cycle_start = stack.index(target)
+                cycles.append(" -> ".join([*stack[cycle_start:], target]))
+                continue
+            if target not in visited:
+                visit(target)
+        stack.pop()
+        visiting.remove(module_name)
+        visited.add(module_name)
+
+    for module_name in sorted(graph):
+        if module_name not in visited:
+            visit(module_name)
+    return cycles
+
+
 def _defined_functions(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+
+
+def _job_state_assignments(path: Path) -> list[tuple[int, str]]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    assignments: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets.extend(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets.append(node.target)
+        for target in targets:
+            assignments.extend(_job_state_assignment_targets(target))
+    return assignments
+
+
+def _job_state_assignment_targets(target: ast.expr) -> list[tuple[int, str]]:
+    if isinstance(target, ast.Attribute):
+        if (
+            target.attr in {"status", "stage"}
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "job"
+        ):
+            return [(target.lineno, target.attr)]
+        return []
+    if isinstance(target, (ast.Tuple, ast.List)):
+        assignments: list[tuple[int, str]] = []
+        for element in target.elts:
+            assignments.extend(_job_state_assignment_targets(element))
+        return assignments
+    return []
 
 
 def _is_forbidden_import(imported_name: str) -> bool:

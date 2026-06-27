@@ -31,7 +31,7 @@ def test_plugin_info_classifies_workspace_plugin() -> None:
 
 def test_vpy_plugins_command_lists_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "avarch.cli.list_vapoursynth_plugins",
+        "avarch.bootstrap.list_vapoursynth_plugins",
         lambda: (
             VpyPluginInfo(
                 namespace="bs",
@@ -58,7 +58,7 @@ def test_vpy_env_check_reports_plugin_namespaces(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PWD", str(tmp_path))
     monkeypatch.setattr(
-        "avarch.cli.list_vapoursynth_plugins",
+        "avarch.bootstrap.list_vapoursynth_plugins",
         lambda: (
             VpyPluginInfo(
                 namespace="bs",

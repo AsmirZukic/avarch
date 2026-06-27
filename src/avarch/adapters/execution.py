@@ -174,13 +174,6 @@ def build_process_tail(data: bytes, *, max_bytes: int = MAX_PROCESS_TAIL_BYTES) 
     return tail.decode("utf-8", errors="replace")
 
 
-def parse_av1an_progress(text: str) -> float | None:
-    matches = re.findall(r"(?<!\d)(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)%", text)
-    if not matches:
-        return None
-    return float(matches[-1])
-
-
 def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)

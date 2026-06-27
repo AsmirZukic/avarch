@@ -418,48 +418,61 @@ src/avarch/
 |   `-- recovery.py
 |
 |-- application/
-|   |-- ports.py
-|   |-- scan.py
-|   |-- probe.py
-|   |-- create_plan.py
+|   |-- database_admin.py
 |   |-- enqueue.py
-|   |-- encode.py
-|   |-- validate.py
-|   |-- promote.py
-|   `-- recover.py
-|
-|-- scheduler/
-|   |-- scheduler.py
-|   |-- worker.py
-|   |-- resource_limits.py
-|   `-- process_supervisor.py
+|   |-- file_views.py
+|   |-- inventory_scan.py
+|   |-- job_control.py
+|   |-- job_views.py
+|   |-- manual_validation.py
+|   |-- plan_artifacts.py
+|   |-- plan_views.py
+|   |-- planning.py
+|   |-- planning_workflow.py
+|   |-- probing.py
+|   |-- profile_management.py
+|   |-- promotion.py
+|   |-- queue_control.py
+|   |-- scheduler_*.py
+|   |-- validation_summary.py
+|   |-- vapoursynth_*.py
+|   |-- workflow_run.py
+|   |-- workflow_wait.py
+|   `-- workspace_management.py
 |
 |-- adapters/
 |   |-- sqlite/
 |   |   |-- models.py
-|   |   |-- job_store.py
-|   |   |-- media_store.py
+|   |   |-- admin.py
+|   |   |-- enqueue.py
+|   |   |-- file_views.py
+|   |   |-- job_*.py
+|   |   |-- manual_validation.py
+|   |   |-- plan_views.py
+|   |   |-- planning.py
+|   |   |-- probing.py
+|   |   |-- queue_control.py
+|   |   |-- scheduler_*.py
+|   |   |-- validations.py
 |   |   `-- migrations.py
-|   |-- av1an.py
-|   |-- ffmpeg.py
-|   |-- ffprobe.py
-|   |-- filesystem.py
-|   |-- processes.py
-|   `-- clock.py
-|
-|-- cli/
-|   |-- scan.py
+|   |-- execution.py
+|   |-- inventory_scan.py
+|   |-- job_preparation.py
+|   |-- manual_validation.py
 |   |-- probe.py
-|   |-- plan.py
-|   |-- enqueue.py
-|   |-- scheduler.py
-|   `-- common.py
+|   |-- promotion*.py
+|   |-- scheduler_*.py
+|   |-- validation.py
+|   |-- vapoursynth.py
+|   |-- vpy_env.py
+|   `-- vpy_plugins.py
 |
+|-- cli.py
 |-- config.py
 `-- bootstrap.py
 ```
 
-This is a direction, not a requirement to create every file immediately.
+The exact module names may continue to evolve, but this is the current intended shape.
 
 Do not create empty packages, speculative modules, or one file per trivial class.
 

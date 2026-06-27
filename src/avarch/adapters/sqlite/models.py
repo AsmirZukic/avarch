@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Column, String, UniqueConstraint
+from sqlalchemy import Column, Integer, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from avarch.domain.jobs import (
@@ -16,6 +16,8 @@ from avarch.domain.jobs import (
 )
 from avarch.domain.scheduler import SchedulerMode
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
+
+_JOB_STATE_VERSION_COLUMN = Column("state_version", Integer, nullable=False)
 
 
 class AppMeta(SQLModel, table=True):
@@ -125,6 +127,8 @@ class Job(SQLModel, table=True):
 
     priority: int = Field(default=0, index=True)
     attempts: int = 0
+    state_version: int = Field(default=1, sa_column=_JOB_STATE_VERSION_COLUMN)
+    __mapper_args__ = {"version_id_col": _JOB_STATE_VERSION_COLUMN}
 
     claimed_by: str | None = Field(default=None, index=True)
 

@@ -11,9 +11,7 @@ from sqlmodel import Session
 from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
 from avarch.adapters.filesystem.scanner import create_file_snapshot
-from avarch.adapters.probe import build_ffprobe_command, normalize_probe, run_ffprobe
-from avarch.adapters.promotion import PromotionWorkflowAdapter
-from avarch.adapters.scheduler_support import (
+from avarch.adapters.job_preparation import (
     JobPreparationError,
     StaleJobProfileError,
     StaleJobSourceError,
@@ -27,6 +25,7 @@ from avarch.adapters.scheduler_support import (
     verify_job_profile,
     verify_media_snapshot,
 )
+from avarch.adapters.probe import build_ffprobe_command, normalize_probe, run_ffprobe
 from avarch.adapters.sqlite import job_transitions as job_transition_adapter
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import (
@@ -53,8 +52,6 @@ from avarch.adapters.sqlite.rejection_cleanup import (
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
 from avarch.adapters.validation import ValidationError as OutputValidationError
 from avarch.adapters.validation import (
-    failed_check_summary,
-    failed_required_check_names,
     validate_output,
 )
 from avarch.adapters.vapoursynth import (
@@ -64,17 +61,19 @@ from avarch.adapters.vapoursynth import (
 )
 from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
 from avarch.application.planning import PlanningError, build_plan, match_profile
-from avarch.application.promotion import promote_job, recover_promotion
+from avarch.application.promotion import PromotionWorkflow, promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
+from avarch.application.validation_summary import failed_check_summary, failed_required_check_names
 from avarch.application.vapoursynth_identity import (
     resolve_vapoursynth_filter,
     resolve_vapoursynth_template,
 )
 from avarch.config import AppConfig
-from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
+from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.models.execution import ExecutionError, ExecutionInterruptedError
 from avarch.models.plan import TranscodePlan
+from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
 
 ProgressCallback = Callable[[int, float | None], None]
@@ -472,6 +471,7 @@ async def execute_promotion_job(
     job_id: int,
     runner_id: str,
     config: AppConfig,
+    promotion_workflow: PromotionWorkflow,
 ) -> None:
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
@@ -479,18 +479,86 @@ async def execute_promotion_job(
         recovering = job.status == JobStatus.PROMOTING
     if recovering:
         await recover_promotion(
-            workflow=PromotionWorkflowAdapter(),
+            workflow=promotion_workflow,
             job_id=job_id,
             config=config,
             owner_token=runner_id,
         )
         return
     await promote_job(
-        workflow=PromotionWorkflowAdapter(),
+        workflow=promotion_workflow,
         job_id=job_id,
         config=config,
         owner_token=runner_id,
     )
+
+
+async def execute_cleanup_job(
+    *,
+    job_id: int,
+    runner_id: str,
+    config: AppConfig,
+) -> None:
+    engine = create_db_engine(config.database.url)
+    now = _utc_now()
+    with Session(engine) as session, session.begin():
+        job = require_job(session, job_id)
+        attempt = claim_job_stage(session, job_id=job_id, runner_id=runner_id, now=now)
+        attempt_id = require_id(attempt)
+        try:
+            plan = load_job_plan(job)
+            validation = latest_validation(session, job)
+            if validation is None or not validation.passed:
+                raise JobPreparationError("Cleanup requires a passing validation result.")
+            report = ValidationReport.model_validate_json(validation.details_json)
+            profile = require_profile(config, job.profile_name).profile
+            decision = _size_policy_decision(profile=profile, plan=plan, report=report)
+            attempt.output_path = validation.output_path
+            attempt.details_json = canonical_json(
+                {
+                    "validation_result_id": validation.id,
+                    "size_decision": decision.value,
+                    "output_path": validation.output_path,
+                }
+            )
+            if decision == SizeDecision.ACCEPT:
+                complete_job_stage(
+                    session,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    next_stage=JobStage.PROMOTE,
+                    now=_utc_now(),
+                )
+                return
+            try:
+                cleanup_rejected_output(
+                    job,
+                    encoded_path=Path(validation.output_path),
+                    decision=decision,
+                    profile=profile,
+                    now=_utc_now(),
+                )
+            except RejectedOutputCleanupError as exc:
+                attempt.status = AttemptStatus.FAILED
+                attempt.error_type = exc.__class__.__name__
+                attempt.error_message = str(exc)
+                attempt.finished_at = _utc_now()
+                session.add(job)
+                session.add(attempt)
+                return
+            attempt.status = AttemptStatus.COMPLETED
+            attempt.finished_at = _utc_now()
+            session.add(job)
+            session.add(attempt)
+        except Exception as exc:
+            fail_job_stage(
+                session,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                error=scheduler_error(exc),
+                exit_code=None,
+                now=_utc_now(),
+            )
 
 
 def _attach_probe_and_advance(
@@ -542,12 +610,24 @@ def _apply_size_policy_after_validation(
     now: datetime,
 ) -> None:
     profile = require_profile(config, job.profile_name).profile
+    decision = _size_policy_decision(profile=profile, plan=plan, report=report)
+    if decision == SizeDecision.ACCEPT:
+        return
+    job_transition_adapter.queue_rejected_output_cleanup(job, now=now)
+
+
+def _size_policy_decision(
+    *,
+    profile: Any,
+    plan: TranscodePlan,
+    report: Any,
+) -> SizeDecision:
     encoded_size = (
         report.observed.output_size_bytes
         if report.observed is not None and report.observed.output_size_bytes is not None
         else Path(report.output_path).stat().st_size
     )
-    decision = evaluate_size_policy(
+    return evaluate_size_policy(
         plan.validation.source_size_bytes,
         encoded_size,
         SizePolicy(
@@ -555,18 +635,6 @@ def _apply_size_policy_after_validation(
             minimum_savings_percent=profile.promotion.minimum_savings_percent,
         ),
     )
-    if decision == SizeDecision.ACCEPT:
-        return
-    try:
-        cleanup_rejected_output(
-            job,
-            encoded_path=Path(report.output_path),
-            decision=decision,
-            profile=profile,
-            now=now,
-        )
-    except RejectedOutputCleanupError:
-        return
 
 
 def _utc_now() -> datetime:

@@ -110,12 +110,12 @@ def test_vpy_check_generates_and_evaluates_script(
     movie.write_bytes(b"media")
     calls: list[Path] = []
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     def fake_check(script_path: Path, **_kwargs: object) -> None:
         calls.append(script_path)
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fake_check)
     scan_result = runner.invoke(app, ["scan", "."])
     probe_result = runner.invoke(app, ["probe", "--file", "Movies/Test.mkv"])
 
@@ -154,12 +154,12 @@ api_version = 1
         filter_text,
         encoding="utf-8",
     )
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     def fake_check(_script_path: Path, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fake_check)
     scan_result = runner.invoke(app, ["scan", "."])
     probe_result = runner.invoke(app, ["probe", "--file", "Movies/Test.mkv"])
 

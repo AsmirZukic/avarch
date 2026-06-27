@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from avarch.adapters.probe import ProbeNormalizationError, format_probe_summary, normalize_probe
+from avarch.adapters.probe import ProbeNormalizationError, normalize_probe
+from avarch.application.probe_summary import format_probe_summary
 from avarch.models.probe import AudioStream, NormalizedProbe, SubtitleStream, VideoStream
 
 

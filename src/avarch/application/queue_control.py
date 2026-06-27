@@ -50,6 +50,8 @@ class QueueRetrySummary:
 
 
 class QueueControlStore(Protocol):
+    def has_running_cancel_requests(self) -> bool: ...
+
     def select_queue_jobs(
         self,
         *,
@@ -148,6 +150,10 @@ def clear_queue(
         changed=changed,
         operation_id=operation_id,
     )
+
+
+def has_running_cancel_requests(store: QueueControlStore) -> bool:
+    return store.has_running_cancel_requests()
 
 
 def retry_job(

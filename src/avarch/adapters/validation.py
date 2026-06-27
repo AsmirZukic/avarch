@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
-import os
 import subprocess
-import tempfile
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.filesystem.validation_reports import write_validation_report
 from avarch.adapters.probe import (
     ProbeError,
     ProbeExecutableNotFoundError,
@@ -82,10 +81,6 @@ class ValidationExecutionError(ValidationError):
 
 
 class ValidationTargetError(ValidationError):
-    pass
-
-
-class ValidationPolicyError(ValidationError):
     pass
 
 
@@ -726,66 +721,6 @@ def build_decode_sample_command(
         "null",
         "-",
     ]
-
-
-def write_validation_report(path: Path, report: ValidationReport) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_path = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.tmp-",
-        suffix=".json",
-        text=True,
-    )
-    temporary_path = Path(raw_path)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as output_file:
-            output_file.write(canonical_json(report))
-            output_file.write("\n")
-            output_file.flush()
-            os.fsync(output_file.fileno())
-        os.replace(temporary_path, path)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
-    return path
-
-
-def failed_required_check_names(report: ValidationReport) -> list[str]:
-    return [
-        check.name
-        for check in report.checks
-        if check.required and check.status != ValidationCheckStatus.PASS
-    ]
-
-
-def failed_check_summary(report: ValidationReport) -> str:
-    names = failed_required_check_names(report)
-    if not names:
-        return "Validation failed."
-    return "Validation failed required checks: " + ", ".join(names)
-
-
-def format_validation_report_summary(
-    report: ValidationReport,
-    *,
-    reused: bool = False,
-) -> str:
-    lines = ["Validation PASS" if report.passed else "Validation FAIL", ""]
-    if reused:
-        lines.append("Existing passing validation reused.")
-        lines.append("")
-    lines.extend(
-        [
-            f"Output:       {report.output_path}",
-            f"Source:       {report.source_path}",
-            f"Plan hash:    {report.plan_hash}",
-            f"Policy hash:  {report.policy_hash}",
-            "",
-        ]
-    )
-    for check in report.checks:
-        lines.append(f"{check.status.value.upper():<5} {check.name}")
-    return "\n".join(lines)
 
 
 async def _validate_decode_sample(

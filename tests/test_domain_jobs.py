@@ -77,6 +77,7 @@ def test_plan_job_transition_normalizes_reason_value() -> None:
         (JobStage.ENCODE, JobStatus.ENCODING),
         (JobStage.VALIDATE, JobStatus.VALIDATING),
         (JobStage.PROMOTE, JobStatus.PROMOTING),
+        (JobStage.CLEANUP, JobStatus.CLEANING),
     ],
 )
 def test_active_status_for_stage(stage: JobStage, expected_status: JobStatus) -> None:

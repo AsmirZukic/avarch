@@ -159,8 +159,7 @@ def persist_promotion_claim(
     job: Job,
     claim: PromotionClaimData,
 ) -> PromotionRecord:
-    transition_job(job, JobStatus.PROMOTING, now=claim.now)
-    job.stage = JobStage.PROMOTE
+    transition_job(job, JobStatus.PROMOTING, stage=JobStage.PROMOTE, now=claim.now)
     job.claimed_by = claim.owner_token
     job.attempts = claim.attempt_number
     job.started_at = job.started_at or claim.now
@@ -331,8 +330,7 @@ def mark_promotion_rolled_back(
     record.lease_expires_at = None
     attempt.status = AttemptStatus.INTERRUPTED
     attempt.finished_at = now
-    transition_job(job, JobStatus.READY_TO_PROMOTE, now=now)
-    job.stage = JobStage.PROMOTE
+    transition_job(job, JobStatus.READY_TO_PROMOTE, stage=JobStage.PROMOTE, now=now)
     job.claimed_by = None
     job.finished_at = None
     job.updated_at = now
@@ -373,12 +371,17 @@ def mark_promotion_failed_or_validated(
     attempt.error_message = str(error)
     attempt.finished_at = now
     if can_return_to_promote:
-        transition_job(job, JobStatus.READY_TO_PROMOTE, now=now)
+        transition_job(job, JobStatus.READY_TO_PROMOTE, stage=JobStage.PROMOTE, now=now)
         job.finished_at = None
     else:
-        transition_job(job, JobStatus.FAILED, reason=JobOutcomeReason.FAILED_PROMOTION, now=now)
+        transition_job(
+            job,
+            JobStatus.FAILED,
+            reason=JobOutcomeReason.FAILED_PROMOTION,
+            stage=JobStage.PROMOTE,
+            now=now,
+        )
         job.finished_at = now
-    job.stage = JobStage.PROMOTE
     job.claimed_by = None
     job.last_error_type = error.__class__.__name__
     job.last_error_message = str(error)
@@ -410,8 +413,13 @@ def commit_verified_promotion(
     attempt.finished_at = now
     attempt.output_path = str(installed_path)
     job.latest_promotion_id = record.id
-    transition_job(job, JobStatus.PROMOTED, reason=JobOutcomeReason.SUCCESS, now=now)
-    job.stage = JobStage.PROMOTE
+    transition_job(
+        job,
+        JobStatus.PROMOTED,
+        reason=JobOutcomeReason.SUCCESS,
+        stage=JobStage.PROMOTE,
+        now=now,
+    )
     job.claimed_by = None
     job.last_error_type = None
     job.last_error_message = None

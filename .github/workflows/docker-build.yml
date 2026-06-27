@@ -76,12 +76,15 @@ jobs:
           PY
           )
           major_minor="${version%.*}"
-          channel="alpha"
+          channel="ALPHA"
+          moving_channel="alpha"
+          build_version="$major_minor.$GITHUB_RUN_NUMBER-$channel"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "major_minor=$major_minor" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "moving_channel=$moving_channel" >> "$GITHUB_OUTPUT"
+          echo "build_version=$build_version" >> "$GITHUB_OUTPUT"
           echo "version_channel=$version-$channel" >> "$GITHUB_OUTPUT"
-          echo "major_minor_channel=$major_minor-$channel" >> "$GITHUB_OUTPUT"
           echo "build_number=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Verify release tag matches project version
@@ -105,19 +108,10 @@ jobs:
         with:
           images: ${{ steps.images.outputs.dockerhub_image }}
           tags: |
-            type=ref,event=pr,suffix=-${{ steps.version.outputs.build_number }}
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}
-            type=raw,value=${{ steps.version.outputs.version_channel }}
-            type=raw,value=${{ steps.version.outputs.major_minor_channel }}
-            type=raw,value=${{ steps.version.outputs.channel }}
-            type=raw,value=${{ steps.version.outputs.version }}-${{ steps.version.outputs.build_number }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}-${{ steps.version.outputs.build_number }}
-            type=raw,value=${{ steps.version.outputs.version_channel }}-${{ steps.version.outputs.build_number }}
-            type=raw,value=${{ steps.version.outputs.major_minor_channel }}-${{ steps.version.outputs.build_number }}
-            type=raw,value=${{ steps.version.outputs.channel }}-${{ steps.version.outputs.build_number }}
+            type=ref,event=pr,suffix=-${{ steps.version.outputs.build_version }}
+            type=raw,value=${{ steps.version.outputs.build_version }}
+            type=raw,value=${{ steps.version.outputs.moving_channel }}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest-${{ steps.version.outputs.build_number }},enable={{is_default_branch}}
 
       - name: Build Docker image
         uses: docker/build-push-action@v6

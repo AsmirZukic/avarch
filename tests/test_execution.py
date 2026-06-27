@@ -287,9 +287,7 @@ def test_preflight_rejects_missing_ffmpeg_audio_decoder(
     _install_fake_tools(tmp_path, monkeypatch, ffmpeg_decoders=["aac"])
     plan = _sample_plan(tmp_path)
     assert plan.audio is not None
-    plan = plan.model_copy(
-        update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})}
-    )
+    plan = plan.model_copy(update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})})
 
     with pytest.raises(ToolUnavailableError, match="decoder.*eac3"):
         preflight_execution(plan)

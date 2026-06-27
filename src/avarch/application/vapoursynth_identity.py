@@ -64,9 +64,7 @@ def resolve_vapoursynth_template(
     profile: EncodingProfile,
 ) -> ResolvedVapourSynthTemplate | None:
     template_path = (
-        profile.vapoursynth.template
-        if profile.vapoursynth.mode == "custom_template"
-        else None
+        profile.vapoursynth.template if profile.vapoursynth.mode == "custom_template" else None
     )
     if template_path is None:
         return None

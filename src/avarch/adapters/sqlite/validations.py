@@ -7,14 +7,16 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.adapters.sqlite.job_transitions import reset_job_for_retry
+from avarch.adapters.sqlite.job_transitions import (
+    record_validation_result_transition,
+    reset_job_for_retry,
+)
 from avarch.adapters.sqlite.models import Job, JobAttempt, ValidationResult
 from avarch.domain.jobs import (
     AttemptStatus,
     JobStage,
     ManualValidationAction,
     plan_manual_validation,
-    plan_validation_result_transition,
 )
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
@@ -39,11 +41,6 @@ def latest_validation(session: Session, job: Job) -> ValidationResult | None:
     if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
         return None
     return result
-
-
-def latest_validation_passed(session: Session, job: Job) -> bool:
-    result = latest_validation(session, job)
-    return result is not None and result.passed
 
 
 def prepare_manual_validation(
@@ -114,21 +111,12 @@ def persist_validation_result(
             "failed_checks": list(failed_checks),
         }
     )
-    transition = plan_validation_result_transition(
-        job.status,
+    record_validation_result_transition(
+        job,
         passed=report.passed,
         failed_summary=failed_summary,
         now=now,
     )
-    job.status = transition.status
-    job.stage = transition.stage
-    job.finished_at = transition.finished_at
-    if report.passed:
-        job.last_error_type = None
-        job.last_error_message = None
-    else:
-        job.last_error_type = transition.last_error_type
-        job.last_error_message = transition.last_error_message
     session.add(job)
     session.add(attempt)
     return result

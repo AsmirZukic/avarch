@@ -10,6 +10,8 @@ from avarch.application.job_views import (
     JobDetails,
     JobEventView,
     JobListItem,
+    RecentFailedJob,
+    WorkflowJobItem,
 )
 from avarch.domain.jobs import JobStage, JobStatus
 
@@ -88,6 +90,58 @@ class SqliteJobViewStore:
             events=[_event_view(event) for event in events],
         )
 
+    def workflow_jobs_for_plan_hashes(
+        self,
+        *,
+        plan_hashes: tuple[str, ...],
+    ) -> list[WorkflowJobItem]:
+        if not plan_hashes:
+            return []
+        jobs = list(
+            self._session.exec(
+                select(Job)
+                .where(col(Job.plan_hash).in_(plan_hashes))
+                .order_by(col(Job.created_at).asc(), col(Job.id).asc())
+            ).all()
+        )
+        return [
+            WorkflowJobItem(
+                id=job.id,
+                status=JobStatus(job.status),
+                stage=JobStage(job.stage),
+                output_path=job.output_path,
+                plan_hash=job.plan_hash,
+            )
+            for job in jobs
+        ]
+
+    def recent_failed_jobs(self, *, limit: int) -> list[RecentFailedJob]:
+        failed_jobs = list(
+            self._session.exec(
+                select(Job)
+                .where(Job.status == JobStatus.FAILED)
+                .order_by(col(Job.id).desc())
+                .limit(limit)
+            ).all()
+        )
+        media_by_id = self._media_by_id()
+        attempts_by_job = self._latest_attempts_by_job(
+            job_ids=tuple(job.id for job in failed_jobs if job.id is not None)
+        )
+        return [
+            RecentFailedJob(
+                id=job.id,
+                stage=JobStage(job.stage),
+                file_name=_file_name(media_by_id.get(job.media_file_id)),
+                last_error_type=job.last_error_type,
+                last_error_message=job.last_error_message,
+                latest_attempt=attempts_by_job.get(job.id)
+                if job.id is not None
+                else None,
+            )
+            for job in failed_jobs
+        ]
+
     def latest_attempt(
         self,
         *,
@@ -108,6 +162,21 @@ class SqliteJobViewStore:
             if media_file.id is not None
         }
 
+    def _latest_attempts_by_job(self, *, job_ids: tuple[int, ...]) -> dict[int, JobAttemptView]:
+        attempts_by_job: dict[int, JobAttemptView] = {}
+        if not job_ids:
+            return attempts_by_job
+        attempts = list(
+            self._session.exec(
+                select(JobAttempt)
+                .where(col(JobAttempt.job_id).in_(job_ids))
+                .order_by(col(JobAttempt.attempt_number).desc())
+            ).all()
+        )
+        for attempt in attempts:
+            attempts_by_job.setdefault(attempt.job_id, _attempt_view(attempt))
+        return attempts_by_job
+
 
 def _list_item(job: Job, media_file: MediaFile | None) -> JobListItem:
     return JobListItem(
@@ -124,6 +193,10 @@ def _list_item(job: Job, media_file: MediaFile | None) -> JobListItem:
         skip_reason=job.skip_reason,
         outcome_reason=job.outcome_reason,
     )
+
+
+def _file_name(media_file: MediaFile | None) -> str:
+    return Path(media_file.path).name if media_file is not None else "<missing>"
 
 
 def _attempt_view(attempt: JobAttempt) -> JobAttemptView:
