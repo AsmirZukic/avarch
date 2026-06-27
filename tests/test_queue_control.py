@@ -7,9 +7,10 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import (
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import normalize_probe
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import (
     Job,
     JobEvent,
     MediaFile,
@@ -17,16 +18,24 @@ from avarch.models.db import (
     PromotionRecord,
     ValidationResult,
 )
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
+from avarch.application.planning import (
+    build_execution_identity,
+    build_profile_hash,
+    finalize_plan_hash,
+)
+from avarch.application.queue_control import QueueControlError, clear_queue, retry_job, retry_queue
+from avarch.application.vapoursynth_identity import (
+    GENERATOR_VERSION,
+    build_vapoursynth_identity_hash,
+)
+from avarch.config import WORKSPACE_CONFIG_TEXT, AppConfig, load_config
+from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
-from avarch.models.scheduler import JobEventType, JobStage, JobStatus
-from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
-from avarch.probe import normalize_probe, store_probe_result
 from avarch.profiles.registry import ProfileRegistry
-from avarch.scanner import create_file_snapshot
-from avarch.scheduler import JobControlError, clear_queue, retry_job, retry_queue
 from avarch.serialization import canonical_json
-from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 
@@ -34,30 +43,30 @@ from tests.test_plan_models import sample_plan
 def test_queue_clear_requires_at_least_one_selector(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
 
-    with Session(engine) as session, session.begin(), pytest.raises(JobControlError):
-        clear_queue(session, actor="test", now=datetime.now(UTC))
+    with Session(engine) as session, session.begin(), pytest.raises(QueueControlError):
+        clear_queue(SqliteQueueControlStore(session), actor="test", now=datetime.now(UTC))
 
 
 def test_queue_clear_preview_does_not_mutate_jobs(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        pending = _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now)
+        pending = _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now)
         held = _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now)
         pending_id = pending.id or 0
         held_id = held.id or 0
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
-            statuses={JobStatus.PENDING, JobStatus.HELD},
+            statuses={JobStatus.QUEUED, JobStatus.HELD},
             confirm=False,
         )
 
     with Session(engine) as session:
-        assert _get_job(session, pending_id).status == JobStatus.PENDING
+        assert _get_job(session, pending_id).status == JobStatus.QUEUED
         assert _get_job(session, held_id).status == JobStatus.HELD
         assert session.exec(select(JobEvent)).all() == []
     assert summary.matched == 2
@@ -70,22 +79,28 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         ids = [
-            _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now).id,
+            _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now).id,
             _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now).id,
             _store_job(session, tmp_path, "failed", status=JobStatus.FAILED, now=now).id,
-            _store_job(session, tmp_path, "validated", status=JobStatus.VALIDATED, now=now).id,
+            _store_job(
+                session,
+                tmp_path,
+                "validated",
+                status=JobStatus.READY_TO_PROMOTE,
+                now=now,
+            ).id,
         ]
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             statuses={
-                JobStatus.PENDING,
+                JobStatus.QUEUED,
                 JobStatus.HELD,
                 JobStatus.FAILED,
-                JobStatus.VALIDATED,
+                JobStatus.READY_TO_PROMOTE,
             },
             confirm=True,
         )
@@ -95,7 +110,7 @@ def test_queue_clear_confirm_cancels_eligible_nonrunning_jobs(tmp_path: Path) ->
         events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert summary.changed == 4
-    assert statuses == [JobStatus.CANCELED] * 4
+    assert statuses == [JobStatus.CANCELLED] * 4
     assert [event.event_type for event in events] == [JobEventType.QUEUE_CLEARED] * 4
     assert all(event.details_json is not None for event in events)
 
@@ -104,27 +119,27 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        running = _store_job(session, tmp_path, "running", status=JobStatus.RUNNING, now=now)
+        running = _store_job(session, tmp_path, "running", status=JobStatus.ENCODING, now=now)
         running_id = running.id or 0
 
     with Session(engine) as session, session.begin():
         preview = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
-            statuses={JobStatus.RUNNING},
+            statuses={JobStatus.ENCODING},
             confirm=True,
             cancel_running=False,
         )
     with Session(engine) as session:
-        assert _get_job(session, running_id).status == JobStatus.RUNNING
+        assert _get_job(session, running_id).status == JobStatus.ENCODING
 
     with Session(engine) as session, session.begin():
         requested = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
-            statuses={JobStatus.RUNNING},
+            statuses={JobStatus.ENCODING},
             confirm=True,
             cancel_running=True,
         )
@@ -134,7 +149,7 @@ def test_queue_clear_running_requires_cancel_running(tmp_path: Path) -> None:
 
     assert preview.running_requests == 0
     assert requested.running_requests == 1
-    assert stored.status == JobStatus.RUNNING
+    assert stored.status == JobStatus.ENCODING
     assert stored.cancel_requested_at == now.replace(tzinfo=None)
 
 
@@ -146,7 +161,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
             session,
             tmp_path,
             "promotion",
-            status=JobStatus.RUNNING,
+            status=JobStatus.ENCODING,
             stage=JobStage.PROMOTE,
             now=now,
         )
@@ -154,7 +169,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
             session,
             tmp_path,
             "completed",
-            status=JobStatus.COMPLETED,
+            status=JobStatus.PROMOTED,
             now=now,
         )
         skipped = _store_job(session, tmp_path, "skipped", status=JobStatus.SKIPPED, now=now)
@@ -164,7 +179,7 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
 
     with Session(engine) as session, session.begin():
         summary = clear_queue(
-            session,
+            SqliteQueueControlStore(session),
             actor="test",
             now=now,
             all_jobs=True,
@@ -173,8 +188,8 @@ def test_queue_clear_excludes_running_promotion_and_terminal_jobs(tmp_path: Path
         )
 
     with Session(engine) as session:
-        assert _get_job(session, promotion_id).status == JobStatus.RUNNING
-        assert _get_job(session, completed_id).status == JobStatus.COMPLETED
+        assert _get_job(session, promotion_id).status == JobStatus.ENCODING
+        assert _get_job(session, completed_id).status == JobStatus.PROMOTED
         assert _get_job(session, skipped_id).status == JobStatus.SKIPPED
     assert summary.promotion_excluded == 1
     assert summary.completed_excluded == 0
@@ -191,8 +206,7 @@ def test_queue_retry_preview_does_not_mutate_retryable_job(tmp_path: Path) -> No
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -234,8 +248,7 @@ def test_queue_retry_resolves_safe_resume_stage(
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -249,7 +262,7 @@ def test_queue_retry_resolves_safe_resume_stage(
     assert getattr(summary, summary_field) == 1
     assert stored.stage == expected_stage
     assert stored.status == (
-        JobStatus.VALIDATED if expected_stage == JobStage.PROMOTE else JobStatus.PENDING
+        JobStatus.READY_TO_PROMOTE if expected_stage == JobStage.PROMOTE else JobStatus.QUEUED
     )
     assert [event.event_type for event in events] == [JobEventType.RETRY_REQUESTED]
 
@@ -266,8 +279,7 @@ def test_queue_retry_reports_reenqueue_when_source_identity_changed(tmp_path: Pa
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -309,8 +321,7 @@ def test_queue_retry_resets_to_plan_when_vapoursynth_identity_changed(tmp_path: 
 
     with Session(engine) as session, session.begin():
         summary = retry_queue(
-            session,
-            config=config,
+            SqliteQueueRetryStore(session, config=config),
             actor="test",
             now=now,
             statuses={JobStatus.FAILED},
@@ -322,7 +333,7 @@ def test_queue_retry_resets_to_plan_when_vapoursynth_identity_changed(tmp_path: 
 
     assert summary.reset_to_plan == 1
     assert stored.stage == JobStage.PLAN
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
 
 
 def test_retry_job_rejects_completed_promotion(tmp_path: Path) -> None:
@@ -334,11 +345,10 @@ def test_retry_job_rejects_completed_promotion(tmp_path: Path) -> None:
         job_id = job.id or 0
         _store_completed_promotion(session, job_id=job_id, now=now)
 
-    with Session(engine) as session, session.begin(), pytest.raises(JobControlError):
+    with Session(engine) as session, session.begin(), pytest.raises(QueueControlError):
         retry_job(
-            session,
+            SqliteQueueRetryStore(session, config=config),
             job_id=job_id,
-            config=config,
             actor="test",
             now=now,
         )
@@ -502,8 +512,8 @@ def _dummy_attempt_id(
     now: datetime,
     attempt_number: int = 1,
 ) -> int:
-    from avarch.models.db import JobAttempt
-    from avarch.models.scheduler import AttemptStatus, ResourceClass
+    from avarch.adapters.sqlite.models import JobAttempt
+    from avarch.domain.jobs import AttemptStatus, ResourceClass
 
     attempt = JobAttempt(
         job_id=job_id,
@@ -594,6 +604,6 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine

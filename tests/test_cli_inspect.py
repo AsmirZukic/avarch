@@ -8,12 +8,13 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.config import load_config
 from avarch.models.probe import NormalizedProbe
-from avarch.probe import store_probe_result
 
 runner = CliRunner()
 
@@ -58,7 +59,7 @@ def test_inspect_does_not_execute_ffprobe(
     def fail_probe(_path: Path) -> dict[str, object]:
         raise AssertionError("inspect must not execute ffprobe")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(app, ["files", "show", "--file", str(media_file)])
 

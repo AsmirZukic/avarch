@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from avarch.vapoursynth import (
+from avarch.adapters.vapoursynth import (
     DEFAULT_VSPIPE_TIMEOUT_SECONDS,
     VspipeProcessError,
     build_bounded_output_excerpt,
@@ -34,7 +34,7 @@ def test_successful_check_returns_bounded_output(monkeypatch: pytest.MonkeyPatch
         calls.append({"command": command, **kwargs})
         return Result()
 
-    monkeypatch.setattr("avarch.vapoursynth.subprocess.run", fake_run)
+    monkeypatch.setattr("avarch.adapters.vapoursynth.subprocess.run", fake_run)
 
     result = check_vapoursynth_script(Path("/tmp/movie file.vpy"))
 
@@ -55,7 +55,7 @@ def test_check_passes_environment_to_subprocess(monkeypatch: pytest.MonkeyPatch)
         calls.append({"command": command, **kwargs})
         return Result()
 
-    monkeypatch.setattr("avarch.vapoursynth.subprocess.run", fake_run)
+    monkeypatch.setattr("avarch.adapters.vapoursynth.subprocess.run", fake_run)
 
     check_vapoursynth_script(Path("/tmp/movie.vpy"), env={"PYTHONPATH": "/workspace/scripts"})
 
@@ -71,7 +71,7 @@ def test_nonzero_exit_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(_command: list[str], **_kwargs: object) -> Result:
         return Result()
 
-    monkeypatch.setattr("avarch.vapoursynth.subprocess.run", fake_run)
+    monkeypatch.setattr("avarch.adapters.vapoursynth.subprocess.run", fake_run)
 
     with pytest.raises(VspipeProcessError) as exc_info:
         check_vapoursynth_script(Path("/tmp/movie.vpy"))

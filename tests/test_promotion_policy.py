@@ -1,5 +1,5 @@
+from avarch.application.planning import build_promotion_policy_hash, finalize_promotion_policy
 from avarch.models.promotion import PromotionMode, PromotionPolicy
-from avarch.planner import build_promotion_policy_hash, finalize_promotion_policy
 
 
 def test_policy_allows_three_promotion_modes() -> None:

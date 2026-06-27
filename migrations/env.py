@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
-from avarch.models import db as _db_models  # noqa: F401
+from avarch.adapters.sqlite import models as _db_models  # noqa: F401
 
 config = context.config
 

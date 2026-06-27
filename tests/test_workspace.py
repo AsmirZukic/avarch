@@ -6,18 +6,19 @@ from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 from typer.testing import CliRunner
 
-from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import Job, MediaFile
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.workspace import (
+from avarch.adapters.filesystem.workspace import (
     WorkspaceContext,
     WorkspaceCreateError,
     WorkspaceError,
     WorkspacePathError,
     create_workspace,
 )
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import Job, MediaFile
+from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.cli import app
+from avarch.config import load_config
+from avarch.domain.jobs import JobStage, JobStatus
 
 runner = CliRunner()
 
@@ -31,7 +32,7 @@ def test_workspace_derives_all_paths(tmp_path: Path) -> None:
     assert workspace.profiles_dir == tmp_path / ".avarch" / "profiles"
     assert workspace.scripts_dir == tmp_path / ".avarch" / "scripts"
     assert workspace.vpy_requirements_toml == tmp_path / ".avarch" / "vpy" / "requirements.toml"
-    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.db"
+    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db"
     assert workspace.work_dir == tmp_path / ".avarch" / "work"
 
 
@@ -51,7 +52,7 @@ def test_create_workspace_reports_permission_denied(
     def fail_mkdtemp(*_args: object, **_kwargs: object) -> str:
         raise PermissionError(13, "Permission denied", str(denied_path))
 
-    monkeypatch.setattr("avarch.workspace.tempfile.mkdtemp", fail_mkdtemp)
+    monkeypatch.setattr("avarch.adapters.filesystem.workspace.tempfile.mkdtemp", fail_mkdtemp)
 
     with pytest.raises(WorkspaceCreateError, match="Cannot initialize Avarch workspace"):
         create_workspace(tmp_path)
@@ -92,7 +93,7 @@ def test_init_creates_complete_workspace_layout(
     assert (tmp_path / ".avarch" / "scripts").is_dir()
     assert (tmp_path / ".avarch" / "vpy" / "requirements.toml").is_file()
     assert (tmp_path / ".avarch" / "vpy" / "environments").is_dir()
-    assert (tmp_path / ".avarch" / "data" / "avarch.db").is_file()
+    assert (tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db").is_file()
     assert (tmp_path / ".avarch" / "logs").is_dir()
     assert (tmp_path / ".avarch" / "work").is_dir()
     assert (tmp_path / ".avarch" / "tmp").is_dir()
@@ -194,7 +195,7 @@ def _init_scan_and_enqueue(workspace_root: Path, *, movie_name: str = "movie.mkv
                 profile_hash="profile",
                 source_fs_fingerprint=media_file.fs_fingerprint,
                 queue_key=f"queue:{movie_name}",
-                status=JobStatus.PENDING,
+                status=JobStatus.QUEUED,
                 stage=JobStage.ENCODE,
                 priority=0,
                 attempts=0,

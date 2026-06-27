@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from avarch.application.queue_identity import build_queue_key, planning_identity, resolve_profile
+from avarch.config import AppConfig
+
+
+@dataclass(frozen=True, slots=True)
+class EnqueueSummary:
+    selected: int
+    created: int
+    existing: int
+    missing_skipped: int
+
+
+@dataclass(frozen=True, slots=True)
+class EnqueueCandidate:
+    media_file_id: int
+    path: Path
+    missing: bool
+    fs_fingerprint: str
+    canonical_probe_id: int | None
+    canonical_probe_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanEnqueueItem:
+    id: int
+    plan_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanEnqueueSummary:
+    selected: int
+    created: int
+    skipped: int
+    already_queued: int
+    already_done: int
+    stale: int
+    plan_hashes: tuple[str, ...]
+
+
+class EnqueueStore(Protocol):
+    def enqueue_candidates(
+        self,
+        *,
+        media_file_ids: tuple[int, ...] | None,
+    ) -> list[EnqueueCandidate]: ...
+
+    def queue_job_exists(self, *, queue_key: str) -> bool: ...
+
+    def create_queue_job(
+        self,
+        *,
+        candidate: EnqueueCandidate,
+        profile_name: str,
+        profile_hash: str,
+        queue_key: str,
+        priority: int,
+        now: datetime,
+    ) -> None: ...
+
+    def select_plans_for_enqueue(
+        self,
+        *,
+        file_selectors: Sequence[Path] | None,
+        plan_selectors: Sequence[str] | None,
+        workspace_root: Path,
+        resolve_path: Callable[[Path], Path],
+    ) -> list[PlanEnqueueItem]: ...
+
+    def enqueue_plans(
+        self,
+        *,
+        plan_ids: tuple[int, ...],
+        priority: int,
+        now: datetime,
+    ) -> dict[str, int]: ...
+
+
+def enqueue_inventory(
+    store: EnqueueStore,
+    *,
+    config: AppConfig,
+    profile_name: str,
+    priority: int,
+    now: datetime,
+    media_file_ids: tuple[int, ...] | None = None,
+) -> EnqueueSummary:
+    resolved_profile = resolve_profile(config, profile_name)
+    identity = planning_identity(resolved_profile)
+    candidates = store.enqueue_candidates(media_file_ids=media_file_ids)
+    selected = 0
+    created = 0
+    existing = 0
+    missing_skipped = 0
+
+    for candidate in candidates:
+        if candidate.missing:
+            missing_skipped += 1
+            continue
+        selected += 1
+        queue_key = build_queue_key(
+            media_path=candidate.path,
+            source_fs_fingerprint=candidate.fs_fingerprint,
+            profile_name=resolved_profile.name,
+            profile_hash=identity.profile_hash,
+            probe_hash=candidate.canonical_probe_hash,
+            vapoursynth_identity_hash=identity.vapoursynth_identity_hash,
+            execution_identity_hash=identity.execution_identity_hash,
+        )
+        if store.queue_job_exists(queue_key=queue_key):
+            existing += 1
+            continue
+
+        store.create_queue_job(
+            candidate=candidate,
+            profile_name=resolved_profile.name,
+            profile_hash=identity.profile_hash,
+            queue_key=queue_key,
+            priority=priority,
+            now=now,
+        )
+        created += 1
+
+    return EnqueueSummary(
+        selected=selected,
+        created=created,
+        existing=existing,
+        missing_skipped=missing_skipped,
+    )
+
+
+def enqueue_selected_plans(
+    store: EnqueueStore,
+    *,
+    file_selectors: Sequence[Path] | None,
+    plan_selectors: Sequence[str] | None,
+    workspace_root: Path,
+    resolve_path: Callable[[Path], Path],
+    priority: int,
+    now: datetime,
+) -> PlanEnqueueSummary:
+    selected_plans = store.select_plans_for_enqueue(
+        file_selectors=file_selectors,
+        plan_selectors=plan_selectors,
+        workspace_root=workspace_root,
+        resolve_path=resolve_path,
+    )
+    summary = store.enqueue_plans(
+        plan_ids=tuple(plan.id for plan in selected_plans),
+        priority=priority,
+        now=now,
+    )
+    return PlanEnqueueSummary(
+        selected=len(selected_plans),
+        created=summary["created"],
+        skipped=summary["skipped"],
+        already_queued=summary["already_queued"],
+        already_done=summary["already_done"],
+        stale=summary["stale"],
+        plan_hashes=tuple(plan.plan_hash for plan in selected_plans),
+    )

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from avarch.execution import (
+from avarch.adapters.execution import (
     _validate_mux_temporary_path,  # pyright: ignore[reportPrivateUsage]
     build_av1an_command,
     build_ffmpeg_mux_command,
@@ -16,6 +16,7 @@ from avarch.execution import (
     serialize_encoder_arguments,
     should_resume_av1an,
 )
+from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.models.execution import ToolUnavailableError, WorkDirectoryConflictError
 from avarch.models.plan import (
     AudioPlan,
@@ -32,7 +33,6 @@ from avarch.models.plan import (
 )
 from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import DecodeSamplePolicy
-from avarch.scanner import create_file_snapshot
 
 
 @pytest.mark.parametrize(
@@ -287,9 +287,7 @@ def test_preflight_rejects_missing_ffmpeg_audio_decoder(
     _install_fake_tools(tmp_path, monkeypatch, ffmpeg_decoders=["aac"])
     plan = _sample_plan(tmp_path)
     assert plan.audio is not None
-    plan = plan.model_copy(
-        update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})}
-    )
+    plan = plan.model_copy(update={"audio": plan.audio.model_copy(update={"source_codec": "eac3"})})
 
     with pytest.raises(ToolUnavailableError, match="decoder.*eac3"):
         preflight_execution(plan)

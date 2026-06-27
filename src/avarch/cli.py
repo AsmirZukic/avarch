@@ -1,161 +1,221 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import os
-import shutil
 import signal
-import subprocess
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 import structlog
 import typer
-from pydantic import ValidationError
-from sqlalchemy import inspect
-from sqlalchemy.engine import Engine
-from sqlmodel import Session, col, select
 
 from avarch import __version__
-from avarch.config import (
-    WORKSPACE_CONFIG_TEXT,
-    AppConfig,
-    load_config,
-    resolve_data_dir,
-    resolve_database_url,
+from avarch.application.database_admin import (
+    DatabaseAdminError,
+    check_database_health,
+    current_database_revision,
 )
-from avarch.db import (
-    UnsupportedDatabaseSchemaError,
-    create_db_engine,
-    verify_database_revision,
+from avarch.application.enqueue import PlanEnqueueSummary, enqueue_selected_plans
+from avarch.application.file_views import (
+    inventory_file_detail,
+    list_inventory_files,
 )
-from avarch.db_migrations import get_current_revision, upgrade_database
-from avarch.execution import (
-    build_av1an_command,
-    build_ffmpeg_mux_command,
-    create_mux_temporary_path,
-    execute_plan,
+from avarch.application.inventory_scan import (
+    InventoryScanError,
+    InventoryScanResult,
+    scan_inventory_root,
 )
-from avarch.inventory import (
-    active_inventory_files_with_missing_or_stale_probe,
-    probe_is_missing_or_stale,
-    select_inventory_files,
-)
-from avarch.logging import configure_logging
-from avarch.models.db import (
-    Job,
-    JobAttempt,
-    JobEvent,
-    MediaFile,
-    MediaFileStatus,
-    MediaPlan,
-    ProbeResult,
-    PromotionRecord,
-    ValidationResult,
-)
-from avarch.models.execution import ExecutionError
-from avarch.models.plan import TranscodePlan
-from avarch.models.promotion import PromotionMode, PromotionStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.models.validation import ValidationReport
-from avarch.planner import (
-    PlanArtifactConflictError,
-    PlanningError,
-    build_plan,
-    load_planning_context,
-    write_plan_artifacts,
-)
-from avarch.probe import (
-    ProbeError,
-    format_probe_summary,
-    get_canonical_probe_result,
-    normalize_probe,
-    parse_normalized_probe_json,
-    run_ffprobe,
-    store_probe_result,
-)
-from avarch.profiles.models import EncodingProfile, ProfileDocument
-from avarch.profiles.registry import (
-    ProfileOrigin,
-    ProfileRegistry,
-    ProfileRegistryError,
-    UnknownProfileError,
-)
-from avarch.promoter import (
-    PromotionError,
-    PromotionPreflightResult,
-    execute_promotion,
-    recover_promotion,
-    validate_promotion_preflight,
-)
-from avarch.scanner import ScanError, ScanResult, scan_root, update_inventory
-from avarch.scheduler import (
-    MAX_CLI_LOG_TAIL_BYTES,
-    JobControlError,
-    SchedulerAlreadyRunningError,
-    SchedulerControlError,
-    cancel_job,
-    clear_queue,
-    cli_actor,
-    drain_scheduler,
-    execute_validation_job,
+from avarch.application.job_control import (
+    JobControlWorkflowError,
+    cancel_jobs,
     hold_job,
-    new_runner_id,
-    pause_scheduler,
     release_job,
-    resume_scheduler,
-    retry_job,
-    retry_queue,
-    run_scheduler,
-    scheduler_status,
-    stop_scheduler,
     update_job_priority,
 )
-from avarch.scheduler_lifecycle import (
+from avarch.application.job_views import (
+    WorkflowJobItem,
+    job_details,
+    latest_attempt,
+    list_jobs,
+    recent_failed_jobs,
+    workflow_jobs_for_plan_hashes,
+)
+from avarch.application.manual_validation import (
+    prepare_validation_for_job,
+    run_validation_job,
+)
+from avarch.application.plan_views import list_plans, plan_detail
+from avarch.application.planning import PlanningError
+from avarch.application.planning_workflow import (
+    PlanningWorkflowItemStatus,
+    create_transcode_plan_for_file,
+    create_transcode_plans,
+)
+from avarch.application.probe_summary import (
+    ProbeSummaryError,
+    format_probe_summary,
+    parse_normalized_probe_json,
+)
+from avarch.application.probing import ProbeWorkflowError, run_probe_workflow
+from avarch.application.profile_management import (
+    ProfileManagementError,
+    copy_builtin_profile,
+    list_available_profiles,
+    resolve_profile,
+)
+from avarch.application.promotion import (
+    PromotionWorkflowError,
+    execute_promotion,
+    promotion_preflight,
+    recover_promotion,
+)
+from avarch.application.queue_control import (
+    QueueControlError,
+    clear_queue,
+    has_running_cancel_requests,
+    retry_job,
+    retry_queue,
+)
+from avarch.application.scheduler_control import (
+    SchedulerControlWorkflowError,
+    drain_scheduler,
+    pause_scheduler,
+    resume_scheduler,
+    stop_scheduler,
+)
+from avarch.application.scheduler_process import (
     SchedulerLifecycleError,
-    SchedulerWorkspaceLock,
-    current_process_metadata,
     launch_detached,
     remove_metadata,
-    runtime_paths,
     terminate_scheduler,
     verified_status,
-    write_metadata,
+    workspace_lock,
+    write_current_metadata,
 )
-from avarch.validation import format_validation_report_summary
-from avarch.vapoursynth import (
+from avarch.application.scheduler_run import (
+    MAX_CLI_LOG_TAIL_BYTES,
+    SchedulerAlreadyRunningError,
+    SchedulerControlError,
+    cli_actor,
+    new_runner_id,
+    run_scheduler,
+)
+from avarch.application.scheduler_status import scheduler_status
+from avarch.application.validation_summary import format_validation_report_summary
+from avarch.application.vapoursynth_environment import (
+    VapourSynthEnvironmentWorkflowError,
+    VapourSynthPackageSearchUnavailableError,
+    check_vapoursynth_environment,
+    install_vapoursynth_package,
+    list_vapoursynth_packages,
+    list_vapoursynth_plugin_items,
+    remove_vapoursynth_package,
+    search_vapoursynth_packages,
+    sync_vapoursynth_environment,
+    vapoursynth_environment_info,
+)
+from avarch.application.vapoursynth_scaffolding import (
+    VapourSynthScaffoldError,
+    scaffold_filter_script,
+    scaffold_template_script,
+)
+from avarch.application.vapoursynth_validation import validate_vapoursynth_profile_scripts
+from avarch.application.workflow_run import verify_workflow_jobs
+from avarch.application.workflow_wait import (
+    wait_for_job_status,
+    wait_for_queue_clear,
+    wait_for_scheduler_inactive,
+)
+from avarch.application.workspace_management import (
+    WorkspaceManagementError,
+    discover_workspace_info,
+    initialize_workspace,
+    summarize_config,
+)
+from avarch.bootstrap import (
+    DatabaseSchemaUpgradeError,
+    PlanArtifactConflictError,
+    VapourSynthEnvironmentAdapters,
     VapourSynthGenerationError,
-    VapourSynthScriptPathError,
-    VspipeError,
-    check_vapoursynth_script,
-    generate_vapoursynth_script,
-    resolve_vapoursynth_filter,
-    resolve_vapoursynth_template,
-    resolve_workspace_script_path,
-    validate_script_syntax,
-)
-from avarch.vpy_env import (
-    VpyEnvironmentError,
     VpyRequirements,
-    add_python_package,
-    add_vsrepo_package,
-    build_runtime_identity,
-    load_requirements,
-    remove_python_package,
-    remove_vsrepo_package,
-    runtime_environment_variables,
-    sync_environment,
-)
-from avarch.vpy_plugins import VpyPluginInventoryError, list_vapoursynth_plugins
-from avarch.workspace import (
+    VspipeError,
     WorkspaceContext,
     WorkspaceError,
     create_workspace,
+    database_admin,
+    database_admin_errors,
+    db_session,
+    db_transaction,
+    enqueue_store,
+    ffprobe_collector,
+    file_view_store,
+    inventory_scan_workflow,
+    job_control_store,
+    job_view_store,
+    manual_validation_preparation_store,
+    manual_validation_worker,
+    plan_view_store,
+    planning_unit_of_work,
+    probe_store,
+    promotion_workflow,
+    queue_control_store,
+    queue_retry_store,
+    scheduler_control_store,
+    scheduler_process_controller,
+    scheduler_runner,
+    scheduler_status_store,
+    upgrade_database_schema,
+    vapoursynth_environment_adapters,
+    vapoursynth_planning_runtime,
+    workspace_database_url,
 )
+from avarch.cli_rendering import (
+    attempt_status_value,
+    display_optional,
+    display_optional_datetime,
+    echo_attempt_log_status,
+    echo_error_block,
+    echo_promotion_complete,
+    echo_promotion_preview,
+    event_type_value,
+    format_size,
+    job_control_label,
+    job_outcome_summary,
+    job_stage_value,
+    job_status_value,
+    truncate_line,
+)
+from avarch.config import (
+    AppConfig,
+    load_config,
+    resolve_data_dir,
+)
+from avarch.domain.jobs import (
+    JobStage,
+    JobStatus,
+    ManualValidationAction,
+)
+from avarch.logging import configure_logging
+from avarch.models.plan import TranscodePlan
+from avarch.models.promotion import PromotionMode
+from avarch.models.validation import ValidationReport
 
 log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class CliWorkspace:
+    config: Path
+    app_config: AppConfig
+    database_url: str
+    data_dir: Path
+    runtime_config: AppConfig
+    workspace: WorkspaceContext
+    workspace_root: Path
 
 app = typer.Typer(
     name="avarch",
@@ -222,21 +282,24 @@ def init(force: ForceOption = False) -> None:
 def _init_workspace(*, force: bool) -> None:
     workspace_root = _resolve_cli_path(Path(".")).resolve()
     try:
-        workspace = create_workspace(workspace_root, force=force)
-    except WorkspaceError as exc:
+        result = initialize_workspace(
+            workspace_root=workspace_root,
+            force=force,
+            create_workspace_func=create_workspace,
+            workspace_errors=(WorkspaceError,),
+        )
+    except WorkspaceManagementError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
-    workspace.config_toml.write_text(WORKSPACE_CONFIG_TEXT, encoding="utf-8")
-    app_config = load_config(workspace.config_toml)
+    workspace = result.workspace
+    app_config = result.config
     configure_logging(app_config.logging.level, app_config.logging.format)
 
-    database_url = resolve_database_url(app_config, workspace.config_toml)
+    database_url = workspace_database_url(app_config, workspace.config_toml)
     _upgrade_database_or_exit(database_url)
 
-    profiles = ", ".join(
-        profile.name for profile in ProfileRegistry.from_config(app_config).list_profiles()
-    )
+    profiles = ", ".join(result.profile_names)
 
     typer.echo(f"Workspace: {workspace.root}")
     typer.echo(f"Config: {workspace.config_toml}")
@@ -247,26 +310,24 @@ def _init_workspace(*, force: bool) -> None:
 
 @db_app.command("upgrade")
 def db_upgrade() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     log.info("database_upgraded", database_url=database_url)
     typer.echo("Database upgraded")
 
 
 @db_app.command("current")
 def db_current() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    database_url = cli_workspace.database_url
     try:
-        engine = create_db_engine(database_url)
-        verify_database_revision(engine)
-    except UnsupportedDatabaseSchemaError as exc:
+        revision = current_database_revision(
+            database_admin(database_url),
+            admin_errors=database_admin_errors(),
+        )
+    except DatabaseAdminError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
-    revision = get_current_revision(database_url)
     typer.echo(revision or "unknown")
 
 
@@ -305,7 +366,7 @@ def doctor(
     _doctor_pass("data_dir_exists")
     typer.echo("PASS data_dir_exists")
 
-    database_url = resolve_database_url(app_config, config)
+    database_url = workspace_database_url(app_config, config)
     if not database_url.startswith("sqlite:///"):
         _doctor_fail("database_url_sqlite", "database URL is not SQLite")
         typer.echo("FAIL database_url_sqlite")
@@ -313,10 +374,12 @@ def doctor(
     _doctor_pass("database_url_sqlite")
     typer.echo("PASS database_url_sqlite")
 
-    engine = create_db_engine(database_url)
     try:
-        with engine.connect():
-            pass
+        health = check_database_health(
+            database_admin(database_url),
+            required_tables={"appmeta", "mediafile"},
+            admin_errors=(Exception,),
+        )
     except Exception as exc:
         _doctor_fail("database_connection", exc.__class__.__name__)
         typer.echo("FAIL database_connection")
@@ -324,11 +387,8 @@ def doctor(
     _doctor_pass("database_connection")
     typer.echo("PASS database_connection")
 
-    tables = set(inspect(engine).get_table_names())
-    required_tables = {"appmeta", "mediafile"}
-    missing_tables = required_tables - tables
-    if missing_tables:
-        missing = ", ".join(sorted(missing_tables))
+    if health.missing_tables:
+        missing = ", ".join(sorted(health.missing_tables))
         _doctor_fail("required_tables", f"missing table: {missing}")
         typer.echo("FAIL required_tables")
         raise typer.Exit(1)
@@ -341,8 +401,9 @@ def doctor(
         raise typer.Exit(1)
     _doctor_pass("app_version")
     typer.echo("PASS app_version")
-    requirements = _doctor_vpy_requirements(config)
-    runtime_identity = build_runtime_identity(requirements)
+    adapters = _vapoursynth_environment_adapters()
+    requirements = _doctor_vpy_requirements(config, adapters=adapters)
+    runtime_identity = adapters.build_runtime_identity(requirements)
     typer.echo(f"Image digest: {runtime_identity.avarch_image_digest}")
     typer.echo(f"Architecture: {runtime_identity.platform}")
     typer.echo(f"Python: {runtime_identity.python_version}")
@@ -353,38 +414,31 @@ def doctor(
 def scan(
     roots: RootsArgument = None,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace_root = _workspace_root_for_storage(config)
+    cli_workspace = _load_cli_workspace()
+    app_config = cli_workspace.app_config
+    database_url = cli_workspace.database_url
+    workspace_root = cli_workspace.workspace_root
 
     roots_to_scan = list(roots or app_config.scanner.roots)
     if not roots_to_scan:
         typer.echo("No scan roots provided or configured.")
         raise typer.Exit(1)
 
-    engine = create_db_engine(database_url)
-    results: list[ScanResult] = []
+    scan_workflow = inventory_scan_workflow(database_url=database_url)
+    results: list[InventoryScanResult] = []
     for root in roots_to_scan:
         root = _resolve_cli_path(root)
         log.info("scan_started", root=str(root))
         try:
-            snapshots = scan_root(
-                root,
-                extensions=app_config.scanner.extensions,
-                exclude_directories=app_config.scanner.exclude_directories,
+            result = scan_inventory_root(
+                scan_workflow,
+                root=root,
+                config=app_config,
+                workspace_root=workspace_root,
+                scanned_at=_utc_now(),
             )
-            with Session(engine) as session, session.begin():
-                result = update_inventory(
-                    session,
-                    root=root,
-                    snapshots=snapshots,
-                    scanned_at=_utc_now(),
-                    workspace_root=workspace_root,
-                )
             results.append(result)
-        except ScanError as exc:
+        except InventoryScanError as exc:
             log.error("scan_failed", root=str(root), reason=str(exc))
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
@@ -410,32 +464,16 @@ def files_list(
         typer.Option("--changed", help="Show added, changed, and missing files only."),
     ] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
 
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        statement = select(MediaFile).order_by(MediaFile.path)
-        media_files = list(session.exec(statement).all())
-
-    if changed:
-        media_files = [
-            media_file
-            for media_file in media_files
-            if _status_value(media_file.status)
-            in {
-                MediaFileStatus.ADDED.value,
-                MediaFileStatus.CHANGED.value,
-                MediaFileStatus.MISSING.value,
-            }
-        ]
+    with db_session(database_url) as session:
+        media_files = list_inventory_files(file_view_store(session), changed_only=changed)
 
     typer.echo("STATUS   SIZE        PATH")
     for media_file in media_files:
         typer.echo(
-            f"{_status_value(media_file.status):<8} {_format_size(media_file.size_bytes):>10}  "
+            f"{media_file.status:<8} {format_size(media_file.size_bytes):>10}  "
             f"{media_file.path}"
         )
 
@@ -444,51 +482,42 @@ def files_list(
 def files_show(
     file: Annotated[Path, typer.Option("--file", help="Tracked media file to inspect.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace_root = cli_workspace.workspace_root
 
-    workspace_root = _workspace_root_for_storage(config)
-    if workspace_root is None:
-        workspace_root = Path.cwd()
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        selection = select_inventory_files(
-            session,
-            file_selectors=[file],
+    with db_session(database_url) as session:
+        media_file = inventory_file_detail(
+            file_view_store(session),
+            file_selector=file,
             workspace_root=workspace_root,
             resolve_path=_resolve_media_path,
-            active_only=False,
         )
-        if selection.missing or not selection.selected:
-            _echo_untracked_file()
-            raise typer.Exit(1)
-        media_file = selection.selected[0]
-        if media_file.id is None:
-            typer.echo("File is not present in the media inventory.")
-            raise typer.Exit(1)
-        probe_result = get_canonical_probe_result(session, media_file)
-        current_plan = _current_plan_for_file(session, media_file)
+    if media_file is None:
+        _echo_untracked_file()
+        raise typer.Exit(1)
 
-    typer.echo(f"File:       {_display_media_path(media_file, workspace_root)}")
-    typer.echo(f"Status:     {_status_value(media_file.status)}")
-    typer.echo(f"Size:       {_format_size(media_file.size_bytes)}")
+    typer.echo(f"File:       {_display_media_path_value(media_file.path, workspace_root)}")
+    typer.echo(f"Status:     {media_file.status}")
+    typer.echo(f"Size:       {format_size(media_file.size_bytes)}")
     typer.echo(f"Fingerprint:{media_file.fs_fingerprint}")
-    typer.echo(f"Probe:      {probe_result.probe_hash if probe_result is not None else '-'}")
-    typer.echo(f"Plan:       {current_plan.plan_hash if current_plan is not None else '-'}")
-    if probe_result is not None:
+    typer.echo(f"Probe:      {media_file.probe_hash if media_file.probe_hash is not None else '-'}")
+    current_plan_hash = (
+        media_file.current_plan_hash if media_file.current_plan_hash is not None else "-"
+    )
+    typer.echo(f"Plan:       {current_plan_hash}")
+    if media_file.normalized_probe_json is not None and media_file.probe_hash is not None:
         try:
-            normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
-        except ProbeError as exc:
+            normalized_probe = parse_normalized_probe_json(media_file.normalized_probe_json)
+        except ProbeSummaryError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
         typer.echo("")
         typer.echo(
             format_probe_summary(
-                _absolute_media_path(media_file, workspace_root),
+                _absolute_media_path_value(media_file.path, workspace_root),
                 normalized_probe,
-                probe_result.probe_hash,
+                media_file.probe_hash,
             )
         )
 
@@ -505,12 +534,11 @@ def enqueue(
     ] = None,
     priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    config = cli_workspace.config
+    database_url = cli_workspace.database_url
 
-    selected, summary, _plan_hashes = _enqueue_selected_plans(
+    summary = _enqueue_selected_plans(
         config=config,
         database_url=database_url,
         file_selectors=files,
@@ -518,15 +546,15 @@ def enqueue(
         priority=priority,
     )
     _echo_pipeline_summary(
-        selected=selected,
-        processed=summary["created"],
-        skipped=summary["skipped"],
+        selected=summary.selected,
+        processed=summary.created,
+        skipped=summary.skipped,
         failed=0,
     )
-    if summary["already_done"]:
-        typer.echo(f"already-completed: {summary['already_done']}")
-    if summary["already_queued"]:
-        typer.echo(f"already-queued: {summary['already_queued']}")
+    if summary.already_done:
+        typer.echo(f"already-completed: {summary.already_done}")
+    if summary.already_queued:
+        typer.echo(f"already-queued: {summary.already_queued}")
 
 
 @plans_app.command("list")
@@ -536,33 +564,15 @@ def plans_list(
         typer.Option("--current/--all", help="Show only current valid plans by default."),
     ] = True,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        statement = select(MediaPlan).order_by(
-            col(MediaPlan.created_at).asc(),
-            col(MediaPlan.id).asc(),
-        )
-        if current:
-            statement = statement.where(
-                MediaPlan.is_current == True,  # noqa: E712
-                MediaPlan.is_valid == True,  # noqa: E712
-            )
-        rows = list(session.exec(statement).all())
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    with db_session(database_url) as session:
+        rows = list_plans(plan_view_store(session), current_only=current)
 
     typer.echo("ID  CURRENT  PROFILE          PLAN HASH                         FILE")
     for plan in rows:
-        media_file = media_by_id.get(plan.media_file_id)
-        filename = Path(media_file.path).name if media_file is not None else "<missing>"
-        current_label = "yes" if plan.is_current and plan.is_valid else "no"
+        filename = Path(plan.media_path).name if plan.media_path is not None else "<missing>"
+        current_label = "yes" if plan.current else "no"
         typer.echo(
             f"{plan.id:<3} {current_label:<8} {plan.profile_name:<15} "
             f"{plan.plan_hash[:32]:<32} {filename}"
@@ -573,22 +583,18 @@ def plans_list(
 def plans_show(
     plan_id: Annotated[str, typer.Argument(help="Plan id or plan hash.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        plan = _find_plan(session, plan_id)
-        if plan is None:
-            typer.echo(f"Plan not found: {plan_id}")
-            raise typer.Exit(1)
-        media_file = session.get(MediaFile, plan.media_file_id)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    with db_session(database_url) as session:
+        plan = plan_detail(plan_view_store(session), selector=plan_id)
+    if plan is None:
+        typer.echo(f"Plan not found: {plan_id}")
+        raise typer.Exit(1)
 
     typer.echo(f"Plan {plan.id}")
-    typer.echo(f"File:       {media_file.path if media_file is not None else '<missing>'}")
+    typer.echo(f"File:       {plan.media_path if plan.media_path is not None else '<missing>'}")
     typer.echo(f"Profile:    {plan.profile_name}")
-    typer.echo(f"Current:    {'yes' if plan.is_current and plan.is_valid else 'no'}")
+    typer.echo(f"Current:    {'yes' if plan.current else 'no'}")
     typer.echo(f"Plan hash:  {plan.plan_hash}")
     typer.echo(f"Probe hash: {plan.probe_hash}")
     typer.echo(f"Output:     {plan.output_path}")
@@ -614,12 +620,10 @@ def run_queue(
         typer.Option("--mode", help="Internal scheduler launch mode.", hidden=True),
     ] = "foreground",
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
-    workspace = _workspace_for_config(config)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    runtime_config = cli_workspace.runtime_config
+    workspace = cli_workspace.workspace
 
     if detached and not managed_child:
         child_argv = ["scheduler", "run"]
@@ -627,6 +631,7 @@ def run_queue(
             child_argv.append("--resume")
         try:
             metadata = launch_detached(
+                scheduler_process_controller(),
                 workspace=workspace,
                 argv=child_argv,
             )
@@ -647,26 +652,33 @@ def run_queue(
     typer.echo("")
     _echo_queue_counts(database_url)
 
-    paths = runtime_paths(workspace)
-    lock = SchedulerWorkspaceLock(paths.lock_path)
+    process_controller = scheduler_process_controller()
+    lock = workspace_lock(process_controller, workspace=workspace)
     runner_id = new_runner_id()
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
     def request_stop(_signum: int, _frame: object) -> None:
-        engine = create_db_engine(database_url)
         try:
-            with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason="SIGTERM")
-        except SchedulerControlError:
+            with db_transaction(database_url) as session:
+                stop_scheduler(
+                    scheduler_control_store(session),
+                    now=_utc_now(),
+                    reason="SIGTERM",
+                )
+        except SchedulerControlWorkflowError:
             pass
 
     try:
         lock.acquire()
-        metadata = current_process_metadata(workspace=workspace, mode=mode)
-        write_metadata(paths, metadata)
+        write_current_metadata(process_controller, workspace=workspace, mode=mode)
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
-            run_scheduler(config=runtime_config, runner_id=runner_id, resume=resume)
+            run_scheduler(
+                scheduler_runner(),
+                config=runtime_config,
+                runner_id=runner_id,
+                resume=resume,
+            )
         )
     except SchedulerLifecycleError as exc:
         typer.echo(str(exc))
@@ -678,7 +690,7 @@ def run_queue(
         raise typer.Exit(130) from exc
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
-        remove_metadata(paths)
+        remove_metadata(process_controller, workspace=workspace)
         lock.release()
 
     typer.echo("")
@@ -707,18 +719,14 @@ def queue_retry_command(
     confirm: Annotated[bool, typer.Option("--confirm", help="Apply retry updates.")] = False,
 ) -> None:
     del dry_run
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    runtime_config = cli_workspace.runtime_config
 
-    engine = create_db_engine(database_url)
     try:
-        with Session(engine) as session, session.begin():
+        with db_transaction(database_url) as session:
             summary = retry_queue(
-                session,
-                config=runtime_config,
+                queue_retry_store(session, config=runtime_config),
                 actor=cli_actor(),
                 now=_utc_now(),
                 job_ids=set(job_id or []) or None,
@@ -728,7 +736,7 @@ def queue_retry_command(
                 all_jobs=all_jobs,
                 confirm=confirm,
             )
-    except JobControlError as exc:
+    except QueueControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -751,20 +759,21 @@ def queue_retry_command(
 def pause(
     reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace = _workspace_for_config(config)
-    if verified_status(workspace).metadata is None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace = cli_workspace.workspace
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is None:
         typer.echo("No live scheduler process exists.")
         raise typer.Exit(1)
 
-    engine = create_db_engine(database_url)
     try:
-        with Session(engine) as session, session.begin():
-            pause_scheduler(session, now=_utc_now(), reason=reason)
-    except SchedulerControlError as exc:
+        with db_transaction(database_url) as session:
+            pause_scheduler(
+                scheduler_control_store(session),
+                now=_utc_now(),
+                reason=reason,
+            )
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -773,20 +782,17 @@ def pause(
 
 @scheduler_app.command("resume")
 def resume_scheduler_command() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace = _workspace_for_config(config)
-    if verified_status(workspace).metadata is None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace = cli_workspace.workspace
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is None:
         typer.echo("No live scheduler process exists.")
         raise typer.Exit(1)
 
-    engine = create_db_engine(database_url)
     try:
-        with Session(engine) as session, session.begin():
-            resume_scheduler(session, now=_utc_now())
-    except SchedulerControlError as exc:
+        with db_transaction(database_url) as session:
+            resume_scheduler(scheduler_control_store(session), now=_utc_now())
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Scheduler resumed")
@@ -798,19 +804,20 @@ def drain_scheduler_command(
     wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     try:
-        with Session(engine) as session, session.begin():
-            drain_scheduler(session, now=_utc_now(), reason=reason)
-    except SchedulerControlError as exc:
+        with db_transaction(database_url) as session:
+            drain_scheduler(
+                scheduler_control_store(session),
+                now=_utc_now(),
+                reason=reason,
+            )
+    except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Scheduler drain requested")
-    if wait and not _wait_for_scheduler_inactive(engine, timeout_seconds=timeout_seconds):
+    if wait and not _wait_for_scheduler_inactive(database_url, timeout_seconds=timeout_seconds):
         typer.echo("Timed out waiting for scheduler drain.")
         raise typer.Exit(1)
 
@@ -825,47 +832,45 @@ def stop_scheduler_command(
     ] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace = _workspace_for_config(config)
-    engine = create_db_engine(database_url)
-    live = verified_status(workspace).metadata is not None
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace = cli_workspace.workspace
+    live = verified_status(scheduler_process_controller(), workspace=workspace).metadata is not None
     if live and not force:
         try:
-            with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason=reason)
-        except SchedulerControlError as exc:
+            with db_transaction(database_url) as session:
+                stop_scheduler(
+                    scheduler_control_store(session),
+                    now=_utc_now(),
+                    reason=reason,
+                )
+        except SchedulerControlWorkflowError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
     stopped = terminate_scheduler(
+        scheduler_process_controller(),
         workspace=workspace,
         force=force,
         timeout_seconds=timeout_seconds if wait else 0.1,
     )
     typer.echo("Scheduler stopped" if stopped or not live else "Scheduler stop requested")
-    if wait and verified_status(workspace).metadata is not None:
+    if (
+        wait
+        and verified_status(scheduler_process_controller(), workspace=workspace).metadata
+        is not None
+    ):
         typer.echo("Timed out waiting for scheduler stop.")
         raise typer.Exit(1)
 
 
 @scheduler_app.command("status")
 def scheduler_status_command() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace = _workspace_for_config(config)
-    process_status = verified_status(workspace)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        status = scheduler_status(session, now=_utc_now())
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace = cli_workspace.workspace
+    process_status = verified_status(scheduler_process_controller(), workspace=workspace)
+    with db_session(database_url) as session:
+        status = scheduler_status(scheduler_status_store(session), now=_utc_now())
     typer.echo(f"Scheduler: {process_status.state}")
     if process_status.metadata is not None:
         typer.echo(f"PID:       {process_status.metadata.pid}")
@@ -891,28 +896,29 @@ def scheduler_status_command() -> None:
         typer.echo("")
         typer.echo("Active:")
         for job in status.active_jobs:
-            media_file = media_by_id.get(job.media_file_id)
-            path = Path(media_file.path).name if media_file is not None else "<missing>"
-            typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
+            job_id = str(job.job_id) if job.job_id is not None else "-"
+            typer.echo(f"  {job_id:<3} {job_stage_value(job.stage):<9} {job.file_name}")
 
 
 @scheduler_app.command("restart")
 def scheduler_restart_command(
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    workspace = _workspace_for_config(config)
-    engine = create_db_engine(database_url)
-    if verified_status(workspace).metadata is not None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace = cli_workspace.workspace
+    if verified_status(scheduler_process_controller(), workspace=workspace).metadata is not None:
         try:
-            with Session(engine) as session, session.begin():
-                stop_scheduler(session, now=_utc_now(), reason="restart")
-        except SchedulerControlError:
+            with db_transaction(database_url) as session:
+                stop_scheduler(
+                    scheduler_control_store(session),
+                    now=_utc_now(),
+                    reason="restart",
+                )
+        except SchedulerControlWorkflowError:
             pass
         if not terminate_scheduler(
+            scheduler_process_controller(),
             workspace=workspace,
             force=False,
             timeout_seconds=timeout_seconds,
@@ -920,7 +926,11 @@ def scheduler_restart_command(
             typer.echo("Unable to stop existing scheduler.")
             raise typer.Exit(1)
     try:
-        metadata = launch_detached(workspace=workspace, argv=["scheduler", "run"])
+        metadata = launch_detached(
+            scheduler_process_controller(),
+            workspace=workspace,
+            argv=["scheduler", "run"],
+        )
     except SchedulerLifecycleError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
@@ -936,10 +946,8 @@ def jobs_list(
     profile: Annotated[str | None, typer.Option("--profile", help="Filter by profile.")] = None,
     limit: Annotated[int | None, typer.Option("--limit", help="Maximum rows to print.")] = None,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
 
     try:
         status_filters = _parse_job_statuses(status)
@@ -948,88 +956,61 @@ def jobs_list(
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        statement = select(Job).order_by(
-            col(Job.priority).desc(),
-            col(Job.created_at).asc(),
-            col(Job.id).asc(),
+    with db_session(database_url) as session:
+        rows = list_jobs(
+            job_view_store(session),
+            statuses=status_filters,
+            stages=stage_filters,
+            profile=profile,
+            limit=limit,
         )
-        if status_filters is not None:
-            statement = statement.where(col(Job.status).in_(status_filters))
-        if stage_filters is not None:
-            statement = statement.where(col(Job.stage).in_(stage_filters))
-        if profile is not None:
-            statement = statement.where(Job.profile_name == profile)
-        if limit is not None:
-            statement = statement.limit(limit)
-        rows = list(session.exec(statement).all())
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
 
     typer.echo("ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE")
     for job in rows:
-        media_file = media_by_id.get(job.media_file_id)
-        path = Path(media_file.path).name if media_file is not None else "<missing>"
-        control = _job_control_label(job)
+        path = job.file_name
+        control = job_control_label(job)
         typer.echo(
-            f"{job.id:<3} {_job_status_value(job.status):<10} {_job_stage_value(job.stage):<9} "
+            f"{job.id:<3} {job_status_value(job.status):<10} {job_stage_value(job.stage):<9} "
             f"{job.priority:>3}  {job.attempts:>3}  {control:<7}  {job.profile_name:<15}  {path}"
         )
-        if _job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
-            typer.echo(f"    error: {_truncate_line(job.last_error_message)}")
+        outcome = job_outcome_summary(job, path=path)
+        if outcome is not None:
+            typer.echo(f"    {outcome}")
+        elif job_status_value(job.status) == JobStatus.FAILED.value and job.last_error_message:
+            typer.echo(f"    error: {truncate_line(job.last_error_message)}")
 
 
 @jobs_app.command("show")
 def jobs_show(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
 
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
+    with db_session(database_url) as session:
+        job = job_details(job_view_store(session), job_id=job_id)
         if job is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
-        media_file = session.get(MediaFile, job.media_file_id)
-        attempts = list(
-            session.exec(
-                select(JobAttempt)
-                .where(JobAttempt.job_id == job_id)
-                .order_by(col(JobAttempt.attempt_number).asc())
-            ).all()
-        )
-        events = list(
-            session.exec(
-                select(JobEvent).where(JobEvent.job_id == job_id).order_by(col(JobEvent.id).asc())
-            ).all()
-        )
 
     typer.echo(f"Job {job_id}")
     typer.echo("")
-    typer.echo(f"Source:       {media_file.path if media_file is not None else '<missing>'}")
+    typer.echo(f"Source:       {job.source_path}")
     typer.echo(f"Profile:      {job.profile_name}")
     typer.echo(f"Profile hash: {job.profile_hash}")
     typer.echo(f"Queue key:    {job.queue_key}")
     typer.echo(f"Priority:     {job.priority}")
-    typer.echo(f"Status:       {_job_status_value(job.status)}")
-    typer.echo(f"Stage:        {_job_stage_value(job.stage)}")
+    typer.echo(f"Status:       {job_status_value(job.status)}")
+    typer.echo(f"Stage:        {job_stage_value(job.stage)}")
     typer.echo(f"Claimed by:   {job.claimed_by or '-'}")
     typer.echo(f"Attempts:     {job.attempts}")
-    typer.echo(f"Created:      {_display_optional_datetime(job.created_at)}")
-    typer.echo(f"Started:      {_display_optional_datetime(job.started_at)}")
-    typer.echo(f"Finished:     {_display_optional_datetime(job.finished_at)}")
+    typer.echo(f"Created:      {display_optional_datetime(job.created_at)}")
+    typer.echo(f"Started:      {display_optional_datetime(job.started_at)}")
+    typer.echo(f"Finished:     {display_optional_datetime(job.finished_at)}")
     typer.echo("")
     typer.echo("Control:")
-    typer.echo(f"  cancel:     {_display_optional_datetime(job.cancel_requested_at)}")
-    typer.echo(f"  hold:       {_display_optional_datetime(job.hold_requested_at)}")
+    typer.echo(f"  cancel:     {display_optional_datetime(job.cancel_requested_at)}")
+    typer.echo(f"  hold:       {display_optional_datetime(job.hold_requested_at)}")
     typer.echo("")
     typer.echo("Artifacts:")
     typer.echo(f"  probe hash: {job.probe_hash or '-'}")
@@ -1041,20 +1022,20 @@ def jobs_show(
     if job.last_error_message:
         typer.echo("")
         typer.echo("Last error:")
-        _echo_error_block(job.last_error_type, job.last_error_message, indent="  ")
+        echo_error_block(job.last_error_type, job.last_error_message, indent="  ")
     typer.echo("")
     typer.echo("Attempts:")
-    for attempt in attempts:
+    for attempt in job.attempt_history:
         typer.echo(
-            f"  {attempt.attempt_number:<3} {_job_stage_value(attempt.stage):<9} "
-            f"{_attempt_status_value(attempt.status):<11} {attempt.runner_id}"
+            f"  {attempt.attempt_number:<3} {job_stage_value(attempt.stage):<9} "
+            f"{attempt_status_value(attempt.status):<11} {attempt.runner_id}"
         )
     typer.echo("")
     typer.echo("Events:")
-    for event in events:
+    for event in job.events:
         typer.echo(
-            f"  {event.id:<3} {_display_optional_datetime(event.created_at)} "
-            f"{_event_type_value(event.event_type):<16} {event.actor}"
+            f"  {event.id:<3} {display_optional_datetime(event.created_at)} "
+            f"{event_type_value(event.event_type):<16} {event.actor}"
         )
 
 
@@ -1068,17 +1049,14 @@ def jobs_logs(
     ] = 16 * 1024,
 ) -> None:
     tail_bytes = min(tail_bytes, MAX_CLI_LOG_TAIL_BYTES)
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        statement = select(JobAttempt).where(JobAttempt.job_id == job_id)
-        if attempt_number is not None:
-            statement = statement.where(JobAttempt.attempt_number == attempt_number)
-        statement = statement.order_by(col(JobAttempt.attempt_number).desc())
-        attempt = session.exec(statement).first()
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    with db_session(database_url) as session:
+        attempt = latest_attempt(
+            job_view_store(session),
+            job_id=job_id,
+            attempt_number=attempt_number,
+        )
     if attempt is None:
         typer.echo("No matching attempt.")
         raise typer.Exit(1)
@@ -1095,41 +1073,26 @@ def jobs_cancel(
     wait: Annotated[bool, typer.Option("--wait", help="Wait for cancellation to settle.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     try:
-        with Session(engine) as session, session.begin():
-            if running:
-                running_jobs = list(
-                    session.exec(select(Job).where(Job.status == JobStatus.RUNNING)).all()
-                )
-                for job in running_jobs:
-                    if job.id is not None:
-                        cancel_job(
-                            session,
-                            job_id=job.id,
-                            actor=cli_actor(),
-                            reason=reason,
-                            now=_utc_now(),
-                        )
-                job_count = len(running_jobs)
-            elif job_id is not None:
-                cancel_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
-                job_count = 1
-            else:
-                typer.echo("Provide JOB_ID or --running.")
-                raise typer.Exit(1)
-    except JobControlError as exc:
+        with db_transaction(database_url) as session:
+            job_count = cancel_jobs(
+                job_control_store(session),
+                job_id=job_id,
+                running=running,
+                actor=cli_actor(),
+                reason=reason,
+                now=_utc_now(),
+            )
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"Job cancellation requested: {job_count}")
     if (
         wait
         and job_id is not None
-        and not _wait_for_job_status(engine, job_id, JobStatus.CANCELED, timeout_seconds)
+        and not _wait_for_job_status(database_url, job_id, JobStatus.CANCELLED, timeout_seconds)
     ):
         typer.echo("Timed out waiting for job cancellation.")
         raise typer.Exit(1)
@@ -1140,15 +1103,18 @@ def jobs_hold(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
     reason: Annotated[str | None, typer.Option("--reason")] = None,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     try:
-        with Session(engine) as session, session.begin():
-            hold_job(session, job_id=job_id, actor=cli_actor(), reason=reason, now=_utc_now())
-    except JobControlError as exc:
+        with db_transaction(database_url) as session:
+            hold_job(
+                job_control_store(session),
+                job_id=job_id,
+                actor=cli_actor(),
+                reason=reason,
+                now=_utc_now(),
+            )
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job hold requested")
@@ -1158,13 +1124,15 @@ def jobs_hold(
 def jobs_release(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
-        changed = release_job(session, job_id=job_id, actor=cli_actor(), now=_utc_now())
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    with db_transaction(database_url) as session:
+        changed = release_job(
+            job_control_store(session),
+            job_id=job_id,
+            actor=cli_actor(),
+            now=_utc_now(),
+        )
     typer.echo("Job released" if changed else "No hold request exists")
 
 
@@ -1173,18 +1141,14 @@ def jobs_retry(
     job_id: Annotated[int | None, typer.Argument(help="Job id.")] = None,
     failed: Annotated[bool, typer.Option("--failed", help="Retry all failed jobs.")] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    runtime_config = cli_workspace.runtime_config
     try:
-        with Session(engine) as session, session.begin():
+        with db_transaction(database_url) as session:
             if failed:
                 summary = retry_queue(
-                    session,
-                    config=runtime_config,
+                    queue_retry_store(session, config=runtime_config),
                     actor=cli_actor(),
                     now=_utc_now(),
                     statuses={JobStatus.FAILED},
@@ -1197,16 +1161,15 @@ def jobs_retry(
                 typer.echo("Provide JOB_ID or --failed.")
                 raise typer.Exit(1)
             next_stage = retry_job(
-                session,
+                queue_retry_store(session, config=runtime_config),
                 job_id=job_id,
-                config=runtime_config,
                 actor=cli_actor(),
                 now=_utc_now(),
             )
-    except JobControlError as exc:
+    except QueueControlError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
-    typer.echo(f"Job retry prepared at {_job_stage_value(next_stage)}")
+    typer.echo(f"Job retry prepared at {job_stage_value(next_stage)}")
 
 
 @jobs_app.command("priority")
@@ -1214,21 +1177,18 @@ def jobs_priority(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
     value: Annotated[int, typer.Argument(help="New priority.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     try:
-        with Session(engine) as session, session.begin():
+        with db_transaction(database_url) as session:
             update_job_priority(
-                session,
+                job_control_store(session),
                 job_id=job_id,
                 priority=value,
                 actor=cli_actor(),
                 now=_utc_now(),
             )
-    except JobControlError as exc:
+    except JobControlWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Job priority updated")
@@ -1240,22 +1200,19 @@ def jobs_clear(
     failed: Annotated[bool, typer.Option("--failed", help="Clear failed jobs.")] = False,
     confirm: Annotated[bool, typer.Option("--confirm", help="Apply clear updates.")] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     statuses: set[JobStatus] = set()
     if completed:
-        statuses.add(JobStatus.COMPLETED)
+        statuses.add(JobStatus.PROMOTED)
     if failed:
         statuses.add(JobStatus.FAILED)
     if not statuses:
         typer.echo("Select --completed or --failed.")
         raise typer.Exit(1)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
+    with db_transaction(database_url) as session:
         summary = clear_queue(
-            session,
+            queue_control_store(session),
             actor=cli_actor(),
             now=_utc_now(),
             statuses=statuses,
@@ -1271,55 +1228,35 @@ def jobs_clear(
 def jobs_validate(
     job_id: Annotated[int, typer.Argument(help="Job id.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-        if job is None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    runtime_config = cli_workspace.runtime_config
+    with db_transaction(database_url) as session:
+        preparation = prepare_validation_for_job(
+            manual_validation_preparation_store(session),
+            job_id=job_id,
+            now=_utc_now(),
+        )
+        if preparation is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
-        if job.status == JobStatus.RUNNING:
+        if preparation.action == ManualValidationAction.REJECT_RUNNING:
             typer.echo("Validation cannot run while the job is running.")
             raise typer.Exit(1)
-        existing = _canonical_validation(session, job)
-        if (
-            job.status == JobStatus.VALIDATED
-            and job.stage == JobStage.PROMOTE
-            and existing is not None
-            and existing.passed
-        ):
-            report = ValidationReport.model_validate_json(existing.details_json)
+        if preparation.action == ManualValidationAction.REUSE_EXISTING:
+            assert preparation.existing_validation_details_json is not None
+            report = ValidationReport.model_validate_json(
+                preparation.existing_validation_details_json
+            )
             typer.echo(format_validation_report_summary(report, reused=True))
             return
-        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
-            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
-        )
-        was_failed = job.status == JobStatus.FAILED
-        if not eligible:
+        if preparation.action == ManualValidationAction.REJECT_INELIGIBLE:
             typer.echo("Job is not eligible for validation.")
             raise typer.Exit(1)
 
-    if was_failed:
-        with Session(engine) as session, session.begin():
-            stored = session.get(Job, job_id)
-            if stored is None:
-                typer.echo("Job disappeared before validation could run.")
-                raise typer.Exit(1)
-            stored.status = JobStatus.PENDING
-            stored.stage = JobStage.VALIDATE
-            stored.claimed_by = None
-            stored.last_error_type = None
-            stored.last_error_message = None
-            stored.finished_at = None
-            stored.updated_at = _utc_now()
-            session.add(stored)
-
     result = asyncio.run(
-        execute_validation_job(
+        run_validation_job(
+            manual_validation_worker(),
             job_id=job_id,
             runner_id=new_runner_id(),
             config=runtime_config,
@@ -1351,15 +1288,12 @@ def queue_clear_command(
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
     del dry_run
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
     try:
-        with Session(engine) as session, session.begin():
+        with db_transaction(database_url) as session:
             summary = clear_queue(
-                session,
+                queue_control_store(session),
                 actor=cli_actor(),
                 now=_utc_now(),
                 job_ids=set(job_id or []) or None,
@@ -1370,7 +1304,7 @@ def queue_clear_command(
                 cancel_running=cancel_running,
                 confirm=confirm,
             )
-    except (JobControlError, ValueError) as exc:
+    except (QueueControlError, ValueError) as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Queue clear" if confirm else "Queue clear preview")
@@ -1383,7 +1317,7 @@ def queue_clear_command(
     if not confirm:
         typer.echo("")
         typer.echo("No jobs were changed.")
-    if wait and not _wait_for_queue_clear(engine, timeout_seconds=timeout_seconds):
+    if wait and not _wait_for_queue_clear(database_url, timeout_seconds=timeout_seconds):
         typer.echo("Timed out waiting for running cancellations.")
         raise typer.Exit(1)
 
@@ -1399,214 +1333,44 @@ def probe_file(
         typer.Option("--force", help="Probe selected files even if current."),
     ] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+    workspace_root = cli_workspace.workspace_root
 
-    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
-    engine = create_db_engine(database_url)
-    selected = 0
-    processed = 0
-    skipped = 0
-    failed = 0
-    with Session(engine) as session:
-        if files:
-            selection = select_inventory_files(
-                session,
+    with db_session(database_url) as session:
+        try:
+            result = run_probe_workflow(
+                probe_store(session),
+                collector=ffprobe_collector(),
                 file_selectors=files,
                 workspace_root=workspace_root,
                 resolve_path=_resolve_media_path,
+                force=force,
+                now=_utc_now(),
             )
-            if selection.missing:
-                typer.echo(f"File is not present in the media inventory: {selection.missing[0]}")
-                typer.echo("Run avarch scan for the containing root first.")
-                raise typer.Exit(1)
-            media_files = list(selection.selected)
-        else:
-            media_files = list(active_inventory_files_with_missing_or_stale_probe(session))
-
-        selected = len(media_files)
-        for media_file in media_files:
-            if not force and not probe_is_missing_or_stale(session, media_file):
-                skipped += 1
-                typer.echo(
-                    f"Skipped {_display_media_path(media_file, workspace_root)}: probe-current"
-                )
-                continue
-            file_path = _absolute_media_path(media_file, workspace_root)
-            if not file_path.exists():
-                failed += 1
-                typer.echo(
-                    f"Failed {_display_media_path(media_file, workspace_root)}: file-missing"
-                )
-                continue
-            if not file_path.is_file():
-                failed += 1
-                typer.echo(
-                    f"Failed {_display_media_path(media_file, workspace_root)}: not-regular-file"
-                )
-                continue
-            raw_probe: dict[str, object]
-            normalized_probe: object
-            probe_result: ProbeResult
-            try:
-                raw_probe = run_ffprobe(file_path)
-                normalized_probe = normalize_probe(raw_probe)
-                probe_result = store_probe_result(
-                    session,
-                    media_file=media_file,
-                    raw_probe=raw_probe,
-                    normalized_probe=normalized_probe,
-                    created_at=_utc_now(),
-                )
-                session.commit()
-                session.refresh(probe_result)
-                processed += 1
-            except ProbeError as exc:
-                session.rollback()
-                failed += 1
-                typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
-                continue
-            typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
-
-    _echo_pipeline_summary(
-        selected=selected,
-        processed=processed,
-        skipped=skipped,
-        failed=failed,
-    )
-    if failed:
-        raise typer.Exit(1)
-
-
-def inspect_file(
-    file: Annotated[Path, typer.Argument(help="Tracked media file to inspect.")],
-) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-
-    file_path = _resolve_media_path(file)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        media_file = _get_media_file(session, file_path)
-        if media_file is None:
-            _echo_untracked_file()
-            raise typer.Exit(1)
-        if media_file.id is None:
-            typer.echo("File is not present in the media inventory.")
-            raise typer.Exit(1)
-
-        probe_result = get_canonical_probe_result(session, media_file)
-        if probe_result is None:
-            typer.echo("No stored probe result exists for this file.")
-            raise typer.Exit(1)
-
-        try:
-            normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
-        except ProbeError as exc:
+        except ProbeWorkflowError as exc:
             typer.echo(str(exc))
+            typer.echo("Run avarch scan for the containing root first.")
             raise typer.Exit(1) from exc
 
-    typer.echo(format_probe_summary(file_path, normalized_probe, probe_result.probe_hash))
-
-
-def validate_file(
-    output: Annotated[Path, typer.Argument(help="Planned encoded output to validate.")],
-    against: Annotated[Path, typer.Option("--against", help="Source media file.")],
-) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
-
-    output_path = _resolve_media_path(output)
-    source_path = _resolve_media_path(against)
-    engine = create_db_engine(database_url)
-
-    with Session(engine) as session:
-        media_file = _get_media_file(session, source_path)
-        if media_file is None:
-            _echo_untracked_file()
-            raise typer.Exit(1)
-        jobs = list(
-            session.exec(
-                select(Job).where(
-                    Job.media_file_id == media_file.id,
-                    Job.output_path == str(output_path),
-                    col(Job.plan_hash).is_not(None),
-                )
-            ).all()
+    for probe_result in result.results:
+        typer.echo(
+            format_probe_summary(
+                probe_result.path,
+                probe_result.normalized_probe,
+                probe_result.probe_hash,
+            )
         )
-        if len(jobs) != 1:
-            typer.echo("Unable to find exactly one planned job for this output and source.")
-            raise typer.Exit(1)
-        job = jobs[0]
-        if job.id is None:
-            typer.echo("Job is missing a database id.")
-            raise typer.Exit(1)
-        job_id = job.id
-        if job.status == JobStatus.RUNNING:
-            typer.echo("Validation cannot run while the job is running.")
-            raise typer.Exit(1)
-        existing = _canonical_validation(session, job)
-        if (
-            job.status == JobStatus.VALIDATED
-            and job.stage == JobStage.PROMOTE
-            and existing is not None
-            and existing.passed
-        ):
-            report = ValidationReport.model_validate_json(existing.details_json)
-            typer.echo(format_validation_report_summary(report, reused=True))
-            typer.echo("")
-            typer.echo("Structured report:")
-            report_path = _report_path_for_job(engine, job_id)
-            typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
-            return
-        eligible = (job.status == JobStatus.PENDING and job.stage == JobStage.VALIDATE) or (
-            job.status == JobStatus.FAILED and job.stage == JobStage.VALIDATE
-        )
-        was_failed = job.status == JobStatus.FAILED
-        if not eligible:
-            typer.echo("Job is not eligible for validation.")
-            raise typer.Exit(1)
+    for message in result.messages:
+        typer.echo(message)
 
-    if was_failed:
-        with Session(engine) as session, session.begin():
-            stored = session.get(Job, job_id)
-            if stored is None:
-                typer.echo("Job disappeared before validation could run.")
-                raise typer.Exit(1)
-            stored.status = JobStatus.PENDING
-            stored.stage = JobStage.VALIDATE
-            stored.claimed_by = None
-            stored.last_error_type = None
-            stored.last_error_message = None
-            stored.finished_at = None
-            stored.updated_at = _utc_now()
-            session.add(stored)
-
-    result = asyncio.run(
-        execute_validation_job(
-            job_id=job_id,
-            runner_id=new_runner_id(),
-            config=runtime_config,
-        )
+    _echo_pipeline_summary(
+        selected=result.selected,
+        processed=result.processed,
+        skipped=result.skipped,
+        failed=result.failed,
     )
-    if result is None:
-        typer.echo("Validation could not run.")
-        raise typer.Exit(1)
-
-    report = ValidationReport.model_validate_json(result.details_json)
-    typer.echo(format_validation_report_summary(report))
-    typer.echo("")
-    typer.echo("Structured report:")
-    report_path = _report_path_for_job(engine, job_id)
-    typer.echo(f"  {report_path if report_path is not None else '<unknown>'}")
-    if not report.passed:
+    if result.failed:
         raise typer.Exit(1)
 
 
@@ -1633,87 +1397,57 @@ def promote_job(
         typer.Option("--recover", help="Recover an interrupted promotion for this job."),
     ] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    runtime_config = _runtime_config(app_config, config)
+    cli_workspace = _load_cli_workspace()
+    runtime_config = cli_workspace.runtime_config
     owner_token = new_runner_id()
 
     if recover:
         try:
             record = asyncio.run(
                 recover_promotion(
+                    promotion_workflow(),
                     job_id=job_id,
                     config=runtime_config,
                     owner_token=owner_token,
                 )
             )
-        except PromotionError as exc:
+        except PromotionWorkflowError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
-        _echo_promotion_complete(record)
+        echo_promotion_complete(record)
         return
 
-    engine = create_db_engine(database_url)
     try:
-        with Session(engine) as session:
-            job = session.get(Job, job_id)
-            if job is None:
-                typer.echo(f"Job not found: {job_id}")
-                raise typer.Exit(1)
-            if job.plan_path is None:
-                typer.echo("Job has no plan artifact.")
-                raise typer.Exit(1)
-            try:
-                plan = TranscodePlan.model_validate_json(
-                    Path(job.plan_path).read_text(encoding="utf-8")
-                )
-            except (OSError, ValidationError, ValueError) as exc:
-                typer.echo("Job plan artifact is not usable. Regenerate the plan for this job.")
-                raise typer.Exit(1) from exc
-            validation = _canonical_validation(session, job)
-            if validation is None:
-                typer.echo("Job has no current validation result.")
-                raise typer.Exit(1)
-            completed = session.exec(
-                select(PromotionRecord).where(
-                    PromotionRecord.job_id == job_id,
-                    PromotionRecord.status == PromotionStatus.COMPLETED,
-                )
-            ).first()
-            if completed is not None:
-                typer.echo("Job already has a completed promotion.")
-                raise typer.Exit(1)
-            preflight = validate_promotion_preflight(
-                job=job,
-                plan=plan,
-                validation=validation,
-                mode=mode,
-                operation_id=new_runner_id(),
-            )
-    except PromotionError as exc:
+        preflight = promotion_preflight(
+            promotion_workflow(),
+            job_id=job_id,
+            mode=mode,
+            config=runtime_config,
+            operation_id=new_runner_id(),
+        )
+    except PromotionWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
     if dry_run or not confirm:
-        _echo_promotion_preview(preflight, dry_run=dry_run)
+        echo_promotion_preview(preflight, dry_run=dry_run)
         return
 
     try:
         record = asyncio.run(
             execute_promotion(
+                promotion_workflow(),
                 job_id=job_id,
                 mode=mode,
                 config=runtime_config,
                 owner_token=owner_token,
             )
         )
-    except PromotionError as exc:
+    except PromotionWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
-    _echo_promotion_complete(record)
+    echo_promotion_complete(record)
 
 
 @app.command("plan")
@@ -1738,139 +1472,76 @@ def plan_file(
         ),
     ] = False,
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    data_dir = resolve_data_dir(app_config, config)
+    cli_workspace = _load_cli_workspace()
+    app_config = cli_workspace.app_config
+    database_url = cli_workspace.database_url
+    data_dir = cli_workspace.data_dir
+    workspace = cli_workspace.workspace
+    workspace_root = cli_workspace.workspace_root
+    planning_runtime = vapoursynth_planning_runtime(
+        workspace,
+        data_dir=data_dir,
+    )
 
-    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
-    engine = create_db_engine(database_url)
-    selected = 0
-    processed = 0
-    skipped = 0
-    failed = 0
     try:
-        registry = ProfileRegistry.from_config(app_config)
-        resolved_profile = registry.get(profile)
-        resolved_template = resolve_vapoursynth_template(resolved_profile.profile)
-        resolved_filter = resolve_vapoursynth_filter(resolved_profile.profile)
-    except (ProfileRegistryError, UnknownProfileError, VapourSynthGenerationError) as exc:
+        resolved_profile = resolve_profile(app_config, profile)
+    except ProfileManagementError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
-    with Session(engine) as session:
-        if files:
-            selection = select_inventory_files(
-                session,
-                file_selectors=files,
-                workspace_root=workspace_root,
-                resolve_path=_resolve_media_path,
-            )
-            if selection.missing:
-                typer.echo(f"File is not present in the media inventory: {selection.missing[0]}")
-                typer.echo("Run avarch scan for the containing root first.")
-                raise typer.Exit(1)
-            media_files = list(selection.selected)
-        else:
-            media_files = _eligible_files_for_planning(session)
-        selected = len(media_files)
+    try:
+        result = create_transcode_plans(
+            open_store=planning_unit_of_work(database_url),
+            resolved_profile=resolved_profile,
+            file_selectors=files,
+            workspace_root=workspace_root,
+            resolve_path=_resolve_media_path,
+            data_dir=data_dir,
+            runtime_identity=planning_runtime.runtime_identity,
+            force=force,
+            now=_utc_now(),
+            generate_script=planning_runtime.generate_script,
+            validate_script=planning_runtime.validate_script,
+            write_artifacts=planning_runtime.write_artifacts,
+            check_runtime=planning_runtime.check_runtime,
+            runtime_env=planning_runtime.runtime_env,
+            check_vpy=check_vpy,
+            failure_errors=(
+                PlanArtifactConflictError,
+                PlanningError,
+                VapourSynthGenerationError,
+                VspipeError,
+            ),
+            runtime_validation_errors=(VspipeError,),
+        )
+    except PlanningError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
-    for media_file in media_files:
-        runtime_checked = False
-        file_path = _absolute_media_path(media_file, workspace_root)
-        try:
-            with Session(engine) as session:
-                if media_file.id is None:
-                    raise PlanningError("Media file must be persisted before planning.")
-                stored_media_file = session.get(MediaFile, media_file.id)
-                if stored_media_file is None:
-                    raise PlanningError("File is not present in the media inventory.")
-                if stored_media_file.latest_probe_id is None:
-                    skipped += 1
-                    typer.echo(
-                        "Skipped "
-                        f"{_display_media_path(stored_media_file, workspace_root)}: probe-missing"
-                    )
-                    continue
-                probe_result = session.get(ProbeResult, stored_media_file.latest_probe_id)
-                if (
-                    probe_result is None
-                    or probe_result.source_fs_fingerprint != stored_media_file.fs_fingerprint
-                ):
-                    skipped += 1
-                    typer.echo(
-                        "Skipped "
-                        f"{_display_media_path(stored_media_file, workspace_root)}: probe-stale"
-                    )
-                    continue
-                context = load_planning_context(
-                    session,
-                    input_path=file_path,
-                    resolved_profile=resolved_profile,
-                )
-                plan = build_plan(
-                    context,
-                    data_dir=data_dir,
-                    resolved_template=resolved_template,
-                    resolved_filter=resolved_filter,
-                )
-                if not force and _equivalent_current_plan_exists(
-                    session,
-                    media_file_id=stored_media_file.id,
-                    probe_hash=plan.probe_hash,
-                    profile_hash=plan.profile_hash,
-                    execution_identity_hash=plan.execution_identity.identity_hash,
-                ):
-                    skipped += 1
-                    typer.echo(
-                        "Skipped "
-                        f"{_display_media_path(stored_media_file, workspace_root)}: plan-current"
-                    )
-                    continue
-            vapoursynth_script = generate_vapoursynth_script(
-                plan,
-                template=resolved_template,
-                user_filter=resolved_filter,
+    for item in result.items:
+        display_path = _display_media_path_value(item.media_file.path, workspace_root)
+        if item.status == PlanningWorkflowItemStatus.SKIPPED:
+            typer.echo(f"Skipped {display_path}: {item.reason}")
+            continue
+        if item.status == PlanningWorkflowItemStatus.FAILED:
+            if item.runtime_validation_failed:
+                typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
+            typer.echo(f"Failed {display_path}: {item.reason}")
+            continue
+        if item.plan is not None:
+            _echo_plan_summary(
+                item.plan,
+                runtime_checked=item.runtime_checked,
+                check_requested=check_vpy,
             )
-            validate_script_syntax(vapoursynth_script)
-            write_plan_artifacts(
-                plan=plan,
-                vapoursynth_script=vapoursynth_script,
-                user_filter=resolved_filter,
-                template=resolved_template,
-            )
-            if check_vpy:
-                check_vapoursynth_script(
-                    plan.vapoursynth.script_path,
-                    env=runtime_environment_variables(_workspace_for_config(config)),
-                )
-                runtime_checked = True
-            with Session(engine) as session, session.begin():
-                _persist_media_plan(session, plan=plan, now=_utc_now())
-            processed += 1
-            _echo_plan_summary(plan, runtime_checked=runtime_checked, check_requested=check_vpy)
-        except PlanArtifactConflictError as exc:
-            failed += 1
-            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
-        except PlanningError as exc:
-            failed += 1
-            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
-        except VapourSynthGenerationError as exc:
-            failed += 1
-            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
-        except VspipeError as exc:
-            failed += 1
-            typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
-            typer.echo(f"Failed {_display_media_path(media_file, workspace_root)}: {exc}")
 
     _echo_pipeline_summary(
-        selected=selected,
-        processed=processed,
-        skipped=skipped,
-        failed=failed,
+        selected=result.selected,
+        processed=result.processed,
+        skipped=result.skipped,
+        failed=result.failed,
     )
-    if failed:
+    if result.failed:
         raise typer.Exit(1)
 
 
@@ -1917,11 +1588,10 @@ def workflow_run(
     plan_file(profile=profile, files=files, force=force_plan, check_vpy=check_vpy)
 
     _echo_workflow_stage("enqueue")
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    selected, summary, plan_hashes = _enqueue_selected_plans(
+    cli_workspace = _load_cli_workspace()
+    config = cli_workspace.config
+    database_url = cli_workspace.database_url
+    summary = _enqueue_selected_plans(
         config=config,
         database_url=database_url,
         file_selectors=files,
@@ -1929,17 +1599,17 @@ def workflow_run(
         priority=priority,
     )
     _echo_pipeline_summary(
-        selected=selected,
-        processed=summary["created"],
-        skipped=summary["skipped"],
+        selected=summary.selected,
+        processed=summary.created,
+        skipped=summary.skipped,
         failed=0,
     )
-    if summary["already_done"]:
-        typer.echo(f"already-completed: {summary['already_done']}")
-    if summary["already_queued"]:
-        typer.echo(f"already-queued: {summary['already_queued']}")
+    if summary.already_done:
+        typer.echo(f"already-completed: {summary.already_done}")
+    if summary.already_queued:
+        typer.echo(f"already-queued: {summary.already_queued}")
 
-    if not plan_hashes:
+    if not summary.plan_hashes:
         typer.echo("No plans were selected for the workflow.")
         return
 
@@ -1947,37 +1617,24 @@ def workflow_run(
     run_queue(resume=True, detached=False, managed_child=False, mode="foreground")
 
     _echo_workflow_stage("verify")
-    jobs = _workflow_jobs_for_plan_hashes(database_url, plan_hashes)
-    promotable_jobs = [
-        job
-        for job in jobs
-        if job.status == JobStatus.VALIDATED
-        and job.stage == JobStage.PROMOTE
-        and job.id is not None
-    ]
-    failed_jobs = [job for job in jobs if job.status == JobStatus.FAILED]
-    blocked_jobs = [
-        job
-        for job in jobs
-        if job.status not in {JobStatus.VALIDATED, JobStatus.COMPLETED}
-        and job.status != JobStatus.FAILED
-    ]
+    jobs = _workflow_jobs_for_plan_hashes(database_url, list(summary.plan_hashes))
+    readiness = verify_workflow_jobs(jobs)
 
-    if failed_jobs:
+    if readiness.failed_jobs:
         typer.echo("Workflow stopped before promotion because jobs failed.")
-        _echo_workflow_jobs(failed_jobs)
+        _echo_workflow_jobs(readiness.failed_jobs)
         raise typer.Exit(1)
-    if blocked_jobs:
+    if readiness.blocked_jobs:
         typer.echo("Workflow stopped before promotion because jobs are not validated yet.")
-        _echo_workflow_jobs(blocked_jobs)
+        _echo_workflow_jobs(readiness.blocked_jobs)
         raise typer.Exit(1)
-    if not promotable_jobs:
+    if not readiness.promotable_jobs:
         typer.echo("No validated jobs are ready for promotion.")
         return
-    typer.echo(f"Validated jobs ready for promotion: {len(promotable_jobs)}")
+    typer.echo(f"Validated jobs ready for promotion: {len(readiness.promotable_jobs)}")
 
     _echo_workflow_stage("promote")
-    for job in promotable_jobs:
+    for job in readiness.promotable_jobs:
         if job.id is None:
             continue
         promote_job(
@@ -1999,8 +1656,8 @@ def _doctor_fail(check: str, reason: str) -> None:
 
 def _upgrade_database_or_exit(database_url: str) -> None:
     try:
-        upgrade_database(database_url)
-    except UnsupportedDatabaseSchemaError as exc:
+        upgrade_database_schema(database_url)
+    except DatabaseSchemaUpgradeError as exc:
         log.debug("database_schema_unsupported", exc_info=exc)
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
@@ -2022,22 +1679,47 @@ def _load_and_configure(config: Path) -> AppConfig:
     return app_config
 
 
-def _runtime_config(app_config: AppConfig, config: Path) -> AppConfig:
+def _load_cli_workspace(*, upgrade_database: bool = True) -> CliWorkspace:
+    config = _workspace_config_path()
+    app_config = _load_and_configure(config)
+    database_url = workspace_database_url(app_config, config)
+    if upgrade_database:
+        _upgrade_database_or_exit(database_url)
     data_dir = resolve_data_dir(app_config, config)
-    database_url = resolve_database_url(app_config, config)
+    runtime_config = _runtime_config(
+        app_config,
+        config,
+        data_dir=data_dir,
+        database_url=database_url,
+    )
+    workspace = _workspace_for_config(config)
+    workspace_root = _workspace_root_for_storage(config) or Path.cwd()
+    return CliWorkspace(
+        config=config,
+        app_config=app_config,
+        database_url=database_url,
+        data_dir=data_dir,
+        runtime_config=runtime_config,
+        workspace=workspace,
+        workspace_root=workspace_root,
+    )
+
+
+def _runtime_config(
+    app_config: AppConfig,
+    config: Path,
+    *,
+    data_dir: Path | None = None,
+    database_url: str | None = None,
+) -> AppConfig:
+    data_dir = data_dir or resolve_data_dir(app_config, config)
+    database_url = database_url or workspace_database_url(app_config, config)
     return app_config.model_copy(
         update={
             "app": app_config.app.model_copy(update={"data_dir": data_dir}),
             "database": app_config.database.model_copy(update={"url": database_url}),
         }
     )
-
-
-def _primary_profile_search_path(config: AppConfig) -> Path | None:
-    search_paths = config.profile_registry.search_paths
-    if not search_paths:
-        return None
-    return search_paths[0]
 
 
 def _resolve_cli_path(path: Path) -> Path:
@@ -2070,11 +1752,19 @@ def _workspace_config_path() -> Path:
     return _workspace_context().config_toml
 
 
-def _doctor_vpy_requirements(config: Path) -> VpyRequirements:
+def _doctor_vpy_requirements(
+    config: Path,
+    *,
+    adapters: VapourSynthEnvironmentAdapters,
+) -> VpyRequirements:
     workspace = WorkspaceContext(config.parent.parent.resolve())
     if workspace.vpy_requirements_toml.exists():
-        return load_requirements(workspace)
+        return adapters.load_requirements(workspace)
     return VpyRequirements()
+
+
+def _vapoursynth_environment_adapters() -> VapourSynthEnvironmentAdapters:
+    return vapoursynth_environment_adapters()
 
 
 def _workspace_for_config(config: Path) -> WorkspaceContext:
@@ -2085,257 +1775,19 @@ def _workspace_root_for_storage(config: Path) -> Path | None:
     return config.parent.parent.resolve()
 
 
-def _scripts_dir_for_config(config: Path) -> Path:
-    return _workspace_for_config(config).scripts_dir
-
-
-def _validate_vapoursynth_profile_scripts(
-    profile: EncodingProfile,
-    *,
-    workspace: WorkspaceContext,
-) -> None:
-    settings = profile.vapoursynth
-    if settings.mode == "generated":
-        resolved_template = resolve_vapoursynth_template(profile)
-        if resolved_template is not None:
-            validate_script_syntax(resolved_template.text)
-        return
-
-    if settings.mode == "custom_filter":
-        if settings.script is None:
-            raise VapourSynthScriptPathError("custom_filter profile is missing script")
-        script_path = resolve_workspace_script_path(workspace, settings.script)
-        script_text = _read_required_script(script_path)
-        validate_script_syntax(script_text)
-        _validate_filter_entrypoint(script_text, settings.entrypoint)
-        return
-
-    if settings.template is None:
-        raise VapourSynthScriptPathError("custom_template profile is missing template")
-    template_path = resolve_workspace_script_path(workspace, settings.template)
-    template_text = _read_required_script(template_path)
-    validate_script_syntax(template_text)
-
-
-def _read_required_script(path: Path) -> str:
-    if not path.exists():
-        raise VapourSynthScriptPathError(f"VapourSynth script does not exist: {path}")
-    if not path.is_file():
-        raise VapourSynthScriptPathError(f"VapourSynth script is not a regular file: {path}")
-    return path.read_text(encoding="utf-8")
-
-
-def _validate_filter_entrypoint(script: str, entrypoint: str) -> None:
-    tree = ast.parse(script, filename="<vapoursynth-filter>")
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == entrypoint:
-            if isinstance(node, ast.AsyncFunctionDef):
-                raise VapourSynthScriptPathError(
-                    f"VapourSynth filter entrypoint must be synchronous: {entrypoint}"
-                )
-            return
-    raise VapourSynthScriptPathError(
-        f"VapourSynth filter entrypoint was not found: {entrypoint}"
-    )
-
-
 def _resolve_media_path(path: Path) -> Path:
     return _resolve_cli_path(path).resolve()
 
 
-def _get_media_file(session: Session, path: Path) -> MediaFile | None:
-    statement = select(MediaFile).where(MediaFile.path == str(path))
-    media_file = session.exec(statement).first()
-    if media_file is not None:
-        return media_file
-    try:
-        workspace = WorkspaceContext.discover(path.parent)
-    except WorkspaceError:
-        return None
-    try:
-        relative_path = str(path.resolve().relative_to(workspace.root))
-    except ValueError:
-        return None
-    statement = select(MediaFile).where(MediaFile.path == relative_path)
-    return session.exec(statement).first()
-
-
-def _absolute_media_path(media_file: MediaFile, workspace_root: Path) -> Path:
-    path = Path(media_file.path)
+def _absolute_media_path_value(path_value: str, workspace_root: Path) -> Path:
+    path = Path(path_value)
     if path.is_absolute():
         return path
     return workspace_root / path
 
 
-def _display_media_path(media_file: MediaFile, workspace_root: Path) -> str:
-    return str(_absolute_media_path(media_file, workspace_root))
-
-
-def _eligible_files_for_planning(session: Session) -> list[MediaFile]:
-    media_files = list(
-        session.exec(
-            select(MediaFile)
-            .where(MediaFile.status != MediaFileStatus.MISSING)
-            .order_by(MediaFile.path)
-        ).all()
-    )
-    eligible: list[MediaFile] = []
-    for media_file in media_files:
-        if media_file.latest_probe_id is None:
-            continue
-        probe_result = session.get(ProbeResult, media_file.latest_probe_id)
-        if probe_result is None:
-            continue
-        if probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
-            continue
-        eligible.append(media_file)
-    return eligible
-
-
-def _equivalent_current_plan_exists(
-    session: Session,
-    *,
-    media_file_id: int | None,
-    probe_hash: str,
-    profile_hash: str,
-    execution_identity_hash: str,
-) -> bool:
-    if media_file_id is None:
-        return False
-    return (
-        session.exec(
-            select(MediaPlan).where(
-                MediaPlan.media_file_id == media_file_id,
-                MediaPlan.probe_hash == probe_hash,
-                MediaPlan.profile_hash == profile_hash,
-                MediaPlan.execution_identity_hash == execution_identity_hash,
-                MediaPlan.is_current == True,  # noqa: E712
-                MediaPlan.is_valid == True,  # noqa: E712
-            )
-        ).first()
-        is not None
-    )
-
-
-def _persist_media_plan(session: Session, *, plan: TranscodePlan, now: datetime) -> MediaPlan:
-    existing = session.exec(select(MediaPlan).where(MediaPlan.plan_hash == plan.plan_hash)).first()
-    if existing is not None:
-        existing.is_current = True
-        existing.is_valid = True
-        existing.superseded_at = None
-        session.add(existing)
-        _supersede_other_current_plans(session, plan=plan, keep_plan_id=existing.id, now=now)
-        return existing
-
-    probe_result = session.exec(
-        select(ProbeResult).where(
-            ProbeResult.media_file_id == plan.media_file_id,
-            ProbeResult.probe_hash == plan.probe_hash,
-        )
-    ).first()
-    if probe_result is None or probe_result.id is None:
-        raise PlanningError("The planned probe result no longer exists.")
-
-    media_plan = MediaPlan(
-        media_file_id=plan.media_file_id,
-        probe_result_id=probe_result.id,
-        profile_name=plan.profile_name,
-        profile_hash=plan.profile_hash,
-        probe_hash=plan.probe_hash,
-        source_fs_fingerprint=plan.source_fs_fingerprint,
-        execution_identity_hash=plan.execution_identity.identity_hash,
-        plan_hash=plan.plan_hash,
-        plan_path=str(plan.artifacts.plan_json),
-        output_path=str(plan.output_path),
-        is_current=True,
-        is_valid=True,
-        created_at=now,
-    )
-    session.add(media_plan)
-    session.flush()
-    _supersede_other_current_plans(session, plan=plan, keep_plan_id=media_plan.id, now=now)
-    return media_plan
-
-
-def _supersede_other_current_plans(
-    session: Session,
-    *,
-    plan: TranscodePlan,
-    keep_plan_id: int | None,
-    now: datetime,
-) -> None:
-    plans = list(
-        session.exec(
-            select(MediaPlan).where(
-                MediaPlan.media_file_id == plan.media_file_id,
-                MediaPlan.profile_name == plan.profile_name,
-                MediaPlan.is_current == True,  # noqa: E712
-            )
-        ).all()
-    )
-    for media_plan in plans:
-        if media_plan.id == keep_plan_id:
-            continue
-        media_plan.is_current = False
-        media_plan.superseded_at = now
-        session.add(media_plan)
-
-
-def _current_plan_for_file(session: Session, media_file: MediaFile) -> MediaPlan | None:
-    if media_file.id is None:
-        return None
-    return session.exec(
-        select(MediaPlan)
-        .where(
-            MediaPlan.media_file_id == media_file.id,
-            MediaPlan.is_current == True,  # noqa: E712
-            MediaPlan.is_valid == True,  # noqa: E712
-        )
-        .order_by(col(MediaPlan.created_at).desc(), col(MediaPlan.id).desc())
-    ).first()
-
-
-def _select_plans_for_enqueue(
-    session: Session,
-    *,
-    file_selectors: list[Path] | None,
-    plan_selectors: list[str] | None,
-    workspace_root: Path,
-) -> list[MediaPlan]:
-    if file_selectors and plan_selectors:
-        raise ValueError("Use either --file or --plan selectors, not both.")
-    if plan_selectors:
-        plans: dict[int, MediaPlan] = {}
-        for selector in plan_selectors:
-            plan = _find_plan(session, selector)
-            if plan is None:
-                raise ValueError(f"Plan not found: {selector}")
-            if plan.id is not None:
-                plans.setdefault(plan.id, plan)
-        return sorted(plans.values(), key=lambda item: (item.created_at, item.id or 0))
-    if file_selectors:
-        selection = select_inventory_files(
-            session,
-            file_selectors=file_selectors,
-            workspace_root=workspace_root,
-            resolve_path=_resolve_media_path,
-        )
-        if selection.missing:
-            raise ValueError(f"File is not present in the media inventory: {selection.missing[0]}")
-        file_plans = [
-            _current_plan_for_file(session, media_file) for media_file in selection.selected
-        ]
-        return [plan for plan in file_plans if plan is not None]
-    return list(
-        session.exec(
-            select(MediaPlan)
-            .where(
-                MediaPlan.is_current == True,  # noqa: E712
-                MediaPlan.is_valid == True,  # noqa: E712
-            )
-            .order_by(col(MediaPlan.created_at).asc(), col(MediaPlan.id).asc())
-        ).all()
-    )
+def _display_media_path_value(path_value: str, workspace_root: Path) -> str:
+    return str(_absolute_media_path_value(path_value, workspace_root))
 
 
 def _enqueue_selected_plans(
@@ -2345,89 +1797,22 @@ def _enqueue_selected_plans(
     file_selectors: list[Path] | None,
     plan_selectors: list[str] | None,
     priority: int,
-) -> tuple[int, dict[str, int], list[str]]:
+) -> PlanEnqueueSummary:
     workspace_root = _workspace_root_for_storage(config) or Path.cwd()
-    engine = create_db_engine(database_url)
-    with Session(engine) as session, session.begin():
+    with db_transaction(database_url) as session:
         try:
-            selected_plans = _select_plans_for_enqueue(
-                session,
+            return enqueue_selected_plans(
+                enqueue_store(session),
                 file_selectors=file_selectors,
                 plan_selectors=plan_selectors,
                 workspace_root=workspace_root,
+                resolve_path=_resolve_media_path,
+                priority=priority,
+                now=_utc_now(),
             )
         except ValueError as exc:
             typer.echo(str(exc))
             raise typer.Exit(1) from exc
-        plan_hashes = [plan.plan_hash for plan in selected_plans]
-        summary = _enqueue_plans(session, selected_plans, priority=priority, now=_utc_now())
-
-    return len(selected_plans), summary, plan_hashes
-
-
-def _find_plan(session: Session, selector: str) -> MediaPlan | None:
-    if selector.isdecimal():
-        plan = session.get(MediaPlan, int(selector))
-        if plan is not None:
-            return plan
-    return session.exec(select(MediaPlan).where(MediaPlan.plan_hash == selector)).first()
-
-
-def _enqueue_plans(
-    session: Session,
-    plans: list[MediaPlan],
-    *,
-    priority: int,
-    now: datetime,
-) -> dict[str, int]:
-    created = 0
-    already_queued = 0
-    already_done = 0
-    stale = 0
-    for plan in plans:
-        media_file = session.get(MediaFile, plan.media_file_id)
-        if media_file is None or _status_value(media_file.status) == MediaFileStatus.MISSING.value:
-            stale += 1
-            continue
-        if media_file.fs_fingerprint != plan.source_fs_fingerprint:
-            stale += 1
-            continue
-        queue_key = plan.plan_hash
-        existing = session.exec(select(Job).where(Job.queue_key == queue_key)).first()
-        if existing is not None:
-            if existing.status in {JobStatus.COMPLETED, JobStatus.VALIDATED}:
-                already_done += 1
-            else:
-                already_queued += 1
-            continue
-        session.add(
-            Job(
-                media_file_id=plan.media_file_id,
-                profile_name=plan.profile_name,
-                profile_hash=plan.profile_hash,
-                source_fs_fingerprint=plan.source_fs_fingerprint,
-                queue_key=queue_key,
-                probe_result_id=plan.probe_result_id,
-                probe_hash=plan.probe_hash,
-                plan_hash=plan.plan_hash,
-                plan_path=plan.plan_path,
-                output_path=plan.output_path,
-                status=JobStatus.PENDING,
-                stage=JobStage.ENCODE,
-                priority=priority,
-                attempts=0,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        created += 1
-    return {
-        "created": created,
-        "skipped": already_queued + already_done + stale,
-        "already_queued": already_queued,
-        "already_done": already_done,
-        "stale": stale,
-    }
 
 
 def _echo_pipeline_summary(
@@ -2449,25 +1834,24 @@ def _echo_workflow_stage(name: str) -> None:
     typer.echo(f"== {name} ==")
 
 
-def _workflow_jobs_for_plan_hashes(database_url: str, plan_hashes: list[str]) -> list[Job]:
+def _workflow_jobs_for_plan_hashes(
+    database_url: str,
+    plan_hashes: list[str],
+) -> list[WorkflowJobItem]:
     if not plan_hashes:
         return []
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        return list(
-            session.exec(
-                select(Job)
-                .where(col(Job.plan_hash).in_(plan_hashes))
-                .order_by(col(Job.created_at).asc(), col(Job.id).asc())
-            ).all()
+    with db_session(database_url) as session:
+        return workflow_jobs_for_plan_hashes(
+            job_view_store(session),
+            plan_hashes=tuple(plan_hashes),
         )
 
 
-def _echo_workflow_jobs(jobs: list[Job]) -> None:
+def _echo_workflow_jobs(jobs: Sequence[WorkflowJobItem]) -> None:
     for job in jobs:
         typer.echo(
-            f"  {job.id or '-'} {_job_status_value(job.status):<10} "
-            f"{_job_stage_value(job.stage):<9} {job.output_path or job.plan_hash or '-'}"
+            f"  {job.id or '-'} {job_status_value(job.status):<10} "
+            f"{job_stage_value(job.stage):<9} {job.output_path or job.plan_hash or '-'}"
         )
 
 
@@ -2500,7 +1884,7 @@ def _echo_plan_summary(
         "  source:     "
         f"{typed_plan.video.source_codec} "
         f"{typed_plan.video.source_width}x{typed_plan.video.source_height} "
-        f"{_display_optional(typed_plan.video.source_pix_fmt)}"
+        f"{display_optional(typed_plan.video.source_pix_fmt)}"
     )
     typer.echo(
         f"  output:     {typed_plan.video.target_width}x{typed_plan.video.target_height} "
@@ -2514,8 +1898,8 @@ def _echo_plan_summary(
         typer.echo(
             "Audio: "
             f"[{typed_plan.audio.source_stream_index}] "
-            f"{_display_optional(typed_plan.audio.source_codec)} "
-            f"{_display_optional(typed_plan.audio.source_language)} -> "
+            f"{display_optional(typed_plan.audio.source_codec)} "
+            f"{display_optional(typed_plan.audio.source_language)} -> "
             f"{typed_plan.audio.target_codec} {typed_plan.audio.target_bitrate} "
             f"{typed_plan.audio.target_channels}ch"
         )
@@ -2538,8 +1922,12 @@ def _echo_plan_summary(
 @workspace_app.command("info")
 def workspace_info() -> None:
     try:
-        workspace = WorkspaceContext.discover(_resolve_cli_path(Path(".")))
-    except WorkspaceError as exc:
+        workspace = discover_workspace_info(
+            _resolve_cli_path(Path(".")),
+            discover_workspace_func=WorkspaceContext.discover,
+            workspace_errors=(WorkspaceError,),
+        )
+    except WorkspaceManagementError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -2553,29 +1941,32 @@ def workspace_info() -> None:
 
 @config_app.command("show")
 def config_show() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    typer.echo(f"Config: {config}")
-    typer.echo(f"Data dir: {resolve_data_dir(app_config, config)}")
-    typer.echo(f"Database: {resolve_database_url(app_config, config)}")
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    summary = summarize_config(
+        config_path=cli_workspace.config,
+        config=cli_workspace.app_config,
+        database_url=cli_workspace.database_url,
+    )
+    typer.echo(f"Config: {summary.config_path}")
+    typer.echo(f"Data dir: {summary.data_dir}")
+    typer.echo(f"Database: {summary.database_url}")
     typer.echo("Profile search paths:")
-    for search_path in app_config.profile_registry.search_paths:
+    for search_path in summary.profile_search_paths:
         typer.echo(f"  {search_path}")
 
 
 @profiles_app.command("list")
 def profiles_list() -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
     try:
-        profiles = ProfileRegistry.from_config(app_config).list_profiles()
-    except ProfileRegistryError as exc:
+        profiles = list_available_profiles(cli_workspace.app_config)
+    except ProfileManagementError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
     typer.echo("NAME                 ORIGIN    SOURCE")
     for profile in profiles:
-        typer.echo(f"{profile.name:<20} {profile.origin.value:<8} {profile.source}")
+        typer.echo(f"{profile.name:<20} {profile.origin:<8} {profile.source}")
 
 
 @profiles_app.command("copy")
@@ -2583,35 +1974,17 @@ def profiles_copy(
     source_name: Annotated[str, typer.Argument(help="Built-in profile to copy.")],
     name: Annotated[str, typer.Option("--name", help="New user profile name.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
     try:
-        registry = ProfileRegistry.from_config(app_config)
-        source = registry.get(source_name)
-    except (ProfileRegistryError, UnknownProfileError) as exc:
+        result = copy_builtin_profile(
+            cli_workspace.app_config,
+            source_name=source_name,
+            name=name,
+        )
+    except ProfileManagementError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
-
-    if source.origin != ProfileOrigin.BUILTIN:
-        typer.echo(f"Can only copy built-in profiles: {source_name}")
-        raise typer.Exit(1)
-    if name in {profile.name for profile in registry.list_profiles()}:
-        typer.echo(f"Profile name is already in use or reserved: {name}")
-        raise typer.Exit(1)
-
-    destination_dir = _primary_profile_search_path(app_config)
-    if destination_dir is None:
-        typer.echo("No profile search path is configured.")
-        raise typer.Exit(1)
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / f"{name}.toml"
-    if destination.exists():
-        typer.echo(f"Profile already exists: {destination}")
-        raise typer.Exit(1)
-
-    document = source.document.model_copy(update={"name": name})
-    destination.write_text(_profile_document_to_toml(document), encoding="utf-8")
-    typer.echo(f"Profile created: {destination}")
+    typer.echo(f"Profile created: {result.destination}")
 
 
 @profiles_app.command("scaffold")
@@ -2632,49 +2005,53 @@ def profiles_scaffold(
 def vpy_scaffold_filter(
     name: Annotated[str, typer.Option("--name", help="Filter module name.")],
 ) -> None:
-    config = _workspace_config_path()
-    scripts_dir = _scripts_dir_for_config(config)
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    destination = scripts_dir / f"{name}.py"
-    if destination.exists():
-        typer.echo(f"Script already exists: {destination}")
-        raise typer.Exit(1)
-    destination.write_text(_filter_scaffold_text(), encoding="utf-8")
-    typer.echo(f"Filter scaffold created: {destination}")
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    try:
+        result = scaffold_filter_script(
+            scripts_dir=cli_workspace.workspace.scripts_dir,
+            name=name,
+        )
+    except VapourSynthScaffoldError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"Filter scaffold created: {result.destination}")
 
 
 @vpy_scaffold_app.command("template")
 def vpy_scaffold_template(
     name: Annotated[str, typer.Option("--name", help="Template script name.")],
 ) -> None:
-    config = _workspace_config_path()
-    scripts_dir = _scripts_dir_for_config(config)
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    destination = scripts_dir / f"{name}.vpy"
-    if destination.exists():
-        typer.echo(f"Script already exists: {destination}")
-        raise typer.Exit(1)
-    destination.write_text(_template_scaffold_text(), encoding="utf-8")
-    typer.echo(f"Template scaffold created: {destination}")
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    try:
+        result = scaffold_template_script(
+            scripts_dir=cli_workspace.workspace.scripts_dir,
+            name=name,
+        )
+    except VapourSynthScaffoldError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    typer.echo(f"Template scaffold created: {result.destination}")
 
 
 @vpy_app.command("validate")
 def vpy_validate(
     profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
     try:
-        resolved_profile = ProfileRegistry.from_config(app_config).get(profile)
-        _validate_vapoursynth_profile_scripts(
+        resolved_profile = resolve_profile(cli_workspace.app_config, profile)
+        validate_vapoursynth_profile_scripts(
             resolved_profile.profile,
-            workspace=_workspace_for_config(config),
+            workspace=cli_workspace.workspace,
+            validate_script=vapoursynth_planning_runtime(
+                cli_workspace.workspace,
+                data_dir=cli_workspace.data_dir,
+            ).validate_script,
         )
     except (
         OSError,
-        ProfileRegistryError,
         UnicodeDecodeError,
-        UnknownProfileError,
+        ProfileManagementError,
         VapourSynthGenerationError,
     ) as exc:
         typer.echo(str(exc))
@@ -2687,58 +2064,43 @@ def vpy_check(
     file: Annotated[Path, typer.Argument(help="Tracked media file to check.")],
     profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
 ) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    data_dir = resolve_data_dir(app_config, config)
-    file_path = _resolve_media_path(file)
-    engine = create_db_engine(database_url)
+    cli_workspace = _load_cli_workspace()
+    app_config = cli_workspace.app_config
+    database_url = cli_workspace.database_url
+    data_dir = cli_workspace.data_dir
+    workspace = cli_workspace.workspace
+    planning_runtime = vapoursynth_planning_runtime(
+        workspace,
+        data_dir=data_dir,
+    )
 
     try:
-        registry = ProfileRegistry.from_config(app_config)
-        resolved_profile = registry.get(profile)
-        _validate_vapoursynth_profile_scripts(
+        resolved_profile = resolve_profile(app_config, profile)
+        validate_vapoursynth_profile_scripts(
             resolved_profile.profile,
-            workspace=_workspace_for_config(config),
+            workspace=workspace,
+            validate_script=planning_runtime.validate_script,
         )
-        with Session(engine) as session:
-            context = load_planning_context(
-                session,
-                input_path=file_path,
-                resolved_profile=resolved_profile,
-            )
-            resolved_template = resolve_vapoursynth_template(context.profile)
-            resolved_filter = resolve_vapoursynth_filter(context.profile)
-            plan = build_plan(
-                context,
-                data_dir=data_dir,
-                resolved_template=resolved_template,
-                resolved_filter=resolved_filter,
-            )
-        vapoursynth_script = generate_vapoursynth_script(
-            plan,
-            template=resolved_template,
-            user_filter=resolved_filter,
+        materialized = create_transcode_plan_for_file(
+            open_store=planning_unit_of_work(database_url),
+            resolved_profile=resolved_profile,
+            input_path=_resolve_media_path(file),
+            data_dir=data_dir,
+            runtime_identity=planning_runtime.runtime_identity,
+            generate_script=planning_runtime.generate_script,
+            validate_script=planning_runtime.validate_script,
+            write_artifacts=planning_runtime.write_artifacts,
+            check_runtime=planning_runtime.check_runtime,
+            runtime_env=planning_runtime.runtime_env,
+            check_vpy=True,
         )
-        validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(
-            plan=plan,
-            vapoursynth_script=vapoursynth_script,
-            user_filter=resolved_filter,
-            template=resolved_template,
-        )
-        check_vapoursynth_script(
-            plan.vapoursynth.script_path,
-            env=runtime_environment_variables(_workspace_for_config(config)),
-        )
+        plan = materialized.plan
     except (
         OSError,
         PlanArtifactConflictError,
         PlanningError,
-        ProfileRegistryError,
         UnicodeDecodeError,
-        UnknownProfileError,
+        ProfileManagementError,
         VapourSynthGenerationError,
         VspipeError,
     ) as exc:
@@ -2752,23 +2114,32 @@ def vpy_check(
 
 @vpy_app.command("sync")
 def vpy_sync() -> None:
-    config = _workspace_config_path()
-    workspace = _workspace_for_config(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    workspace = cli_workspace.workspace
+    adapters = _vapoursynth_environment_adapters()
     try:
-        environment = sync_environment(workspace)
-    except VpyEnvironmentError as exc:
+        environment = sync_vapoursynth_environment(
+            workspace,
+            sync_environment_func=adapters.sync_environment,
+            environment_errors=adapters.environment_errors,
+        )
+    except VapourSynthEnvironmentWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("Workspace VapourSynth environment is current.")
-    typer.echo(f"Environment: {environment.identity.environment_id}")
+    typer.echo(f"Environment: {environment.environment_id}")
     typer.echo(f"Lock: {environment.lock_path}")
 
 
 @vpy_app.command("plugins")
 def vpy_plugins() -> None:
+    adapters = _vapoursynth_environment_adapters()
     try:
-        plugins = list_vapoursynth_plugins()
-    except VpyPluginInventoryError as exc:
+        plugins = list_vapoursynth_plugin_items(
+            list_plugins_func=adapters.list_plugins,
+            plugin_inventory_errors=adapters.plugin_inventory_errors,
+        )
+    except VapourSynthEnvironmentWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
 
@@ -2782,52 +2153,65 @@ def vpy_plugins() -> None:
 
 @vpy_env_app.command("show")
 def vpy_env_show() -> None:
-    config = _workspace_config_path()
-    workspace = _workspace_for_config(config)
-    requirements = load_requirements(workspace)
-    identity = build_runtime_identity(requirements)
-    typer.echo(f"Requirements: {workspace.vpy_requirements_toml}")
-    typer.echo(f"Environment:  {identity.environment_id}")
-    typer.echo(f"Manifest:     {identity.manifest_hash}")
-    typer.echo(f"Image digest: {identity.avarch_image_digest}")
-    typer.echo(f"Python:       {identity.python_version}")
-    typer.echo(f"Python ABI:   {identity.python_abi}")
-    typer.echo(f"Platform:     {identity.platform}")
-    typer.echo(f"VapourSynth:  {identity.vapoursynth_version}")
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    workspace = cli_workspace.workspace
+    adapters = _vapoursynth_environment_adapters()
+    info = vapoursynth_environment_info(
+        workspace,
+        load_requirements_func=adapters.load_requirements,
+        build_runtime_identity_func=adapters.build_runtime_identity,
+        environment_errors=adapters.environment_errors,
+    )
+    typer.echo(f"Requirements: {info.requirements_path}")
+    typer.echo(f"Environment:  {info.environment_id}")
+    typer.echo(f"Manifest:     {info.manifest_hash}")
+    typer.echo(f"Image digest: {info.avarch_image_digest}")
+    typer.echo(f"Python:       {info.python_version}")
+    typer.echo(f"Python ABI:   {info.python_abi}")
+    typer.echo(f"Platform:     {info.platform}")
+    typer.echo(f"VapourSynth:  {info.vapoursynth_version}")
 
 
 @vpy_env_app.command("check")
 def vpy_env_check() -> None:
-    config = _workspace_config_path()
-    workspace = _workspace_for_config(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    workspace = cli_workspace.workspace
+    adapters = _vapoursynth_environment_adapters()
     try:
-        environment = sync_environment(workspace)
-    except VpyEnvironmentError as exc:
+        result = check_vapoursynth_environment(
+            workspace,
+            sync_environment_func=adapters.sync_environment,
+            list_plugins_func=adapters.list_plugins,
+            environment_errors=adapters.environment_errors,
+            plugin_inventory_errors=adapters.plugin_inventory_errors,
+        )
+    except VapourSynthEnvironmentWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo("PASS vpy_environment")
-    typer.echo(f"Environment: {environment.identity.environment_id}")
-    typer.echo(f"Lock: {environment.lock_path}")
-    try:
-        namespaces = ", ".join(plugin.namespace for plugin in list_vapoursynth_plugins())
-    except VpyPluginInventoryError:
-        namespaces = "unavailable"
-    typer.echo(f"Plugin namespaces: {namespaces or 'none'}")
+    typer.echo(f"Environment: {result.environment_id}")
+    typer.echo(f"Lock: {result.lock_path}")
+    typer.echo(f"Plugin namespaces: {result.plugin_namespaces}")
 
 
 @vpy_packages_app.command("list")
 def vpy_packages_list() -> None:
-    config = _workspace_config_path()
-    requirements = load_requirements(_workspace_for_config(config))
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    adapters = _vapoursynth_environment_adapters()
+    packages = list_vapoursynth_packages(
+        cli_workspace.workspace,
+        load_requirements_func=adapters.load_requirements,
+        environment_errors=adapters.environment_errors,
+    )
     typer.echo("Python packages:")
-    for package in requirements.python.packages:
+    for package in packages.python_packages:
         typer.echo(f"  {package}")
-    if not requirements.python.packages:
+    if not packages.python_packages:
         typer.echo("  none")
     typer.echo("VSRepo packages:")
-    for package in requirements.vsrepo.packages:
+    for package in packages.vsrepo_packages:
         typer.echo(f"  {package}")
-    if not requirements.vsrepo.packages:
+    if not packages.vsrepo_packages:
         typer.echo("  none")
 
 
@@ -2835,30 +2219,23 @@ def vpy_packages_list() -> None:
 def vpy_packages_search(
     query: Annotated[str, typer.Argument(help="VSRepo package search query.")],
 ) -> None:
-    vsrepo = shutil.which("vsrepo")
-    if vsrepo is None:
-        typer.echo("VSRepo is not available in this runtime.")
-        raise typer.Exit(1)
-    update_result = subprocess.run(
-        [vsrepo, "update"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if update_result.returncode != 0:
-        if update_result.stdout:
-            typer.echo(update_result.stdout.rstrip())
-        if update_result.stderr:
-            typer.echo(update_result.stderr.rstrip(), err=True)
-        raise typer.Exit(update_result.returncode)
-
-    result = subprocess.run([vsrepo, "available"], capture_output=True, text=True, check=False)
-    if result.stdout:
-        query_folded = query.casefold()
-        matches = [
-            line for line in result.stdout.splitlines() if query_folded in line.casefold()
-        ]
-        typer.echo("\n".join(matches) if matches else "No matching VSRepo packages.")
+    adapters = _vapoursynth_environment_adapters()
+    try:
+        result = search_vapoursynth_packages(
+            query,
+            search_func=adapters.search_packages,
+            unavailable_errors=adapters.package_search_unavailable_errors,
+        )
+    except VapourSynthPackageSearchUnavailableError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    if result.matches is None:
+        if result.stdout:
+            typer.echo(result.stdout.rstrip())
+        if result.stderr:
+            typer.echo(result.stderr.rstrip(), err=True)
+        raise typer.Exit(result.returncode)
+    typer.echo("\n".join(result.matches) if result.matches else "No matching VSRepo packages.")
     if result.stderr:
         typer.echo(result.stderr.rstrip(), err=True)
     raise typer.Exit(result.returncode)
@@ -2872,19 +2249,24 @@ def vpy_packages_install(
         typer.Option("--kind", help="Dependency kind to add to the manifest."),
     ] = "python",
 ) -> None:
-    config = _workspace_config_path()
-    workspace = _workspace_for_config(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    workspace = cli_workspace.workspace
+    adapters = _vapoursynth_environment_adapters()
     try:
-        if kind == "python":
-            add_python_package(workspace, name)
-        else:
-            add_vsrepo_package(workspace, name)
-        environment = sync_environment(workspace)
-    except VpyEnvironmentError as exc:
+        environment = install_vapoursynth_package(
+            workspace,
+            name=name,
+            kind=kind,
+            add_python_package_func=adapters.add_python_package,
+            add_vsrepo_package_func=adapters.add_vsrepo_package,
+            sync_environment_func=adapters.sync_environment,
+            environment_errors=adapters.environment_errors,
+        )
+    except VapourSynthEnvironmentWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"Package installed: {name}")
-    typer.echo(f"Environment: {environment.identity.environment_id}")
+    typer.echo(f"Environment: {environment.environment_id}")
 
 
 @vpy_packages_app.command("remove")
@@ -2895,138 +2277,31 @@ def vpy_packages_remove(
         typer.Option("--kind", help="Dependency kind to remove from the manifest."),
     ] = "python",
 ) -> None:
-    config = _workspace_config_path()
-    workspace = _workspace_for_config(config)
+    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    workspace = cli_workspace.workspace
+    adapters = _vapoursynth_environment_adapters()
     try:
-        if kind == "python":
-            remove_python_package(workspace, name)
-        else:
-            remove_vsrepo_package(workspace, name)
-        environment = sync_environment(workspace)
-    except VpyEnvironmentError as exc:
+        environment = remove_vapoursynth_package(
+            workspace,
+            name=name,
+            kind=kind,
+            remove_python_package_func=adapters.remove_python_package,
+            remove_vsrepo_package_func=adapters.remove_vsrepo_package,
+            sync_environment_func=adapters.sync_environment,
+            environment_errors=adapters.environment_errors,
+        )
+    except VapourSynthEnvironmentWorkflowError as exc:
         typer.echo(str(exc))
         raise typer.Exit(1) from exc
     typer.echo(f"Package removed: {name}")
-    typer.echo(f"Environment: {environment.identity.environment_id}")
-
-
-def workflow_preview(
-    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
-) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        count = len(session.exec(select(MediaFile)).all())
-    typer.echo("Workflow preview")
-    typer.echo(f"Profile: {profile}")
-    typer.echo(f"Inventory files: {count}")
-
-
-def workflow_enqueue(
-    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
-    priority: Annotated[int, typer.Option("--priority", help="Queue priority.")] = 0,
-) -> None:
-    del profile, priority
-    typer.echo("The workflow namespace has been removed. Use plan and enqueue directly.")
-    raise typer.Exit(1)
-
-
-def encode_file(
-    file: Annotated[Path, typer.Argument(help="Tracked media file to encode.")],
-    profile: Annotated[str, typer.Option("--profile", help="Encoding profile name.")],
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="Create artifacts and print commands without encoding."),
-    ] = False,
-    check_vpy: Annotated[
-        bool,
-        typer.Option(
-            "--check-vpy/--no-check-vpy",
-            help="Run vspipe --info after writing the generated script.",
-        ),
-    ] = False,
-) -> None:
-    config = _workspace_config_path()
-    app_config = _load_and_configure(config)
-    database_url = resolve_database_url(app_config, config)
-    _upgrade_database_or_exit(database_url)
-    data_dir = resolve_data_dir(app_config, config)
-
-    file_path = _resolve_media_path(file)
-    engine = create_db_engine(database_url)
-    try:
-        registry = ProfileRegistry.from_config(app_config)
-        resolved_profile = registry.get(profile)
-        with Session(engine) as session:
-            context = load_planning_context(
-                session,
-                input_path=file_path,
-                resolved_profile=resolved_profile,
-            )
-            resolved_template = resolve_vapoursynth_template(context.profile)
-            resolved_filter = resolve_vapoursynth_filter(context.profile)
-            plan = build_plan(
-                context,
-                data_dir=data_dir,
-                resolved_template=resolved_template,
-                resolved_filter=resolved_filter,
-            )
-        vapoursynth_script = generate_vapoursynth_script(
-            plan,
-            template=resolved_template,
-            user_filter=resolved_filter,
-        )
-        validate_script_syntax(vapoursynth_script)
-        write_plan_artifacts(
-            plan=plan,
-            vapoursynth_script=vapoursynth_script,
-            user_filter=resolved_filter,
-            template=resolved_template,
-        )
-        if check_vpy:
-            check_vapoursynth_script(
-                plan.vapoursynth.script_path,
-                env=runtime_environment_variables(_workspace_for_config(config)),
-            )
-    except PlanArtifactConflictError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except PlanningError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except (ProfileRegistryError, UnknownProfileError) as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except VapourSynthGenerationError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    except VspipeError as exc:
-        typer.echo("VapourSynth artifacts were generated, but runtime validation failed.")
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-
-    if dry_run:
-        _echo_encode_dry_run(plan)
-        return
-
-    try:
-        status = execute_plan(plan)
-    except ExecutionError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-
-    typer.echo(f"Encode {status.replace('_', ' ')}")
-    typer.echo(f"Output: {plan.output_path}")
+    typer.echo(f"Environment: {environment.environment_id}")
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _echo_scan_result(result: ScanResult) -> None:
+def _echo_scan_result(result: InventoryScanResult) -> None:
     typer.echo(f"Scanning {result.root}")
     _echo_scan_counts(
         added=result.added,
@@ -3044,64 +2319,27 @@ def _echo_scan_counts(*, added: int, changed: int, missing: int, unchanged: int)
     typer.echo(f"Unchanged: {unchanged}")
 
 
-def _format_size(size_bytes: int) -> str:
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    size = float(size_bytes)
-    for unit in units:
-        if size < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(size)} B"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size_bytes} B"
-
-
-def _display_optional(value: str | None) -> str:
-    return value if value is not None else "unknown"
-
-
 def _echo_queue_counts(database_url: str) -> None:
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        jobs_by_status = {
-            status: len(session.exec(select(Job).where(Job.status == status)).all())
-            for status in JobStatus
-        }
+    with db_session(database_url) as session:
+        status = scheduler_status(scheduler_status_store(session), now=_utc_now())
+        jobs_by_status = status.counts_by_status
     typer.echo("Queue:")
-    typer.echo(f"  pending:   {jobs_by_status[JobStatus.PENDING]}")
-    typer.echo(f"  running:   {jobs_by_status[JobStatus.RUNNING]}")
-    typer.echo(f"  completed: {jobs_by_status[JobStatus.COMPLETED]}")
-    typer.echo(f"  failed:    {jobs_by_status[JobStatus.FAILED]}")
+    typer.echo(f"  queued:              {jobs_by_status[JobStatus.QUEUED]}")
+    typer.echo(f"  encoding:            {jobs_by_status[JobStatus.ENCODING]}")
+    typer.echo(f"  encoded:             {jobs_by_status[JobStatus.ENCODED]}")
+    typer.echo(f"  validating:          {jobs_by_status[JobStatus.VALIDATING]}")
+    typer.echo(f"  ready to promote:    {jobs_by_status[JobStatus.READY_TO_PROMOTE]}")
+    typer.echo(f"  promoting:           {jobs_by_status[JobStatus.PROMOTING]}")
+    typer.echo(f"  cleaning:            {jobs_by_status[JobStatus.CLEANING]}")
+    typer.echo(f"  promoted:            {jobs_by_status[JobStatus.PROMOTED]}")
+    typer.echo(f"  size rejected:       {jobs_by_status[JobStatus.SIZE_REJECTED]}")
+    typer.echo(f"  validation failed:   {jobs_by_status[JobStatus.VALIDATION_FAILED]}")
+    typer.echo(f"  failed:              {jobs_by_status[JobStatus.FAILED]}")
 
 
 def _echo_recent_failed_jobs(database_url: str, *, limit: int = 5) -> None:
-    engine = create_db_engine(database_url)
-    with Session(engine) as session:
-        failed_jobs = list(
-            session.exec(
-                select(Job)
-                .where(Job.status == JobStatus.FAILED)
-                .order_by(col(Job.id).desc())
-                .limit(limit)
-            ).all()
-        )
-        media_by_id = {
-            media_file.id: media_file
-            for media_file in session.exec(select(MediaFile)).all()
-            if media_file.id is not None
-        }
-        attempts_by_job: dict[int, JobAttempt] = {}
-        if failed_jobs:
-            job_ids = [job.id for job in failed_jobs if job.id is not None]
-            attempts = list(
-                session.exec(
-                    select(JobAttempt)
-                    .where(col(JobAttempt.job_id).in_(job_ids))
-                    .order_by(col(JobAttempt.attempt_number).desc())
-                ).all()
-            )
-            for attempt in attempts:
-                attempts_by_job.setdefault(attempt.job_id, attempt)
+    with db_session(database_url) as session:
+        failed_jobs = recent_failed_jobs(job_view_store(session), limit=limit)
 
     if not failed_jobs:
         return
@@ -3109,14 +2347,10 @@ def _echo_recent_failed_jobs(database_url: str, *, limit: int = 5) -> None:
     typer.echo("")
     typer.echo("Failed jobs:")
     for job in failed_jobs:
-        media_file = media_by_id.get(job.media_file_id)
-        path = Path(media_file.path).name if media_file is not None else "<missing>"
-        typer.echo(f"  {job.id:<3} {_job_stage_value(job.stage):<9} {path}")
-        _echo_error_block(job.last_error_type, job.last_error_message, indent="    ")
-        if job.id is not None:
-            attempt = attempts_by_job.get(job.id)
-            if attempt is not None:
-                _echo_attempt_log_status(attempt, indent="    ")
+        typer.echo(f"  {job.id:<3} {job_stage_value(job.stage):<9} {job.file_name}")
+        echo_error_block(job.last_error_type, job.last_error_message, indent="    ")
+        if job.latest_attempt is not None:
+            echo_attempt_log_status(job.latest_attempt, indent="    ")
 
 
 def _parse_job_statuses(value: str | None) -> set[JobStatus] | None:
@@ -3149,71 +2383,51 @@ def _parse_job_stages(value: str | None) -> set[JobStage] | None:
     return stages or None
 
 
-def _job_control_label(job: Job) -> str:
-    if job.cancel_requested_at is not None and _job_status_value(job.status) != JobStatus.CANCELED:
-        return "cancel"
-    if job.hold_requested_at is not None:
-        return "hold"
-    if _job_status_value(job.status) == JobStatus.HELD.value:
-        return "held"
-    return "-"
+def _wait_for_scheduler_inactive(database_url: str, *, timeout_seconds: float) -> bool:
+    def load_lease_state() -> str:
+        with db_session(database_url) as session:
+            status = scheduler_status(scheduler_status_store(session), now=_utc_now())
+            return status.lease_state
 
-
-def _attempt_status_value(status: object) -> str:
-    return str(getattr(status, "value", status))
-
-
-def _event_type_value(event_type: object) -> str:
-    return str(getattr(event_type, "value", event_type))
-
-
-def _display_optional_datetime(value: datetime | None) -> str:
-    if value is None:
-        return "-"
-    return value.isoformat(sep=" ", timespec="seconds")
-
-
-def _wait_for_scheduler_inactive(engine: Engine, *, timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() <= deadline:
-        with Session(engine) as session:
-            status = scheduler_status(session, now=_utc_now())
-            if status.lease_state == "inactive":
-                return True
-        time.sleep(0.25)
-    return False
+    return wait_for_scheduler_inactive(
+        load_lease_state=load_lease_state,
+        timeout_seconds=timeout_seconds,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
 
 
 def _wait_for_job_status(
-    engine: Engine,
+    database_url: str,
     job_id: int,
     expected: JobStatus,
     timeout_seconds: float,
 ) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() <= deadline:
-        with Session(engine) as session:
-            job = session.get(Job, job_id)
-            if job is not None and job.status == expected:
-                return True
-        time.sleep(0.25)
-    return False
+    def load_job_status() -> JobStatus | None:
+        with db_session(database_url) as session:
+            job = job_details(job_view_store(session), job_id=job_id)
+            return None if job is None else job.status
+
+    return wait_for_job_status(
+        load_job_status=load_job_status,
+        expected=expected,
+        timeout_seconds=timeout_seconds,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
 
 
-def _wait_for_queue_clear(engine: Engine, *, timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() <= deadline:
-        with Session(engine) as session:
-            pending = session.exec(
-                select(Job).where(
-                    Job.status == JobStatus.RUNNING,
-                    col(Job.cancel_requested_at).is_not(None),
-                )
-            ).first()
-            if pending is None:
-                return True
-        time.sleep(0.25)
-    return False
+def _wait_for_queue_clear(database_url: str, *, timeout_seconds: float) -> bool:
+    def has_running_requests() -> bool:
+        with db_session(database_url) as session:
+            return has_running_cancel_requests(queue_control_store(session))
+
+    return wait_for_queue_clear(
+        has_running_cancel_requests=has_running_requests,
+        timeout_seconds=timeout_seconds,
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
 
 
 def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None:
@@ -3231,277 +2445,6 @@ def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None
     text = data.decode("utf-8", errors="replace")
     if text:
         typer.echo(text.rstrip())
-
-
-def _echo_attempt_log_status(attempt: JobAttempt, *, indent: str) -> None:
-    statuses: list[str] = []
-    for label, log_path in (("stdout", attempt.stdout_log), ("stderr", attempt.stderr_log)):
-        if log_path is None:
-            statuses.append(f"{label}: -")
-            continue
-        path = Path(log_path)
-        suffix = "" if path.exists() else " (missing)"
-        statuses.append(f"{label}: {path}{suffix}")
-    typer.echo(f"{indent}logs: {', '.join(statuses)}")
-
-
-def _echo_error_block(
-    error_type: str | None,
-    error_message: str | None,
-    *,
-    indent: str,
-    max_length: int = 2000,
-) -> None:
-    typer.echo(f"{indent}{error_type or 'Error'}:")
-    if not error_message:
-        typer.echo(f"{indent}  -")
-        return
-    for line in _truncate_text(error_message, max_length=max_length).splitlines():
-        typer.echo(f"{indent}  {line}")
-
-
-def _truncate_text(value: str, *, max_length: int) -> str:
-    text = value.strip()
-    if len(text) <= max_length:
-        return text
-    return f"{text[: max_length - 15].rstrip()}\n... truncated ..."
-
-
-def _truncate_line(value: str, *, max_length: int = 120) -> str:
-    line = " ".join(value.splitlines()).strip()
-    if len(line) <= max_length:
-        return line
-    return f"{line[: max_length - 3]}..."
-
-
-def _canonical_validation(session: Session, job: Job) -> ValidationResult | None:
-    if job.latest_validation_id is None:
-        return None
-    result = session.get(ValidationResult, job.latest_validation_id)
-    if result is None or result.job_id != job.id:
-        return None
-    if result.plan_hash != job.plan_hash or result.output_path != job.output_path:
-        return None
-    return result
-
-
-def _report_path_for_job(engine: Engine, job_id: int) -> Path | None:
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-        if job is None or job.plan_path is None:
-            return None
-        try:
-            plan = TranscodePlan.model_validate_json(
-                Path(job.plan_path).read_text(encoding="utf-8")
-            )
-        except (OSError, ValidationError, ValueError):
-            return None
-        return plan.runtime.validation_report
-
-
-def _echo_encode_dry_run(plan: TranscodePlan) -> None:
-    mux_temporary_path = create_mux_temporary_path(plan.output_path)
-    try:
-        av1an_command = build_av1an_command(plan.av1an)
-        mux_command = build_ffmpeg_mux_command(plan.mux, mux_temporary_path)
-    finally:
-        mux_temporary_path.unlink(missing_ok=True)
-
-    typer.echo("Encode dry run")
-    typer.echo("")
-    typer.echo(f"Plan hash:    {plan.plan_hash}")
-    typer.echo(f"Output:       {plan.output_path}")
-    typer.echo(f"Artifact dir: {plan.artifacts.artifact_dir}")
-    typer.echo(f"Runtime dir:  {plan.runtime.runtime_dir}")
-    typer.echo("")
-    typer.echo("Av1an argv:")
-    for argument in av1an_command:
-        typer.echo(f"  {argument}")
-    typer.echo("")
-    typer.echo("FFmpeg mux argv:")
-    for argument in mux_command:
-        typer.echo(f"  {argument}")
-    typer.echo("")
-    typer.echo("No encoding was started.")
-
-
-def _echo_promotion_preview(preflight: PromotionPreflightResult, *, dry_run: bool) -> None:
-    result = preflight
-    typer.echo("Promotion dry run" if dry_run else "Promotion preview")
-    typer.echo("")
-    typer.echo(f"Job:               {result.job_id}")
-    typer.echo(f"Mode:              {result.mode.value}")
-    typer.echo(f"Source:            {result.source_path}")
-    typer.echo(f"Validated output:  {result.validated_output_path}")
-    typer.echo(f"Final path:        {result.final_path}")
-    backup_path = result.backup_path if result.backup_path is not None else "none"
-    typer.echo(f"Backup path:       {backup_path}")
-    typer.echo(f"Staging path:      {result.staging_path}")
-    typer.echo("")
-    typer.echo("Validation:")
-    typer.echo(f"  result:          {result.validation_result_id}")
-    typer.echo("  passed:          yes")
-    typer.echo("  output unchanged:yes")
-    typer.echo("")
-    typer.echo("Actions:")
-    typer.echo("  1. Hash validated output")
-    typer.echo("  2. Copy to destination-local staging")
-    typer.echo("  3. Verify staging digest")
-    typer.echo("  4. Atomically install final path")
-    typer.echo("  5. Verify final digest")
-    typer.echo("  6. Commit promotion")
-    typer.echo("  7. Clean disposable work files")
-    typer.echo("")
-    typer.echo("No files were changed.")
-
-
-def _echo_promotion_complete(record: PromotionRecord) -> None:
-    typer.echo("Promotion complete")
-    typer.echo("")
-    typer.echo(f"Job:               {record.job_id}")
-    typer.echo(f"Mode:              {_promotion_mode_value(record.mode)}")
-    typer.echo(f"Source retained:   {_source_retained_path(record)}")
-    typer.echo(f"Promoted output:   {record.final_path}")
-    typer.echo(f"Validation result: {record.validation_result_id}")
-    typer.echo(f"Promotion record:  {record.id}")
-    typer.echo(f"Cleanup:           {'complete' if record.cleanup_completed else 'warning'}")
-    if record.cleanup_error:
-        typer.echo(f"Cleanup warning:   {record.cleanup_error}")
-
-
-def _status_value(status: MediaFileStatus | str) -> str:
-    if isinstance(status, MediaFileStatus):
-        return status.value
-    return status
-
-
-def _job_status_value(status: JobStatus | str) -> str:
-    if isinstance(status, JobStatus):
-        return status.value
-    return status
-
-
-def _job_stage_value(stage: object) -> str:
-    return str(getattr(stage, "value", stage))
-
-
-def _promotion_mode_value(mode: object) -> str:
-    return str(getattr(mode, "value", mode))
-
-
-def _source_retained_path(record: PromotionRecord) -> str:
-    mode = _promotion_mode_value(record.mode)
-    if mode == PromotionMode.KEEP_ORIGINAL.value:
-        return record.source_path
-    if record.backup_path is not None:
-        return record.backup_path
-    return "none"
-
-
-def _profile_document_to_toml(document: ProfileDocument) -> str:
-    lines = [
-        "schema_version = 1",
-        f'name = "{_toml_escape(document.name)}"',
-    ]
-    if document.description is not None:
-        lines.append(f'description = "{_toml_escape(document.description)}"')
-    lines.append(f"tags = {_toml_string_list(document.tags)}")
-    lines.append("")
-    lines.append(f"known_limitations = {_toml_string_list(document.known_limitations)}")
-    lines.extend(
-        (
-            "",
-            f'backend = "{document.backend}"',
-            f'container = "{document.container}"',
-            "",
-            "[match]",
-            f"video_codec_not = {_toml_string_list(document.match.video_codec_not)}",
-            "",
-            "[video]",
-            f"max_width = {document.video.max_width}",
-            f"hdr_to_sdr = {_toml_bool(document.video.hdr_to_sdr)}",
-            f'source = "{document.video.source}"',
-            "",
-            "[av1an]",
-            f'encoder = "{document.av1an.encoder}"',
-            f"workers = {document.av1an.workers}",
-            f'video_args = "{_toml_escape(document.av1an.video_args)}"',
-            "",
-            "[audio]",
-            f'codec = "{_toml_escape(document.audio.codec)}"',
-            f'bitrate = "{_toml_escape(document.audio.bitrate)}"',
-            f"channels = {document.audio.channels}",
-            f"languages = {_toml_string_list(document.audio.languages)}",
-            "",
-            "[subtitles]",
-            f"languages = {_toml_string_list(document.subtitles.languages)}",
-            f"keep_forced = {_toml_bool(document.subtitles.keep_forced)}",
-            "",
-            "[validation]",
-            (
-                "duration_tolerance_seconds = "
-                f"{document.validation.duration_tolerance_seconds:g}"
-            ),
-            f"minimum_output_bytes = {document.validation.minimum_output_bytes}",
-            (
-                "minimum_output_source_ratio = "
-                f"{document.validation.minimum_output_source_ratio:g}"
-            ),
-            f"decode_sample = {_toml_bool(document.validation.decode_sample)}",
-            f"decode_sample_seconds = {document.validation.decode_sample_seconds:g}",
-        )
-    )
-    if document.validation.minimum_size_reduction_percent is not None:
-        lines.append(
-            "minimum_size_reduction_percent = "
-            f"{document.validation.minimum_size_reduction_percent:g}"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _toml_string_list(values: list[str]) -> str:
-    return "[" + ", ".join(f'"{_toml_escape(value)}"' for value in values) + "]"
-
-
-def _toml_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _toml_bool(value: bool) -> str:
-    return "true" if value else "false"
-
-
-def _filter_scaffold_text() -> str:
-    return """from __future__ import annotations
-
-import vapoursynth as vs
-
-from avarch.vpy_api import FilterContext
-
-
-def apply(video: vs.VideoNode, context: FilterContext) -> vs.VideoNode:
-    del context
-    return video
-"""
-
-
-def _template_scaffold_text() -> str:
-    return """from __future__ import annotations
-
-import vapoursynth as vs
-
-core = vs.core
-
-clip = core.bs.VideoSource(source=AVARCH_SOURCE_PATH)
-clip = core.resize.Spline36(
-    clip,
-    width=AVARCH_TARGET_WIDTH,
-    height=AVARCH_TARGET_HEIGHT,
-    format=vs.YUV420P10,
-)
-clip.set_output(index=0)
-"""
 
 
 app.add_typer(db_app, name="db")

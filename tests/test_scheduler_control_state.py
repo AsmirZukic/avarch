@@ -8,10 +8,9 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus, SchedulerState
-from avarch.models.scheduler import JobStage, JobStatus, SchedulerMode
-from avarch.scheduler import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, SchedulerState
+from avarch.adapters.sqlite.scheduler_state import (
     SCHEDULER_LEASE_SECONDS,
     SchedulerAlreadyRunningError,
     SchedulerControlError,
@@ -20,9 +19,12 @@ from avarch.scheduler import (
     pause_scheduler,
     release_scheduler_lease,
     resume_scheduler,
-    scheduler_status,
     stop_scheduler,
 )
+from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
+from avarch.application.scheduler_status import scheduler_status
+from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.scheduler import SchedulerMode
 
 
 def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> None:
@@ -292,24 +294,24 @@ def test_scheduler_status_reports_counts_pending_controls_and_lease_state(
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
-        _store_job(session, tmp_path, "pending", status=JobStatus.PENDING, now=now)
-        running = _store_job(session, tmp_path, "running", status=JobStatus.RUNNING, now=now)
+        _store_job(session, tmp_path, "pending", status=JobStatus.QUEUED, now=now)
+        running = _store_job(session, tmp_path, "running", status=JobStatus.ENCODING, now=now)
         held = _store_job(session, tmp_path, "held", status=JobStatus.HELD, now=now)
         running.cancel_requested_at = now
         held.hold_requested_at = now
         acquire_scheduler_lease(session, runner_id="runner", now=now)
 
     with Session(engine) as session:
-        status = scheduler_status(session, now=now)
+        status = scheduler_status(SqliteSchedulerStatusStore(session), now=now)
 
     assert status.lease_state == "active"
     assert status.runner_id == "runner"
-    assert status.counts_by_status[JobStatus.PENDING] == 1
-    assert status.counts_by_status[JobStatus.RUNNING] == 1
+    assert status.counts_by_status[JobStatus.QUEUED] == 1
+    assert status.counts_by_status[JobStatus.ENCODING] == 1
     assert status.counts_by_status[JobStatus.HELD] == 1
     assert status.cancel_pending == 1
     assert status.hold_pending == 0
-    assert [job.profile_name for job in status.active_jobs] == ["running"]
+    assert [job.file_name for job in status.active_jobs] == ["running.mkv"]
 
 
 def test_scheduler_status_reports_stale_lease(tmp_path: Path) -> None:
@@ -327,7 +329,7 @@ def test_scheduler_status_reports_stale_lease(tmp_path: Path) -> None:
         )
 
     with Session(engine) as session:
-        status = scheduler_status(session, now=now)
+        status = scheduler_status(SqliteSchedulerStatusStore(session), now=now)
 
     assert status.lease_state == "stale"
 
@@ -342,14 +344,14 @@ def test_acquired_lease_sets_expected_expiry(tmp_path: Path) -> None:
         state = session.get(SchedulerState, 1)
 
     assert state is not None
-    assert state.lease_expires_at == (
-        now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)
-    ).replace(tzinfo=None)
+    assert state.lease_expires_at == (now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)).replace(
+        tzinfo=None
+    )
 
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

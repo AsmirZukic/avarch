@@ -7,8 +7,8 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from avarch.cli import app
-from avarch.vpy_env import (
+from avarch.adapters.filesystem.workspace import WorkspaceContext, create_workspace
+from avarch.adapters.vpy_env import (
     VpyRequirements,
     add_python_package,
     add_vsrepo_package,
@@ -19,7 +19,7 @@ from avarch.vpy_env import (
     runtime_environment_variables,
     sync_environment,
 )
-from avarch.workspace import WorkspaceContext, create_workspace
+from avarch.cli import app
 
 runner = CliRunner()
 
@@ -124,7 +124,7 @@ def test_vpy_packages_install_and_remove_update_manifest(
             lock_path=workspace.vpy_environments_dir / identity.environment_id / "lock.toml",
         )
 
-    monkeypatch.setattr("avarch.cli.sync_environment", fake_sync)
+    monkeypatch.setattr("avarch.bootstrap.sync_environment", fake_sync)
     install_result = runner.invoke(app, ["vpy", "packages", "install", "demo==1"])
     remove_result = runner.invoke(app, ["vpy", "packages", "remove", "demo==1"])
     native_install_result = runner.invoke(

@@ -5,10 +5,11 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.scheduler import build_queue_key, find_existing_queue_job
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.queue import find_existing_queue_job
+from avarch.application.queue_identity import build_queue_key
+from avarch.domain.jobs import JobStage, JobStatus
 
 
 def test_queue_key_is_deterministic(tmp_path: Path) -> None:
@@ -55,7 +56,7 @@ def test_null_probe_hash_is_distinct_from_real_probe_hash(tmp_path: Path) -> Non
 
 
 def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     queue_key = _queue_key(tmp_path)
@@ -82,7 +83,7 @@ def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
                 profile_hash="profile-hash",
                 source_fs_fingerprint="fingerprint",
                 queue_key=queue_key,
-                status=JobStatus.COMPLETED,
+                status=JobStatus.PROMOTED,
                 stage=JobStage.ENCODE,
                 created_at=now,
                 updated_at=now,
@@ -94,7 +95,7 @@ def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
         found = find_existing_queue_job(session, queue_key=queue_key)
 
     assert found is not None
-    assert found.status == JobStatus.COMPLETED
+    assert found.status == JobStatus.PROMOTED
 
 
 def _queue_key(

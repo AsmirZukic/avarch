@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,6 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from avarch.contracts import (
     VALIDATION_POLICY_SCHEMA_VERSION,
     VALIDATION_REPORT_SCHEMA_VERSION,
+)
+from avarch.domain.validation import (
+    ValidationCheckStatus,
+    ValidationResult,
+    failure_reasons_for_checks,
+)
+from avarch.domain.validation import (
+    checks_pass as domain_checks_pass,
 )
 from avarch.models.probe import AudioStream, SubtitleStream, VideoStream
 
@@ -67,13 +74,6 @@ class ValidationPolicy(BaseModel):
     decode_sample: DecodeSamplePolicy
 
 
-class ValidationCheckStatus(StrEnum):
-    PASS = "pass"
-    FAIL = "fail"
-    WARNING = "warning"
-    SKIPPED = "skipped"
-
-
 class ValidationCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -128,6 +128,14 @@ class ValidationReport(BaseModel):
     started_at: datetime
     finished_at: datetime
 
+    @property
+    def result(self) -> ValidationResult:
+        return ValidationResult.PASS if checks_pass(self.checks) else ValidationResult.FAIL
+
+    @property
+    def failure_reasons(self) -> list[str]:
+        return failure_reasons_for_checks(self.checks)
+
 
 def checks_pass(checks: list[ValidationCheck]) -> bool:
-    return all(check.status == ValidationCheckStatus.PASS for check in checks if check.required)
+    return domain_checks_pass(checks)
