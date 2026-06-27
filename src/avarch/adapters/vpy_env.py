@@ -32,6 +32,10 @@ class VpyEnvironmentError(RuntimeError):
     pass
 
 
+class VsrepoUnavailableError(VpyEnvironmentError):
+    pass
+
+
 class PythonRequirements(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -92,6 +96,14 @@ class VpyEnvironment:
     identity: RuntimeIdentity
     path: Path
     lock_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class VsrepoSearchResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    matches: tuple[str, ...] | None
 
 
 def load_requirements(workspace: WorkspaceContext) -> VpyRequirements:
@@ -174,6 +186,36 @@ def remove_vsrepo_package(workspace: WorkspaceContext, package: str) -> VpyRequi
     )
     write_requirements(workspace, updated)
     return updated
+
+
+def search_vsrepo_packages(query: str) -> VsrepoSearchResult:
+    vsrepo = shutil.which("vsrepo")
+    if vsrepo is None:
+        raise VsrepoUnavailableError("VSRepo is not available in this runtime.")
+
+    update_result = subprocess.run(
+        [vsrepo, "update"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if update_result.returncode != 0:
+        return VsrepoSearchResult(
+            returncode=update_result.returncode,
+            stdout=update_result.stdout,
+            stderr=update_result.stderr,
+            matches=None,
+        )
+
+    result = subprocess.run([vsrepo, "available"], capture_output=True, text=True, check=False)
+    query_folded = query.casefold()
+    matches = tuple(line for line in result.stdout.splitlines() if query_folded in line.casefold())
+    return VsrepoSearchResult(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        matches=matches,
+    )
 
 
 def build_runtime_identity(requirements: VpyRequirements) -> RuntimeIdentity:

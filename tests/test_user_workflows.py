@@ -77,7 +77,7 @@ def test_media_catalog_workflow_can_stop_after_probe_and_inspect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, movie = _tracked_movie(tmp_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
 
     probe_result = runner.invoke(app, ["probe", "--file", str(movie)])
     inspect_result = runner.invoke(app, ["files", "show", "--file", str(movie)])
@@ -93,7 +93,7 @@ def test_plan_workflow_materializes_bundle_for_manual_av1an_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path, movie = _tracked_movie(tmp_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
     _probe(config_path, movie)
 
     plan_result = runner.invoke(
@@ -118,7 +118,7 @@ def test_plan_check_vpy_workflow_runs_runtime_validation_when_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path, movie = _tracked_movie(tmp_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
     _probe(config_path, movie)
     calls: list[Path] = []
 
@@ -126,7 +126,7 @@ def test_plan_check_vpy_workflow_runs_runtime_validation_when_requested(
         calls.append(script_path)
         return object()
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fake_check)
 
     result = runner.invoke(
         app,
@@ -150,13 +150,13 @@ def test_runtime_validation_failure_keeps_generated_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path, movie = _tracked_movie(tmp_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
     _probe(config_path, movie)
 
     def fail_check(_script_path: Path, **_kwargs: object) -> object:
         raise VspipeProcessError("bounded stdout/stderr excerpt")
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fail_check)
 
     result = runner.invoke(
         app,
@@ -182,7 +182,7 @@ def test_existing_artifact_conflict_workflow_blocks_overwrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path, movie = _tracked_movie(tmp_path)
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
     _probe(config_path, movie)
 
     first = runner.invoke(
@@ -219,7 +219,7 @@ def test_custom_template_workflow_supports_hdr_and_preserves_user_body(
         name="custom_template",
         extra='[vapoursynth]\nmode = "custom_template"\ntemplate = "custom.vpy"\n',
     )
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_hdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_hdr_ffprobe)
     _probe(config_path, movie)
 
     result = runner.invoke(
@@ -249,7 +249,7 @@ def test_multiple_config_workflow_isolates_databases_and_artifacts(
     second_dir.mkdir()
     movie = tmp_path / "shared.mkv"
     movie.write_bytes(b"media")
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_sdr_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_sdr_ffprobe)
 
     first_config = _init_config(first_dir)
     second_config = _init_config(second_dir)

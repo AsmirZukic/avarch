@@ -447,10 +447,13 @@ def _validate_builtin_plan(plan: TranscodePlan) -> None:
         raise UnsupportedSourceFormatError(
             f"unsupported source pixel format: {plan.vapoursynth.source_pix_fmt}"
         )
-    if is_hdr_source(
-        source_color_transfer=plan.vapoursynth.source_color_transfer,
-        source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
-    ) and not plan.vapoursynth.hdr_to_sdr:
+    if (
+        is_hdr_source(
+            source_color_transfer=plan.vapoursynth.source_color_transfer,
+            source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
+        )
+        and not plan.vapoursynth.hdr_to_sdr
+    ):
         raise HdrProcessingNotImplementedError(
             "built-in VapourSynth generation requires hdr_to_sdr for HDR input"
         )

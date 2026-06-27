@@ -71,7 +71,7 @@ def test_plan_command_does_not_run_vspipe_by_default(
     def fail_check(_path: Path, **_kwargs: object) -> object:
         raise AssertionError("plan must not run vspipe unless --check-vpy is requested")
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fail_check)
 
     result = runner.invoke(
         app,
@@ -94,7 +94,7 @@ def test_plan_command_check_vpy_validates_bestsource_script(
         calls.append(script_path)
         return object()
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fake_check)
 
     result = runner.invoke(
         app,
@@ -149,7 +149,7 @@ def test_plan_command_executes_no_external_process(
     def fail_probe(_path: Path) -> dict[str, Any]:
         raise AssertionError("plan must not execute ffprobe")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(
         app,

@@ -469,7 +469,7 @@ def _tracked_and_probed_movie(
     def fake_ffprobe(_path: Path) -> dict[str, object]:
         return sdr_probe_payload()
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fake_ffprobe)
     scan = runner.invoke(app, ["scan", str(media_root)])
     probe = runner.invoke(app, ["probe", "--file", str(movie)])
     assert scan.exit_code == 0

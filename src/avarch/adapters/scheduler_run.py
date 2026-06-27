@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 
 from sqlmodel import Session
 
-from avarch.adapters.scheduler_support import encoded_output_exists, require_id
+from avarch.adapters.job_preparation import encoded_output_exists, require_id
 from avarch.adapters.scheduler_workers import (
+    execute_cleanup_job,
     execute_encode_job,
     execute_plan_job,
     execute_probe_job,
@@ -23,6 +25,7 @@ from avarch.adapters.sqlite.scheduler_state import (
     has_pending_jobs,
     terminal_job_counts,
 )
+from avarch.application.promotion import PromotionWorkflow
 from avarch.application.scheduler_run import (
     SchedulerAlreadyRunningError,
     SchedulerControlError,
@@ -37,11 +40,14 @@ from avarch.domain.scheduler import ClaimableJob, SchedulerMode
 
 
 class SchedulerRuntimeAdapter:
+    def __init__(self, *, workers: SchedulerWorkerAdapter) -> None:
+        self._workers = workers
+
     def store(self, *, config: AppConfig) -> SchedulerRunStore:
         return SqliteSchedulerRunStore(config)
 
     def workers(self) -> SchedulerWorkerAdapter:
-        return SchedulerWorkerAdapter()
+        return self._workers
 
 
 class SqliteSchedulerRunStore:
@@ -139,6 +145,9 @@ class SqliteSchedulerRunStore:
 
 
 class SchedulerWorkerAdapter:
+    def __init__(self, *, promotion_workflow_factory: Callable[[], PromotionWorkflow]) -> None:
+        self._promotion_workflow_factory = promotion_workflow_factory
+
     async def run_job(
         self,
         *,
@@ -147,11 +156,19 @@ class SchedulerWorkerAdapter:
         runner_id: str,
         config: AppConfig,
     ) -> None:
+        if stage == JobStage.PROMOTE:
+            await execute_promotion_job(
+                job_id=job_id,
+                runner_id=runner_id,
+                config=config,
+                promotion_workflow=self._promotion_workflow_factory(),
+            )
+            return
         worker = {
             JobStage.PROBE: execute_probe_job,
             JobStage.PLAN: execute_plan_job,
             JobStage.ENCODE: execute_encode_job,
             JobStage.VALIDATE: execute_validation_job,
-            JobStage.PROMOTE: execute_promotion_job,
+            JobStage.CLEANUP: execute_cleanup_job,
         }[stage]
         await worker(job_id=job_id, runner_id=runner_id, config=config)

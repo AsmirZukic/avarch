@@ -5,12 +5,10 @@ import errno
 import os
 import shutil
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
-from pydantic import BaseModel
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
@@ -23,6 +21,20 @@ from avarch.adapters.filesystem.promotion import (
     write_promotion_journal,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.promotion_types import (
+    PromotionConflictError,
+    PromotionEligibilityError,
+    PromotionError,
+    PromotionFilesystemError,
+    PromotionLeaseError,
+    PromotionPersistenceError,
+    PromotionPreflightResult,
+    PromotionRecoveryError,
+    PromotionResult,
+    PromotionRollbackError,
+    PromotionVerificationError,
+    StagedOutput,
+)
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.models import (
     Job,
@@ -81,84 +93,6 @@ from avarch.serialization import canonical_json
 PROMOTION_LEASE_SECONDS = 30.0
 PROMOTION_HEARTBEAT_SECONDS = 5.0
 PROMOTION_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024
-
-
-class PromotionError(RuntimeError):
-    pass
-
-
-class PromotionEligibilityError(PromotionError):
-    pass
-
-
-class PromotionConflictError(PromotionError):
-    pass
-
-
-class PromotionLeaseError(PromotionError):
-    pass
-
-
-class PromotionFilesystemError(PromotionError):
-    pass
-
-
-class PromotionVerificationError(PromotionError):
-    pass
-
-
-class PromotionRecoveryError(PromotionError):
-    pass
-
-
-class PromotionRollbackError(PromotionError):
-    pass
-
-
-class PromotionPersistenceError(PromotionError):
-    pass
-
-
-class PromotionPreflightResult(BaseModel):
-    job_id: int
-    validation_result_id: int
-
-    mode: PromotionMode
-
-    source_path: Path
-    validated_output_path: Path
-
-    final_path: Path
-    staging_path: Path
-    backup_path: Path | None
-
-    source_fingerprint: str
-    source_stat: FileStatSnapshot
-
-    validated_output_fingerprint: str
-    validated_output_size: int
-
-    destination_free_bytes: int
-    required_free_bytes: int
-
-    warnings: list[str]
-
-
-@dataclass(frozen=True, slots=True)
-class PromotionResult:
-    job_id: int
-    promotion_id: int
-    status: PromotionStatus
-    final_path: Path
-    promoted: bool
-    error_message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class StagedOutput:
-    source_digest: str
-    staging_digest: str
-    size_bytes: int
 
 
 class PromotionHeartbeat:

@@ -1,23 +1,123 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
+from types import TracebackType
 
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, select
 
 from avarch.adapters.filesystem.workspace import WorkspaceContext, WorkspaceError
-from avarch.adapters.probe import ProbeError, parse_normalized_probe_json
+from avarch.adapters.sqlite.inventory import select_inventory_files
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, MediaPlan, ProbeResult
-from avarch.application.planning import PlanningContext, PlanningError
+from avarch.application.planning import (
+    PlanningContext,
+    PlanningError,
+    PlanningInputFile,
+    PlanningInputSelection,
+    PlanningProfile,
+)
+from avarch.application.probe_summary import ProbeSummaryError, parse_normalized_probe_json
 from avarch.models.plan import TranscodePlan
-from avarch.profiles.registry import ResolvedProfile
+
+
+class SqlitePlanningStore:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def select_inputs(
+        self,
+        *,
+        file_selectors: Sequence[Path],
+        workspace_root: Path,
+        resolve_path: Callable[[Path], Path],
+    ) -> PlanningInputSelection:
+        selection = select_inventory_files(
+            self._session,
+            file_selectors=file_selectors,
+            workspace_root=workspace_root,
+            resolve_path=resolve_path,
+        )
+        return PlanningInputSelection(
+            selected=tuple(
+                _planning_input(self._session, media_file) for media_file in selection.selected
+            ),
+            missing=selection.missing,
+        )
+
+    def eligible_inputs(self) -> list[PlanningInputFile]:
+        return [
+            _planning_input(self._session, media_file)
+            for media_file in eligible_files_for_planning(self._session)
+        ]
+
+    def load_context(
+        self,
+        *,
+        input_path: Path,
+        resolved_profile: PlanningProfile,
+    ) -> PlanningContext:
+        return load_planning_context(
+            self._session,
+            input_path=input_path,
+            resolved_profile=resolved_profile,
+        )
+
+    def equivalent_current_plan_exists(
+        self,
+        *,
+        media_file_id: int | None,
+        probe_hash: str,
+        profile_hash: str,
+        execution_identity_hash: str,
+    ) -> bool:
+        return equivalent_current_plan_exists(
+            self._session,
+            media_file_id=media_file_id,
+            probe_hash=probe_hash,
+            profile_hash=profile_hash,
+            execution_identity_hash=execution_identity_hash,
+        )
+
+    def persist_plan(self, *, plan: TranscodePlan, now: datetime) -> None:
+        persist_media_plan(self._session, plan=plan, now=now)
+
+
+class SqlitePlanningUnitOfWork:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        self._session: Session | None = None
+
+    def __enter__(self) -> SqlitePlanningStore:
+        session = Session(self._engine)
+        self._session = session
+        return SqlitePlanningStore(session)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc, traceback
+        if self._session is None:
+            return
+        try:
+            if exc_type is None:
+                self._session.commit()
+            else:
+                self._session.rollback()
+        finally:
+            self._session.close()
+            self._session = None
 
 
 def load_planning_context(
     session: Session,
     *,
     input_path: Path,
-    resolved_profile: ResolvedProfile,
+    resolved_profile: PlanningProfile,
 ) -> PlanningContext:
     media_file = _get_media_file_for_input(session, input_path)
     if media_file is None:
@@ -40,7 +140,7 @@ def load_planning_context(
 
     try:
         normalized_probe = parse_normalized_probe_json(probe_result.normalized_json)
-    except ProbeError as exc:
+    except ProbeSummaryError as exc:
         raise PlanningError(str(exc)) from exc
     if not normalized_probe.video_streams:
         raise PlanningError("The canonical probe contains no video stream.")
@@ -190,6 +290,25 @@ def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
     return status
+
+
+def _planning_input(session: Session, media_file: MediaFile) -> PlanningInputFile:
+    return PlanningInputFile(
+        id=media_file.id,
+        path=media_file.path,
+        size_bytes=media_file.size_bytes,
+        fs_fingerprint=media_file.fs_fingerprint,
+        probe_state=_probe_state(session, media_file),
+    )
+
+
+def _probe_state(session: Session, media_file: MediaFile) -> str:
+    if media_file.latest_probe_id is None:
+        return "missing"
+    probe_result = session.get(ProbeResult, media_file.latest_probe_id)
+    if probe_result is None or probe_result.source_fs_fingerprint != media_file.fs_fingerprint:
+        return "stale"
+    return "current"
 
 
 def _supersede_other_current_plans(

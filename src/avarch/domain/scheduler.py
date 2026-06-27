@@ -63,7 +63,7 @@ def resource_for_stage(stage: JobStage) -> ResourceClass:
         return ResourceClass.CHEAP
     if stage == JobStage.ENCODE:
         return ResourceClass.HEAVY_AV1AN
-    if stage == JobStage.PROMOTE:
+    if stage in {JobStage.PROMOTE, JobStage.CLEANUP}:
         return ResourceClass.FILE_OP
     raise ValueError(f"Unsupported job stage: {stage}")
 

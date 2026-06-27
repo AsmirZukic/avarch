@@ -59,7 +59,7 @@ def test_inspect_does_not_execute_ffprobe(
     def fail_probe(_path: Path) -> dict[str, object]:
         raise AssertionError("inspect must not execute ffprobe")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(app, ["files", "show", "--file", str(media_file)])
 

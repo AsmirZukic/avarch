@@ -159,10 +159,6 @@ def select_queue_jobs(
     return list(session.exec(statement).all())
 
 
-def failed_jobs_for_retry(session: Session) -> list[Job]:
-    return list(session.exec(select(Job).where(Job.status == JobStatus.FAILED)).all())
-
-
 def select_plans_for_enqueue(
     session: Session,
     *,

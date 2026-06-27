@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlmodel import Session
+from sqlmodel import Session, col, select
 
-from avarch.adapters.scheduler_support import (
+from avarch.adapters.job_preparation import (
     JobPreparationError,
     StaleJobProfileError,
     load_job_plan,
@@ -16,7 +16,7 @@ from avarch.adapters.scheduler_support import (
 )
 from avarch.adapters.sqlite import job_control
 from avarch.adapters.sqlite.job_transitions import require_job
-from avarch.adapters.sqlite.models import MediaFileStatus
+from avarch.adapters.sqlite.models import Job, MediaFileStatus
 from avarch.adapters.sqlite.probes import get_canonical_probe_result
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.queue import QueueSelectionError, select_queue_jobs
@@ -31,6 +31,19 @@ from avarch.domain.scheduler import RetryFacts
 class SqliteQueueControlStore:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def has_running_cancel_requests(self) -> bool:
+        return (
+            self._session.exec(
+                select(Job)
+                .where(
+                    Job.status == JobStatus.ENCODING,
+                    col(Job.cancel_requested_at).is_not(None),
+                )
+                .limit(1)
+            ).first()
+            is not None
+        )
 
     def select_queue_jobs(
         self,
