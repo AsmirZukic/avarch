@@ -5,17 +5,27 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, MediaFile, MediaFileStatus
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
-from avarch.scheduler import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_transitions import (
     JobClaimError,
+    JobTransitionError,
     claim_job_stage,
     complete_job_stage,
     fail_job_stage,
     interrupt_job_stage,
+    queue_rejected_output_cleanup,
+    transition_job,
+)
+from avarch.adapters.sqlite.models import Job, JobAttempt, MediaFile, MediaFileStatus
+from avarch.domain.jobs import (
+    AttemptStatus,
+    JobOutcomeReason,
+    JobStage,
+    JobStatus,
+    ResourceClass,
 )
 
 
@@ -29,7 +39,7 @@ def test_claim_sets_job_running(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.claimed_by == "runner"
 
 
@@ -71,7 +81,7 @@ def test_claim_sets_first_started_at_only_once(tmp_path: Path) -> None:
 
 
 def test_claim_rejects_nonpending_job(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.COMPLETED)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.PROMOTED)
 
     with Session(engine) as session, pytest.raises(JobClaimError):
         claim_job_stage(session, job_id=job_id, runner_id="runner", now=datetime.now(UTC))
@@ -92,7 +102,7 @@ def test_completion_advances_stage(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.PLAN
 
 
@@ -111,7 +121,7 @@ def test_final_completion_marks_job_completed(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.COMPLETED
+    assert job.status == JobStatus.PROMOTED
     assert job.finished_at is not None
 
 
@@ -169,7 +179,7 @@ def test_interruption_returns_job_to_pending(tmp_path: Path) -> None:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
 
 
 def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
@@ -190,14 +200,110 @@ def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
     assert stored_attempt.exit_code == 130
 
 
+def test_job_can_transition_from_encoded_to_validating(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.ENCODED, stage=JobStage.VALIDATE)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.VALIDATING, now=now)
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.VALIDATING
+
+
+def test_job_cannot_promote_from_encoding(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.ENCODING, stage=JobStage.ENCODE)
+
+    with Session(engine) as session, session.begin(), pytest.raises(JobTransitionError):
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.PROMOTING)
+
+
+def test_job_records_outcome_reason(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.VALIDATING, stage=JobStage.VALIDATE)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(
+            job,
+            JobStatus.VALIDATION_FAILED,
+            reason=JobOutcomeReason.FAILED_VALIDATION,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.VALIDATION_FAILED
+    assert job.outcome_reason == JobOutcomeReason.FAILED_VALIDATION
+
+
+def test_invalid_transition_is_rejected(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
+
+    with Session(engine) as session, session.begin(), pytest.raises(JobTransitionError):
+        job = session.get(Job, job_id)
+        assert job is not None
+        transition_job(job, JobStatus.PROMOTED)
+
+
+def test_stale_job_write_is_rejected(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
+    first = Session(engine)
+    second = Session(engine)
+    try:
+        first_job = first.get(Job, job_id)
+        second_job = second.get(Job, job_id)
+        assert first_job is not None
+        assert second_job is not None
+
+        transition_job(first_job, JobStatus.ENCODING, now=datetime.now(UTC))
+        first.commit()
+
+        transition_job(second_job, JobStatus.CANCELLED, now=datetime.now(UTC))
+        with pytest.raises(StaleDataError):
+            second.commit()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_rejected_output_cleanup_handoff_queues_cleanup_stage(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.READY_TO_PROMOTE,
+        stage=JobStage.PROMOTE,
+    )
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, job_id)
+        assert job is not None
+        queue_rejected_output_cleanup(job, now=now)
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == JobStatus.QUEUED
+    assert job.stage == JobStage.CLEANUP
+
+
 def _stored_job(
     tmp_path: Path,
     *,
-    status: JobStatus = JobStatus.PENDING,
+    status: JobStatus = JobStatus.QUEUED,
     stage: JobStage = JobStage.PROBE,
     started_at: datetime | None = None,
 ) -> tuple[Engine, int]:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     with Session(engine) as session:

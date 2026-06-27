@@ -9,10 +9,10 @@ from sqlalchemy import Engine
 from sqlmodel import Session
 from typer.testing import CliRunner
 
-from avarch.cli import app
-from avarch.config import AppConfig, load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import (
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import normalize_probe
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     MediaFile,
@@ -20,21 +20,30 @@ from avarch.models.db import (
     ProbeResult,
     ValidationResult,
 )
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.adapters.validation import validate_output
+from avarch.application.planning import (
+    build_execution_identity,
+    build_profile_hash,
+    finalize_plan_hash,
+)
+from avarch.application.vapoursynth_identity import (
+    GENERATOR_VERSION,
+    build_vapoursynth_identity_hash,
+)
+from avarch.cli import app
+from avarch.config import AppConfig, load_config
+from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, ResourceClass
 from avarch.models.plan import ExecutionRuntimePaths, PlanArtifactPaths, TranscodePlan
-from avarch.models.scheduler import AttemptStatus, JobStage, JobStatus, ResourceClass
 from avarch.models.validation import (
     ObservedValidationMedia,
     ValidationCheck,
     ValidationCheckStatus,
     ValidationReport,
 )
-from avarch.planner import build_execution_identity, build_profile_hash, finalize_plan_hash
-from avarch.probe import normalize_probe, store_probe_result
 from avarch.profiles.registry import ProfileRegistry
-from avarch.scanner import create_file_snapshot
 from avarch.serialization import canonical_json
-from avarch.validation import validate_output
-from avarch.vapoursynth import GENERATOR_VERSION, build_vapoursynth_identity_hash
 from tests.probe_fixtures import sdr_probe_payload
 from tests.test_plan_models import sample_plan
 
@@ -248,7 +257,7 @@ def test_jobs_workflow_shows_old_failed_job_and_new_passing_validation(
 
     assert result.exit_code == 0
     assert "failed" in result.output
-    assert "validated" in result.output
+    assert "ready_to_promote" in result.output
     assert "encoder crashed" in result.output
 
 
@@ -276,7 +285,7 @@ def test_existing_passing_validation_is_reused_without_running_worker(
     async def fail_if_called(**_kwargs: object) -> object:
         raise AssertionError("completed PASS validation should be reused")
 
-    monkeypatch.setattr("avarch.cli.execute_validation_job", fail_if_called)
+    monkeypatch.setattr("avarch.cli.run_validation_job", fail_if_called)
 
     result = runner.invoke(
         app,
@@ -343,7 +352,7 @@ def test_retry_workflow_resets_failed_validate_job_to_validate_stage(
     assert result.exit_code == 0
     assert "Failed jobs retry prepared: 1" in result.output
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.VALIDATE
 
 
@@ -375,7 +384,7 @@ def test_validation_report_workflow_for_missing_output_fails_required_checks(
         queue_key="queue",
         plan_hash=plan.plan_hash,
         output_path=str(plan.output_path),
-        status=JobStatus.PENDING,
+        status=JobStatus.QUEUED,
         stage=JobStage.VALIDATE,
         created_at=now,
         updated_at=now,
@@ -460,7 +469,7 @@ def _tracked_and_probed_movie(
     def fake_ffprobe(_path: Path) -> dict[str, object]:
         return sdr_probe_payload()
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fake_ffprobe)
     scan = runner.invoke(app, ["scan", str(media_root)])
     probe = runner.invoke(app, ["probe", "--file", str(movie)])
     assert scan.exit_code == 0
@@ -527,7 +536,7 @@ def _store_completed_validation_job(
         plan_hash=plan.plan_hash,
         plan_path=str(plan.artifacts.plan_json),
         output_path=str(plan.output_path),
-        status=JobStatus.VALIDATED,
+        status=JobStatus.READY_TO_PROMOTE,
         stage=JobStage.PROMOTE,
         attempts=1,
         created_at=now,

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from avarch.promoter import (
+from avarch.domain.promotion import (
     derive_backup_path,
     derive_keep_original_path,
     derive_promotion_journal_path,
@@ -27,9 +27,7 @@ def test_multi_dot_filename_is_preserved() -> None:
 
 
 def test_backup_suffix_is_appended_to_full_name() -> None:
-    assert derive_backup_path(Path("/media/Movie.mkv")) == Path(
-        "/media/Movie.mkv.avarch-original"
-    )
+    assert derive_backup_path(Path("/media/Movie.mkv")) == Path("/media/Movie.mkv.avarch-original")
 
 
 def test_staging_is_hidden_sibling_of_final() -> None:

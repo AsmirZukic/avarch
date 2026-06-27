@@ -8,9 +8,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.migrations import migration_project_root, upgrade_database
 from avarch.contracts import ALEMBIC_BASELINE_REVISION, ALEMBIC_HEAD_REVISION
-from avarch.db import create_db_engine
-from avarch.db_migrations import migration_project_root, upgrade_database
 
 
 def test_repository_contains_migration_revisions() -> None:
@@ -20,6 +20,9 @@ def test_repository_contains_migration_revisions() -> None:
     assert [revision.name for revision in revisions] == [
         "0001_initial_schema.py",
         "0002_media_plan.py",
+        "0003_job_outcome_reason.py",
+        "0004_promotion_target_lock.py",
+        "0005_job_state_version.py",
     ]
 
 
@@ -42,14 +45,38 @@ def test_initial_revision_has_no_parent() -> None:
 
 def test_media_plan_revision_depends_on_initial_revision() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0002_media_plan")
 
     assert revision is not None
     assert revision.down_revision == ALEMBIC_BASELINE_REVISION
 
 
+def test_job_outcome_reason_revision_depends_on_media_plan() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0003_job_outcome_reason")
+
+    assert revision is not None
+    assert revision.down_revision == "0002_media_plan"
+
+
+def test_promotion_target_lock_revision_depends_on_job_outcome_reason() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0004_promotion_target_lock")
+
+    assert revision is not None
+    assert revision.down_revision == "0003_job_outcome_reason"
+
+
+def test_job_state_version_revision_depends_on_promotion_target_lock() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0004_promotion_target_lock"
+
+
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -70,7 +97,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
 
 
 def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -91,12 +118,13 @@ def test_initial_revision_creates_indexes(tmp_path: Path) -> None:
     assert "ix_validationresult_attempt_id" in validation_indexes
     assert "ix_promotionrecord_operation_id" in promotion_indexes
     assert "ix_promotionrecord_attempt_id" in promotion_indexes
+    assert "ix_promotionrecord_promotion_target_path" in promotion_indexes
     assert "ix_mediaplan_plan_hash" in media_plan_indexes
     assert "ix_mediaplan_media_file_id" in media_plan_indexes
 
 
 def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -153,7 +181,7 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -166,7 +194,7 @@ def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
 
 
 def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
 
     upgrade_database(database_url)
 
@@ -206,7 +234,7 @@ def test_upgrade_passes_foreign_key_check_and_cycles_can_be_updated(tmp_path: Pa
 
 
 def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
     config = _alembic_config(database_url)
 
     command.upgrade(config, "head")
@@ -218,7 +246,7 @@ def test_downgrade_to_base_and_reupgrade_succeed(tmp_path: Path) -> None:
 
 
 def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
     config = _alembic_config(database_url)
 
     command.upgrade(config, ALEMBIC_BASELINE_REVISION)
@@ -229,6 +257,41 @@ def test_upgrade_from_initial_revision_adds_media_plan(tmp_path: Path) -> None:
 
     inspector = inspect(create_db_engine(database_url))
     assert "mediaplan" in set(inspector.get_table_names())
+
+
+def test_upgrade_adds_job_outcome_reason(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"] for column in inspect(create_db_engine(database_url)).get_columns("job")
+    }
+    assert "outcome_reason" in columns
+
+
+def test_upgrade_adds_promotion_target_lock_key(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]
+        for column in inspect(create_db_engine(database_url)).get_columns("promotionrecord")
+    }
+    assert "promotion_target_path" in columns
+
+
+def test_upgrade_adds_job_state_version(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(create_db_engine(database_url)).get_columns("job")
+    }
+    assert columns["state_version"]["nullable"] is False
 
 
 def test_alembic_has_one_head() -> None:
@@ -303,6 +366,7 @@ def _job_values(media_id: int, probe_id: int, now: datetime) -> dict[str, object
         "stage": "encode",
         "priority": 0,
         "attempts": 0,
+        "state_version": 1,
         "created_at": now,
         "updated_at": now,
     }

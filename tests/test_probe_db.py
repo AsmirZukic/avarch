@@ -6,10 +6,10 @@ from pathlib import Path
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_probe_result
 from avarch.models.probe import NormalizedProbe
-from avarch.probe import get_canonical_probe_result, store_probe_result
 
 
 def test_store_probe_result_persists_raw_json(tmp_path: Path) -> None:
@@ -233,7 +233,7 @@ def test_canonical_probe_rejects_pointer_to_another_media_file(tmp_path: Path) -
 
 
 def _engine(tmp_path: Path) -> Engine:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

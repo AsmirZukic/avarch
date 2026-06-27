@@ -6,12 +6,12 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import AppMeta, MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import AppMeta, MediaFile, MediaFileStatus, ProbeResult
 
 
 def test_create_db_schema(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
 
     create_db_schema(engine)
@@ -26,7 +26,7 @@ def test_create_db_schema(tmp_path: Path) -> None:
 
 
 def test_sqlite_foreign_keys_are_enabled(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
 
     with engine.connect() as connection:
         enabled = connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
@@ -35,7 +35,7 @@ def test_sqlite_foreign_keys_are_enabled(tmp_path: Path) -> None:
 
 
 def test_sqlite_busy_timeout_is_configured(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
 
     with engine.connect() as connection:
         timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
@@ -44,7 +44,7 @@ def test_sqlite_busy_timeout_is_configured(tmp_path: Path) -> None:
 
 
 def test_file_database_uses_delete_journal_mode(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
 
     with engine.connect() as connection:
         journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
@@ -53,7 +53,7 @@ def test_file_database_uses_delete_journal_mode(tmp_path: Path) -> None:
 
 
 def test_file_database_uses_full_synchronous_mode(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
 
     with engine.connect() as connection:
         synchronous = connection.exec_driver_sql("PRAGMA synchronous").scalar_one()
@@ -73,7 +73,7 @@ def test_in_memory_database_does_not_require_wal() -> None:
 def test_engine_allows_worker_thread_connections(tmp_path: Path) -> None:
     import threading
 
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     errors: list[BaseException] = []
 
@@ -93,7 +93,7 @@ def test_engine_allows_worker_thread_connections(tmp_path: Path) -> None:
 
 
 def test_insert_media_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
 
@@ -117,7 +117,7 @@ def test_insert_media_file(tmp_path: Path) -> None:
 
 
 def test_insert_complete_media_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)
@@ -145,7 +145,7 @@ def test_insert_complete_media_file(tmp_path: Path) -> None:
 
 
 def test_media_file_path_is_unique(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)
@@ -171,7 +171,7 @@ def test_media_file_path_is_unique(tmp_path: Path) -> None:
 
 
 def test_media_file_status_round_trips(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)
@@ -198,7 +198,7 @@ def test_media_file_status_round_trips(tmp_path: Path) -> None:
 
 
 def test_insert_probe_result_for_media_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)
@@ -228,7 +228,7 @@ def test_insert_probe_result_for_media_file(tmp_path: Path) -> None:
 
 
 def test_probe_result_requires_existing_media_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
 
@@ -249,7 +249,7 @@ def test_probe_result_requires_existing_media_file(tmp_path: Path) -> None:
 
 
 def test_multiple_probe_results_can_exist_for_one_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)
@@ -279,7 +279,7 @@ def test_multiple_probe_results_can_exist_for_one_file(tmp_path: Path) -> None:
 
 
 def test_probe_result_requires_source_fingerprint(tmp_path: Path) -> None:
-    db_path = tmp_path / "avarch.db"
+    db_path = tmp_path / "avarch.adapters.sqlite.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     create_db_schema(engine)
     now = datetime.now(UTC)

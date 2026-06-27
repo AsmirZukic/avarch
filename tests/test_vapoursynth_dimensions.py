@@ -1,6 +1,6 @@
 import pytest
 
-from avarch.planner import PlanningError, calculate_target_dimensions
+from avarch.application.planning import PlanningError, calculate_target_dimensions
 
 
 def test_4k_scales_to_1920x1080() -> None:

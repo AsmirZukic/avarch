@@ -10,10 +10,11 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.config import load_config
 from tests.probe_fixtures import representative_probe_payload
 
 runner = CliRunner()

@@ -10,12 +10,14 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from avarch.adapters.probe import normalize_probe
+from avarch.adapters.sqlite.db import create_db_engine
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.cli import app
-from avarch.config import load_config, resolve_database_url
-from avarch.db import create_db_engine
-from avarch.models.db import MediaFile, MediaFileStatus
+from avarch.config import load_config
 from avarch.models.probe import AudioStream, NormalizedProbe, VideoStream
-from avarch.probe import normalize_probe, store_probe_result
 from tests.probe_fixtures import representative_probe_payload, sdr_probe_payload
 
 runner = CliRunner()
@@ -69,7 +71,7 @@ def test_plan_command_does_not_run_vspipe_by_default(
     def fail_check(_path: Path, **_kwargs: object) -> object:
         raise AssertionError("plan must not run vspipe unless --check-vpy is requested")
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fail_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fail_check)
 
     result = runner.invoke(
         app,
@@ -92,7 +94,7 @@ def test_plan_command_check_vpy_validates_bestsource_script(
         calls.append(script_path)
         return object()
 
-    monkeypatch.setattr("avarch.cli.check_vapoursynth_script", fake_check)
+    monkeypatch.setattr("avarch.bootstrap.check_vapoursynth_script", fake_check)
 
     result = runner.invoke(
         app,
@@ -147,7 +149,7 @@ def test_plan_command_executes_no_external_process(
     def fail_probe(_path: Path) -> dict[str, Any]:
         raise AssertionError("plan must not execute ffprobe")
 
-    monkeypatch.setattr("avarch.cli.run_ffprobe", fail_probe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", fail_probe)
 
     result = runner.invoke(
         app,

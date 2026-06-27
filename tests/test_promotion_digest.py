@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from avarch.promoter import calculate_promotion_digest
+from avarch.adapters.filesystem.promotion import calculate_promotion_digest
 
 
 def test_digest_is_deterministic(tmp_path: Path) -> None:

@@ -5,12 +5,14 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
+from avarch.adapters.probe import normalize_probe
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.application.enqueue import enqueue_inventory
 from avarch.config import AppConfig
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.probe import normalize_probe, store_probe_result
-from avarch.scheduler import enqueue_inventory
+from avarch.domain.jobs import JobStage, JobStatus
 from tests.probe_fixtures import sdr_probe_payload
 
 
@@ -21,7 +23,7 @@ def test_enqueue_creates_job_for_present_file(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         summary = enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -32,7 +34,7 @@ def test_enqueue_creates_job_for_present_file(tmp_path: Path) -> None:
         job = session.exec(select(Job)).one()
 
     assert summary.created == 1
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
 
 
 def test_enqueue_excludes_missing_file(tmp_path: Path) -> None:
@@ -42,7 +44,7 @@ def test_enqueue_excludes_missing_file(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "missing.mkv", now, status=MediaFileStatus.MISSING)
         summary = enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -60,7 +62,7 @@ def test_enqueue_uses_probe_stage_without_fresh_probe(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -80,7 +82,7 @@ def test_enqueue_uses_plan_stage_with_fresh_probe(tmp_path: Path) -> None:
         media_file = _add_media_file(session, tmp_path / "movie.mkv", now)
         _add_probe(session, media_file, now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -101,7 +103,7 @@ def test_enqueue_stores_source_fingerprint(tmp_path: Path) -> None:
         media_file = _add_media_file(session, tmp_path / "movie.mkv", now)
         fs_fingerprint = media_file.fs_fingerprint
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -120,7 +122,7 @@ def test_enqueue_stores_effective_profile_hash(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -139,14 +141,14 @@ def test_enqueue_does_not_duplicate_existing_job(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         first = enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
             now=now,
         )
         second = enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -167,7 +169,7 @@ def test_enqueue_allows_new_job_when_probe_hash_changes(tmp_path: Path) -> None:
     with Session(engine) as session:
         media_file = _add_media_file(session, tmp_path / "movie.mkv", now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -175,7 +177,7 @@ def test_enqueue_allows_new_job_when_probe_hash_changes(tmp_path: Path) -> None:
         )
         _add_probe(session, media_file, now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=_config(),
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -199,14 +201,14 @@ def test_enqueue_allows_new_job_when_profile_changes(tmp_path: Path) -> None:
     with Session(engine) as session:
         _add_media_file(session, tmp_path / "movie.mkv", now)
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=config,
             profile_name="custom_1920",
             priority=0,
             now=now,
         )
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=config,
             profile_name="custom_1280",
             priority=0,
@@ -220,7 +222,7 @@ def test_enqueue_allows_new_job_when_profile_changes(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

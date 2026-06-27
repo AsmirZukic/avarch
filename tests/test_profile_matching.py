@@ -6,11 +6,13 @@ import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.probe import build_probe_hash
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.planning import load_planning_context
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.application.planning import PlanningError, match_profile
 from avarch.models.probe import NormalizedProbe, VideoStream
-from avarch.planner import PlanningError, load_planning_context, match_profile
-from avarch.probe import build_probe_hash, store_probe_result
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json
@@ -185,7 +187,7 @@ def test_rejection_contains_reason() -> None:
 
 
 def _engine(tmp_path: Path) -> Engine:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

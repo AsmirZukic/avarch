@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from avarch.probe import (
+from avarch.adapters.probe import (
     ProbeExecutableNotFoundError,
     ProbeOutputError,
     ProbeProcessError,

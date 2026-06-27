@@ -117,7 +117,7 @@ def test_probe_inspect_and_plan_workflow_builds_reviewable_artifacts(
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     scan_result = runner.invoke(app, ["scan", str(media_root)])
     probe_result = runner.invoke(app, ["probe", "--file", str(movie)])
@@ -156,7 +156,7 @@ def test_probe_inspect_and_plan_workflow_reports_user_errors(
     media_root.mkdir()
     movie = media_root / "movie.mkv"
     movie.write_bytes(b"media")
-    monkeypatch.setattr("avarch.cli.run_ffprobe", _fake_ffprobe)
+    monkeypatch.setattr("avarch.bootstrap.run_ffprobe", _fake_ffprobe)
 
     scan_result = runner.invoke(app, ["scan", str(media_root)])
     plan_before_probe = runner.invoke(

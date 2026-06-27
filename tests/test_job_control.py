@@ -7,35 +7,37 @@ import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
-from avarch.models.scheduler import (
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.job_control import (
+    JobControlError,
+    cancel_job,
+    hold_job,
+    release_job,
+    update_job_priority,
+)
+from avarch.adapters.sqlite.job_transitions import (
+    claim_job_stage,
+    complete_job_stage,
+    fail_job_stage,
+    interrupt_job_stage,
+    recover_abandoned_jobs,
+)
+from avarch.adapters.sqlite.models import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
+from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
     JobStage,
     JobStatus,
-)
-from avarch.scheduler import (
-    JobControlError,
-    cancel_job,
-    claim_job_stage,
-    complete_job_stage,
-    fail_job_stage,
-    hold_job,
-    interrupt_job_stage,
-    recover_abandoned_jobs,
-    release_job,
-    update_job_priority,
 )
 
 
 @pytest.mark.parametrize(
     "status,stage",
     [
-        (JobStatus.PENDING, JobStage.PROBE),
+        (JobStatus.QUEUED, JobStage.PROBE),
         (JobStatus.HELD, JobStage.PLAN),
         (JobStatus.FAILED, JobStage.ENCODE),
-        (JobStatus.VALIDATED, JobStage.PROMOTE),
+        (JobStatus.READY_TO_PROMOTE, JobStage.PROMOTE),
     ],
 )
 def test_cancel_nonrunning_eligible_job_is_immediate(
@@ -50,7 +52,7 @@ def test_cancel_nonrunning_eligible_job_is_immediate(
         cancel_job(session, job_id=job_id, actor="test", reason="wrong profile", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert job.cancel_requested_at == now.replace(tzinfo=None)
     assert job.cancel_requested_by == "test"
     assert job.cancel_reason == "wrong profile"
@@ -59,7 +61,7 @@ def test_cancel_nonrunning_eligible_job_is_immediate(
     assert [event.event_type for event in events] == [JobEventType.CANCELED]
 
 
-@pytest.mark.parametrize("status", [JobStatus.COMPLETED, JobStatus.SKIPPED])
+@pytest.mark.parametrize("status", [JobStatus.PROMOTED, JobStatus.SKIPPED])
 def test_cancel_rejects_terminal_history_states(tmp_path: Path, status: JobStatus) -> None:
     engine, job_id = _stored_job(tmp_path, status=status)
 
@@ -68,7 +70,7 @@ def test_cancel_rejects_terminal_history_states(tmp_path: Path, status: JobStatu
 
 
 def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.PENDING)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.QUEUED)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
@@ -76,7 +78,7 @@ def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
         cancel_job(session, job_id=job_id, actor="test", reason="stop this", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.cancel_requested_at == now.replace(tzinfo=None)
     assert job.cancel_requested_by == "test"
     assert job.canceled_at is None
@@ -86,7 +88,7 @@ def test_cancel_running_scheduler_job_records_request(tmp_path: Path) -> None:
 def test_cancel_running_promotion_is_rejected(tmp_path: Path) -> None:
     engine, job_id = _stored_job(
         tmp_path,
-        status=JobStatus.RUNNING,
+        status=JobStatus.ENCODING,
         stage=JobStage.PROMOTE,
     )
 
@@ -95,7 +97,7 @@ def test_cancel_running_promotion_is_rejected(tmp_path: Path) -> None:
 
 
 def test_cancel_is_idempotent_for_already_canceled_job(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, status=JobStatus.CANCELED)
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.CANCELLED)
 
     with Session(engine) as session, session.begin():
         cancel_job(session, job_id=job_id, actor="test", now=datetime.now(UTC))
@@ -129,7 +131,7 @@ def test_hold_running_job_records_request_without_interrupting(tmp_path: Path) -
         hold_job(session, job_id=job_id, actor="test", reason="later", now=now)
 
     job, events = _job_and_events(engine, job_id)
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.hold_requested_at == now.replace(tzinfo=None)
     assert job.held_at is None
     assert [event.event_type for event in events] == [JobEventType.HOLD_REQUESTED]
@@ -139,10 +141,10 @@ def test_hold_running_job_records_request_without_interrupting(tmp_path: Path) -
     "status",
     [
         JobStatus.FAILED,
-        JobStatus.CANCELED,
-        JobStatus.COMPLETED,
+        JobStatus.CANCELLED,
+        JobStatus.PROMOTED,
         JobStatus.SKIPPED,
-        JobStatus.VALIDATED,
+        JobStatus.READY_TO_PROMOTE,
     ],
 )
 def test_hold_rejects_nonrunnable_states(tmp_path: Path, status: JobStatus) -> None:
@@ -165,7 +167,7 @@ def test_hold_is_idempotent_for_already_held_job(tmp_path: Path) -> None:
 def test_hold_running_promotion_is_rejected(tmp_path: Path) -> None:
     engine, job_id = _stored_job(
         tmp_path,
-        status=JobStatus.RUNNING,
+        status=JobStatus.ENCODING,
         stage=JobStage.PROMOTE,
     )
 
@@ -183,7 +185,7 @@ def test_release_held_job_returns_to_pending_and_clears_request(tmp_path: Path) 
 
     job, events = _job_and_events(engine, job_id)
     assert changed is True
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.hold_requested_at is None
     assert job.held_at is None
     assert [event.event_type for event in events] == [
@@ -203,7 +205,7 @@ def test_release_running_job_clears_pending_hold_request(tmp_path: Path) -> None
 
     job, events = _job_and_events(engine, job_id)
     assert changed is True
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.ENCODING
     assert job.hold_requested_at is None
     assert [event.event_type for event in events] == [
         JobEventType.HOLD_REQUESTED,
@@ -241,7 +243,7 @@ def test_completion_with_cancel_request_marks_attempt_canceled(tmp_path: Path) -
         attempt = session.exec(select(JobAttempt)).one()
 
     assert job is not None
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert attempt.status == AttemptStatus.CANCELED
 
 
@@ -306,7 +308,7 @@ def test_failure_clears_pending_hold_request(tmp_path: Path) -> None:
     assert job.held_at is None
 
 
-@pytest.mark.parametrize("status", [JobStatus.PENDING, JobStatus.HELD])
+@pytest.mark.parametrize("status", [JobStatus.QUEUED, JobStatus.HELD])
 def test_priority_update_allowed_for_pending_and_held(
     tmp_path: Path,
     status: JobStatus,
@@ -326,11 +328,11 @@ def test_priority_update_allowed_for_pending_and_held(
 @pytest.mark.parametrize(
     "status",
     [
-        JobStatus.RUNNING,
+        JobStatus.ENCODING,
         JobStatus.FAILED,
-        JobStatus.CANCELED,
-        JobStatus.VALIDATED,
-        JobStatus.COMPLETED,
+        JobStatus.CANCELLED,
+        JobStatus.READY_TO_PROMOTE,
+        JobStatus.PROMOTED,
         JobStatus.SKIPPED,
     ],
 )
@@ -346,7 +348,11 @@ def test_recovery_cancels_abandoned_job_with_cancel_request(tmp_path: Path) -> N
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=now)
+        summary = recover_abandoned_jobs(
+            session,
+            now=now,
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -354,7 +360,7 @@ def test_recovery_cancels_abandoned_job_with_cancel_request(tmp_path: Path) -> N
 
     assert summary.recovered_jobs == 1
     assert job is not None
-    assert job.status == JobStatus.CANCELED
+    assert job.status == JobStatus.CANCELLED
     assert attempt.status == AttemptStatus.CANCELED
 
 
@@ -363,7 +369,7 @@ def test_recovery_holds_abandoned_job_with_hold_request(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        recover_abandoned_jobs(session, new_runner_id="new", now=now)
+        recover_abandoned_jobs(session, now=now, encoded_output_exists=_encoded_output_exists)
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -379,28 +385,131 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
     engine, job_id = _running_job_with_attempt(tmp_path)
 
     with Session(engine) as session, session.begin():
-        recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
 
     assert job is not None
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.ENCODE
 
 
-def test_recovery_skips_running_promotion_jobs(tmp_path: Path) -> None:
+def test_recovery_recovers_running_promotion_jobs(tmp_path: Path) -> None:
     engine, job_id = _running_job_with_attempt(tmp_path, stage=JobStage.PROMOTE)
 
     with Session(engine) as session, session.begin():
-        summary = recover_abandoned_jobs(session, new_runner_id="new", now=datetime.now(UTC))
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
 
-    assert summary.recovered_jobs == 0
+    assert summary.recovered_jobs == 1
     assert job is not None
-    assert job.status == JobStatus.RUNNING
+    assert job.status == JobStatus.PROMOTING
+    assert job.claimed_by is None
+
+
+def test_restart_recovers_encoded_job(tmp_path: Path) -> None:
+    output = tmp_path / "movie.av1.mkv"
+    output.write_bytes(b"encoded")
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.ENCODED,
+        stage=JobStage.VALIDATE,
+        output_path=output,
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.VALIDATING
+    assert job.stage == JobStage.VALIDATE
+
+
+def test_restart_recovers_ready_to_promote_job(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.READY_TO_PROMOTE,
+        stage=JobStage.PROMOTE,
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.READY_TO_PROMOTE
+    assert job.claimed_by is None
+
+
+def test_restart_handles_missing_encoded_file(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(
+        tmp_path,
+        status=JobStatus.ENCODED,
+        stage=JobStage.VALIDATE,
+        output_path=tmp_path / "missing.av1.mkv",
+    )
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert job is not None
+    assert job.status == JobStatus.FAILED
+    assert job.last_error_message == "Encoded output was missing during scheduler recovery."
+
+
+def test_restart_handles_partial_promotion_backup(tmp_path: Path) -> None:
+    backup = tmp_path / "movie.mkv.avarch-original"
+    backup.write_bytes(b"original")
+    engine, job_id = _stored_job(tmp_path, status=JobStatus.PROMOTING, stage=JobStage.PROMOTE)
+
+    with Session(engine) as session, session.begin():
+        summary = recover_abandoned_jobs(
+            session,
+            now=datetime.now(UTC),
+            encoded_output_exists=_encoded_output_exists,
+        )
+
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+
+    assert summary.recovered_jobs == 1
+    assert backup.read_bytes() == b"original"
+    assert job is not None
+    assert job.status == JobStatus.PROMOTING
 
 
 def _running_job_with_attempt(
@@ -426,11 +535,16 @@ def _running_job_with_attempt(
     return engine, job_id
 
 
+def _encoded_output_exists(job: Job) -> bool:
+    return job.output_path is not None and Path(job.output_path).exists()
+
+
 def _stored_job(
     tmp_path: Path,
     *,
-    status: JobStatus = JobStatus.PENDING,
+    status: JobStatus = JobStatus.QUEUED,
     stage: JobStage = JobStage.PROBE,
+    output_path: Path | None = None,
 ) -> tuple[Engine, int]:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
@@ -455,6 +569,7 @@ def _stored_job(
             profile_hash="profile-hash",
             source_fs_fingerprint="fingerprint",
             queue_key="queue-key",
+            output_path=str(output_path) if output_path is not None else None,
             status=status,
             stage=stage,
             created_at=now,
@@ -468,7 +583,7 @@ def _stored_job(
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
 

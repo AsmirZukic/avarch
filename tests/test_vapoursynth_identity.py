@@ -1,6 +1,6 @@
 import pytest
 
-from avarch.vapoursynth import (
+from avarch.application.vapoursynth_identity import (
     build_template_hash,
     build_vapoursynth_identity_hash,
     normalize_template_text,

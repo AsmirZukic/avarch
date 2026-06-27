@@ -7,16 +7,23 @@ from pathlib import Path
 import pytest
 from sqlmodel import Session, select
 
+from avarch.adapters.filesystem.plans import write_plan_artifacts
+from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.probe import normalize_probe
+from avarch.adapters.scheduler_workers import execute_plan_job
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.planning import load_planning_context
+from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.vapoursynth import generate_vapoursynth_script
+from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
+from avarch.application.enqueue import enqueue_inventory
+from avarch.application.planning import build_plan
+from avarch.application.vapoursynth_identity import resolve_vapoursynth_template
 from avarch.config import AppConfig
-from avarch.db import create_db_engine, create_db_schema
-from avarch.models.db import Job, MediaFile, MediaFileStatus
-from avarch.models.scheduler import JobStage, JobStatus
-from avarch.planner import build_plan, load_planning_context, write_plan_artifacts
-from avarch.probe import normalize_probe, store_probe_result
+from avarch.domain.jobs import JobStage, JobStatus
 from avarch.profiles.registry import ProfileRegistry
-from avarch.scanner import create_file_snapshot
-from avarch.scheduler import enqueue_inventory, execute_plan_job
-from avarch.vapoursynth import generate_vapoursynth_script, resolve_vapoursynth_template
 from tests.probe_fixtures import sdr_probe_payload
 
 
@@ -25,7 +32,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.db'}"
+    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.adapters.sqlite.db'}"
     config = _config(database_url)
     (tmp_path / ".avarch").mkdir()
     engine = create_db_engine(database_url)
@@ -43,13 +50,19 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
             resolved_profile=ProfileRegistry.from_config(config).get("av1_1080p_sdr"),
         )
         template = resolve_vapoursynth_template(context.profile)
-        plan = build_plan(context, data_dir=Path(".avarch"), resolved_template=template)
+        data_dir = Path(".avarch")
+        plan = build_plan(
+            context,
+            data_dir=data_dir,
+            runtime_identity=planning_runtime_identity_for_data_dir(data_dir),
+            resolved_template=template,
+        )
         write_plan_artifacts(
             plan=plan,
             vapoursynth_script=generate_vapoursynth_script(plan, template=template),
         )
         enqueue_inventory(
-            session,
+            SqliteEnqueueStore(session),
             config=config,
             profile_name="av1_1080p_sdr",
             priority=0,
@@ -64,7 +77,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
         stored = session.get(Job, job.id)
 
     assert stored is not None
-    assert stored.status == JobStatus.PENDING
+    assert stored.status == JobStatus.QUEUED
     assert stored.stage == JobStage.ENCODE
     assert stored.plan_hash == plan.plan_hash
 

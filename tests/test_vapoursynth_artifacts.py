@@ -2,13 +2,19 @@ from pathlib import Path
 
 import pytest
 
-from avarch.models.plan import TranscodePlan
-from avarch.planner import PlanArtifactConflictError, write_plan_artifacts
-from avarch.vapoursynth import (
+from avarch.adapters.filesystem.plans import (
+    PlanArtifactConflictError,
+    PlanArtifactLoadError,
+    load_plan_artifact,
+    validation_report_path_for_plan_artifact,
+    write_plan_artifacts,
+)
+from avarch.adapters.vapoursynth import generate_builtin_script
+from avarch.application.vapoursynth_identity import (
     ResolvedVapourSynthFilter,
     ResolvedVapourSynthTemplate,
-    generate_builtin_script,
 )
+from avarch.models.plan import TranscodePlan
 from tests.test_plan_models import sample_plan
 
 
@@ -36,6 +42,42 @@ def test_identical_bundle_write_is_idempotent(tmp_path: Path) -> None:
     second = write_plan_artifacts(plan=plan, vapoursynth_script=script)
 
     assert first == second
+
+
+def test_plan_artifact_loader_reads_plan_json(tmp_path: Path) -> None:
+    plan = _plan_for_dir(tmp_path / "bundle")
+    script = generate_builtin_script(plan)
+    write_plan_artifacts(plan=plan, vapoursynth_script=script)
+
+    loaded = load_plan_artifact(plan.artifacts.plan_json)
+
+    assert loaded.plan_hash == plan.plan_hash
+
+
+def test_plan_artifact_loader_rejects_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(PlanArtifactLoadError):
+        load_plan_artifact(path)
+
+
+def test_validation_report_path_reads_plan_artifact(tmp_path: Path) -> None:
+    plan = _plan_for_dir(tmp_path / "bundle")
+    script = generate_builtin_script(plan)
+    write_plan_artifacts(plan=plan, vapoursynth_script=script)
+
+    report_path = validation_report_path_for_plan_artifact(str(plan.artifacts.plan_json))
+
+    assert report_path == plan.runtime.validation_report
+
+
+def test_validation_report_path_returns_none_for_unusable_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text("not json", encoding="utf-8")
+
+    assert validation_report_path_for_plan_artifact(path) is None
+    assert validation_report_path_for_plan_artifact(None) is None
 
 
 def test_missing_existing_artifact_causes_conflict(tmp_path: Path) -> None:

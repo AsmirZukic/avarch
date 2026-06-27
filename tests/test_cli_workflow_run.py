@@ -7,10 +7,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from avarch.adapters.sqlite.models import Job
+from avarch.application.enqueue import PlanEnqueueSummary
 from avarch.cli import app
-from avarch.models.db import Job
+from avarch.domain.jobs import JobStage, JobStatus
 from avarch.models.promotion import PromotionMode
-from avarch.models.scheduler import JobStage, JobStatus
 
 runner = CliRunner()
 
@@ -43,7 +44,7 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
     ) -> None:
         calls.append(("plan", profile, files, force, check_vpy))
 
-    def fake_enqueue_selected_plans(**kwargs: object) -> tuple[int, dict[str, int], list[str]]:
+    def fake_enqueue_selected_plans(**kwargs: object) -> PlanEnqueueSummary:
         calls.append(
             (
                 "enqueue",
@@ -52,10 +53,14 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
                 kwargs["priority"],
             )
         )
-        return (
-            1,
-            {"created": 1, "skipped": 0, "already_done": 0, "already_queued": 0, "stale": 0},
-            ["plan-hash"],
+        return PlanEnqueueSummary(
+            selected=1,
+            created=1,
+            skipped=0,
+            already_queued=0,
+            already_done=0,
+            stale=0,
+            plan_hashes=("plan-hash",),
         )
 
     def fake_run_queue(
@@ -83,7 +88,7 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
                 queue_key="queue",
                 plan_hash="plan-hash",
                 output_path=str(tmp_path / "movie.av1.mkv"),
-                status=JobStatus.VALIDATED,
+                status=JobStatus.READY_TO_PROMOTE,
                 stage=JobStage.PROMOTE,
                 created_at=now,
                 updated_at=now,
@@ -169,11 +174,15 @@ def test_workflow_run_previews_promotion_without_confirm(
     ) -> None:
         del profile, files, force, check_vpy
 
-    def fake_enqueue_selected_plans(**_kwargs: object) -> tuple[int, dict[str, int], list[str]]:
-        return (
-            1,
-            {"created": 1, "skipped": 0, "already_done": 0, "already_queued": 0, "stale": 0},
-            ["plan-hash"],
+    def fake_enqueue_selected_plans(**_kwargs: object) -> PlanEnqueueSummary:
+        return PlanEnqueueSummary(
+            selected=1,
+            created=1,
+            skipped=0,
+            already_queued=0,
+            already_done=0,
+            stale=0,
+            plan_hashes=("plan-hash",),
         )
 
     def fake_run_queue(**_kwargs: object) -> None:
@@ -192,7 +201,7 @@ def test_workflow_run_previews_promotion_without_confirm(
                 source_fs_fingerprint="fingerprint",
                 queue_key="queue",
                 plan_hash="plan-hash",
-                status=JobStatus.VALIDATED,
+                status=JobStatus.READY_TO_PROMOTE,
                 stage=JobStage.PROMOTE,
                 created_at=now,
                 updated_at=now,

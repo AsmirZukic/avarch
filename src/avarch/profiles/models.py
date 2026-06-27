@@ -86,6 +86,14 @@ class ProfileValidationSettings(BaseModel):
     minimum_size_reduction_percent: float | None = Field(default=None, ge=0, lt=100)
 
 
+class ProfilePromotionSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    require_smaller: bool = True
+    minimum_savings_percent: float = Field(default=5.0, ge=0, lt=100)
+    delete_rejected_output: bool = True
+
+
 class ProfileVapourSynthSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -127,6 +135,7 @@ class EncodingProfile(BaseModel):
     audio: ProfileAudioSettings
     subtitles: ProfileSubtitleSettings
     validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
+    promotion: ProfilePromotionSettings = Field(default_factory=ProfilePromotionSettings)
 
 class ProfileDocument(EncodingProfile):
     name: str
