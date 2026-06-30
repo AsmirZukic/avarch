@@ -14,6 +14,12 @@ def test_verify_workflow_jobs_classifies_promotion_readiness() -> None:
     failed_job = _workflow_job(id=11, status=JobStatus.FAILED, stage=JobStage.ENCODE)
     blocked_job = _workflow_job(id=12, status=JobStatus.ENCODED, stage=JobStage.VALIDATE)
     promoted_job = _workflow_job(id=13, status=JobStatus.PROMOTED, stage=JobStage.PROMOTE)
+    skipped_job = _workflow_job(id=14, status=JobStatus.SKIPPED, stage=JobStage.PLAN)
+    size_rejected_job = _workflow_job(
+        id=15,
+        status=JobStatus.SIZE_REJECTED,
+        stage=JobStage.CLEANUP,
+    )
     missing_id_job = _workflow_job(
         id=None,
         status=JobStatus.READY_TO_PROMOTE,
@@ -21,7 +27,15 @@ def test_verify_workflow_jobs_classifies_promotion_readiness() -> None:
     )
 
     readiness = verify_workflow_jobs(
-        [promotable_job, failed_job, blocked_job, promoted_job, missing_id_job]
+        [
+            promotable_job,
+            failed_job,
+            blocked_job,
+            promoted_job,
+            skipped_job,
+            size_rejected_job,
+            missing_id_job,
+        ]
     )
 
     assert readiness.promotable_jobs == (promotable_job,)

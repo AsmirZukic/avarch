@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +116,7 @@ from avarch.application.plan_artifacts import (
 )
 from avarch.application.planning import PlanningRuntimeIdentity
 from avarch.config import AppConfig
+from avarch.domain.jobs import JobStage
 
 __all__ = [
     "DatabaseSchemaUpgradeError",
@@ -359,7 +360,11 @@ def scheduler_process_controller() -> SchedulerProcessAdapter:
     return SchedulerProcessAdapter()
 
 
-def scheduler_runner() -> SchedulerRuntimeAdapter:
+def scheduler_runner(
+    *,
+    claimable_stages: Iterable[JobStage] | None = None,
+) -> SchedulerRuntimeAdapter:
     return SchedulerRuntimeAdapter(
-        workers=SchedulerWorkerAdapter(promotion_workflow_factory=promotion_workflow)
+        workers=SchedulerWorkerAdapter(promotion_workflow_factory=promotion_workflow),
+        claimable_stages=claimable_stages,
     )

@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 from avarch.adapters.probe import normalize_probe
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
-from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, MediaPlan
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.application.enqueue import enqueue_inventory
 from avarch.config import AppConfig
@@ -221,6 +221,38 @@ def test_enqueue_allows_new_job_when_profile_changes(tmp_path: Path) -> None:
     assert len(jobs) == 2
 
 
+def test_enqueue_plans_counts_skipped_existing_job_as_done(tmp_path: Path) -> None:
+    from avarch.adapters.sqlite.queue import enqueue_plans
+
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        media_file = _add_media_file(session, tmp_path / "movie.mkv", now)
+        _add_probe(session, media_file, now)
+        plan = _add_media_plan(session, media_file, now, plan_hash="plan-hash")
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name="av1_1080p_sdr",
+                profile_hash="profile-hash",
+                source_fs_fingerprint=media_file.fs_fingerprint,
+                queue_key="plan-hash",
+                plan_hash="plan-hash",
+                status=JobStatus.SKIPPED,
+                stage=JobStage.PLAN,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+        summary = enqueue_plans(session, [plan], priority=0, now=now)
+
+    assert summary["created"] == 0
+    assert summary["already_done"] == 1
+    assert summary["already_queued"] == 0
+
+
 def _engine(tmp_path: Path):
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
@@ -264,6 +296,32 @@ def _add_probe(session: Session, media_file: MediaFile, now: datetime) -> None:
     )
     session.commit()
     session.refresh(media_file)
+
+
+def _add_media_plan(
+    session: Session,
+    media_file: MediaFile,
+    now: datetime,
+    *,
+    plan_hash: str,
+) -> MediaPlan:
+    plan = MediaPlan(
+        media_file_id=media_file.id or 0,
+        probe_result_id=media_file.latest_probe_id or 0,
+        profile_name="av1_1080p_sdr",
+        profile_hash="profile-hash",
+        probe_hash="probe-hash",
+        source_fs_fingerprint=media_file.fs_fingerprint,
+        execution_identity_hash="execution-hash",
+        plan_hash=plan_hash,
+        plan_path=str(Path("plan.json")),
+        output_path=str(Path("movie.av1.mkv")),
+        created_at=now,
+    )
+    session.add(plan)
+    session.commit()
+    session.refresh(plan)
+    return plan
 
 
 def _config(*, profile_dir: Path | None = None) -> AppConfig:
