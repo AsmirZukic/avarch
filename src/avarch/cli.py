@@ -619,6 +619,14 @@ def run_queue(
         Literal["foreground", "detached"],
         typer.Option("--mode", help="Internal scheduler launch mode.", hidden=True),
     ] = "foreground",
+    promote: Annotated[
+        bool,
+        typer.Option(
+            "--promote/--no-promote",
+            help="Internal promotion scheduler toggle.",
+            hidden=True,
+        ),
+    ] = True,
 ) -> None:
     cli_workspace = _load_cli_workspace()
     database_url = cli_workspace.database_url
@@ -674,7 +682,17 @@ def run_queue(
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
             run_scheduler(
-                scheduler_runner(),
+                scheduler_runner(
+                    claimable_stages=None
+                    if promote
+                    else {
+                        JobStage.PROBE,
+                        JobStage.PLAN,
+                        JobStage.ENCODE,
+                        JobStage.VALIDATE,
+                        JobStage.CLEANUP,
+                    }
+                ),
                 config=runtime_config,
                 runner_id=runner_id,
                 resume=resume,
@@ -1614,7 +1632,13 @@ def workflow_run(
         return
 
     _echo_workflow_stage("run")
-    run_queue(resume=True, detached=False, managed_child=False, mode="foreground")
+    run_queue(
+        resume=True,
+        detached=False,
+        managed_child=False,
+        mode="foreground",
+        promote=False,
+    )
 
     _echo_workflow_stage("verify")
     jobs = _workflow_jobs_for_plan_hashes(database_url, list(summary.plan_hashes))
