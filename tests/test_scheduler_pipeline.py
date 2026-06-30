@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlmodel import Session
 
+from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
 from avarch.adapters.scheduler_workers import execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
@@ -167,6 +168,44 @@ def test_scheduler_continues_after_promotion_failure(
             promotion_workflow=_PromotionWorkflowStub(),
         )
     )
+
+
+def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path) -> None:
+    database_path = tmp_path / "avarch.adapters.sqlite.db"
+    config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
+    engine = create_db_engine(config.database.url)
+    create_db_schema(engine)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = _media_file(tmp_path / "movie-a.mkv", now)
+        session.add(media_file)
+        session.flush()
+        session.add(
+            _job(
+                media_file.id or 0,
+                now,
+                queue_key="promote",
+                status=JobStatus.QUEUED,
+                stage=JobStage.PROMOTE,
+            )
+        )
+
+    all_stages_store = SqliteSchedulerRunStore(config)
+    no_promotion_store = SqliteSchedulerRunStore(
+        config,
+        claimable_stages=frozenset(
+            {
+                JobStage.PROBE,
+                JobStage.PLAN,
+                JobStage.ENCODE,
+                JobStage.VALIDATE,
+                JobStage.CLEANUP,
+            }
+        ),
+    )
+
+    assert all_stages_store.has_pending_jobs() is True
+    assert no_promotion_store.has_pending_jobs() is False
 
 
 class _PromotionWorkflowStub:

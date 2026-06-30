@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from sqlmodel import Session
@@ -22,7 +22,6 @@ from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.scheduler_state import (
     active_jobs_with_cancel_requested,
     get_or_create_scheduler_state,
-    has_pending_jobs,
     terminal_job_counts,
 )
 from avarch.application.promotion import PromotionWorkflow
@@ -40,19 +39,33 @@ from avarch.domain.scheduler import ClaimableJob, SchedulerMode
 
 
 class SchedulerRuntimeAdapter:
-    def __init__(self, *, workers: SchedulerWorkerAdapter) -> None:
+    def __init__(
+        self,
+        *,
+        workers: SchedulerWorkerAdapter,
+        claimable_stages: Iterable[JobStage] | None = None,
+    ) -> None:
         self._workers = workers
+        self._claimable_stages = (
+            frozenset(claimable_stages) if claimable_stages is not None else None
+        )
 
     def store(self, *, config: AppConfig) -> SchedulerRunStore:
-        return SqliteSchedulerRunStore(config)
+        return SqliteSchedulerRunStore(config, claimable_stages=self._claimable_stages)
 
     def workers(self) -> SchedulerWorkerAdapter:
         return self._workers
 
 
 class SqliteSchedulerRunStore:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        claimable_stages: frozenset[JobStage] | None = None,
+    ) -> None:
         self._engine = create_db_engine(config.database.url)
+        self._claimable_stages = claimable_stages
 
     def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
         try:
@@ -117,11 +130,11 @@ class SqliteSchedulerRunStore:
             return [
                 ClaimableJob(job_id=require_id(job), stage=job.stage)
                 for job in claimable_jobs(session, active_job_ids=active_job_ids)
+                if self._claimable_stages is None or job.stage in self._claimable_stages
             ]
 
     def has_pending_jobs(self) -> bool:
-        with Session(self._engine) as session:
-            return has_pending_jobs(session)
+        return bool(self.claimable_jobs(active_job_ids=set()))
 
     def interrupt_running_job(self, *, job_id: int, now: datetime) -> None:
         interrupt_running_job(self._engine, job_id=job_id, now=now)

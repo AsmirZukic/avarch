@@ -225,7 +225,12 @@ def enqueue_plans(
         queue_key = plan.plan_hash
         existing = find_existing_queue_job(session, queue_key=queue_key)
         if existing is not None:
-            if existing.status in {JobStatus.PROMOTED, JobStatus.READY_TO_PROMOTE}:
+            if existing.status in {
+                JobStatus.PROMOTED,
+                JobStatus.READY_TO_PROMOTE,
+                JobStatus.SKIPPED,
+                JobStatus.SIZE_REJECTED,
+            }:
                 already_done += 1
             else:
                 already_queued += 1
