@@ -69,8 +69,9 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
         detached: bool = False,
         managed_child: bool = False,
         mode: str = "foreground",
+        promote: bool = True,
     ) -> None:
-        calls.append(("run", resume, detached, managed_child, mode))
+        calls.append(("run", resume, detached, managed_child, mode, promote))
 
     def fake_workflow_jobs_for_plan_hashes(
         _database_url: str,
@@ -140,7 +141,7 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
         ("probe", [movie], False),
         ("plan", "av1_1080p_sdr", [movie], False, False),
         ("enqueue", [movie], None, 7),
-        ("run", True, False, False, "foreground"),
+        ("run", True, False, False, "foreground", False),
         ("verify", ["plan-hash"]),
         ("promote", 42, PromotionMode.REPLACE_ATOMIC, False, True, False),
     ]
@@ -185,7 +186,8 @@ def test_workflow_run_previews_promotion_without_confirm(
             plan_hashes=("plan-hash",),
         )
 
-    def fake_run_queue(**_kwargs: object) -> None:
+    def fake_run_queue(**kwargs: object) -> None:
+        calls.append(("run", bool(kwargs["promote"]), False))
         return None
 
     def fake_workflow_jobs_for_plan_hashes(
@@ -225,4 +227,128 @@ def test_workflow_run_previews_promotion_without_confirm(
     result = runner.invoke(app, ["workflow", "run", "--profile", "av1_1080p_sdr"])
 
     assert result.exit_code == 0
-    assert calls == [("promote", True, False)]
+    assert calls == [("run", False, False), ("promote", True, False)]
+
+
+def test_workflow_run_processes_mixed_terminal_and_promotable_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init_result = runner.invoke(app, ["init"])
+    assert init_result.exit_code == 0
+
+    now = datetime.now(UTC)
+    calls: list[tuple[Any, ...]] = []
+
+    def fake_scan(*, roots: list[Path] | None = None) -> None:
+        del roots
+
+    def fake_probe_file(*, files: list[Path] | None = None, force: bool = False) -> None:
+        del files, force
+
+    def fake_plan_file(
+        *,
+        profile: str,
+        files: list[Path] | None = None,
+        force: bool = False,
+        check_vpy: bool = False,
+    ) -> None:
+        del profile, files, force, check_vpy
+
+    def fake_enqueue_selected_plans(**_kwargs: object) -> PlanEnqueueSummary:
+        return PlanEnqueueSummary(
+            selected=5,
+            created=1,
+            skipped=4,
+            already_queued=0,
+            already_done=4,
+            stale=0,
+            plan_hashes=("skip-av1", "encode", "size", "existing-promote", "skip-match"),
+        )
+
+    def fake_run_queue(**kwargs: object) -> None:
+        calls.append(("run", kwargs["promote"]))
+
+    def fake_workflow_jobs_for_plan_hashes(
+        _database_url: str,
+        plan_hashes: list[str],
+    ) -> list[Job]:
+        calls.append(("verify", tuple(plan_hashes)))
+        return [
+            _job_item(1, "skip-av1", JobStatus.SKIPPED, JobStage.PLAN, now),
+            _job_item(2, "encode", JobStatus.READY_TO_PROMOTE, JobStage.PROMOTE, now),
+            _job_item(3, "size", JobStatus.SIZE_REJECTED, JobStage.CLEANUP, now),
+            _job_item(
+                4,
+                "existing-promote",
+                JobStatus.READY_TO_PROMOTE,
+                JobStage.PROMOTE,
+                now,
+            ),
+            _job_item(5, "skip-match", JobStatus.SKIPPED, JobStage.PLAN, now),
+        ]
+
+    def fake_promote_job(**kwargs: object) -> None:
+        calls.append(
+            (
+                "promote",
+                kwargs["job_id"],
+                kwargs["mode"],
+                kwargs["dry_run"],
+                kwargs["confirm"],
+            )
+        )
+
+    monkeypatch.setattr("avarch.cli.scan", fake_scan)
+    monkeypatch.setattr("avarch.cli.probe_file", fake_probe_file)
+    monkeypatch.setattr("avarch.cli.plan_file", fake_plan_file)
+    monkeypatch.setattr("avarch.cli._enqueue_selected_plans", fake_enqueue_selected_plans)
+    monkeypatch.setattr("avarch.cli.run_queue", fake_run_queue)
+    monkeypatch.setattr(
+        "avarch.cli._workflow_jobs_for_plan_hashes",
+        fake_workflow_jobs_for_plan_hashes,
+    )
+    monkeypatch.setattr("avarch.cli.promote_job", fake_promote_job)
+
+    result = runner.invoke(
+        app,
+        [
+            "workflow",
+            "run",
+            "--profile",
+            "av1_1080p_sdr",
+            "--mode",
+            "replace-atomic",
+            "--confirm",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("run", False),
+        ("verify", ("skip-av1", "encode", "size", "existing-promote", "skip-match")),
+        ("promote", 2, PromotionMode.REPLACE_ATOMIC, False, True),
+        ("promote", 4, PromotionMode.REPLACE_ATOMIC, False, True),
+    ]
+    assert "Validated jobs ready for promotion: 2" in result.output
+
+
+def _job_item(
+    job_id: int,
+    plan_hash: str,
+    status: JobStatus,
+    stage: JobStage,
+    now: datetime,
+) -> Job:
+    return Job(
+        id=job_id,
+        media_file_id=job_id,
+        profile_name="av1_1080p_sdr",
+        profile_hash="profile",
+        source_fs_fingerprint="fingerprint",
+        queue_key=plan_hash,
+        plan_hash=plan_hash,
+        status=status,
+        stage=stage,
+        created_at=now,
+        updated_at=now,
+    )

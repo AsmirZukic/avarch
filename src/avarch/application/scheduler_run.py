@@ -145,6 +145,7 @@ async def run_scheduler(
                     task.result()
                 except asyncio.CancelledError:
                     store.interrupt_running_job(job_id=job_id, now=utc_now())
+                    raise
 
             snapshot = store.load_control_snapshot(now=now)
             if snapshot.runner_id != runner_id:

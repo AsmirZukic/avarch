@@ -20,12 +20,20 @@ def verify_workflow_jobs(jobs: Sequence[WorkflowJobItem]) -> WorkflowPromotionRe
         for job in jobs
         if job_has_passed_validation(job.status, job.stage) and job.id is not None
     )
-    failed_jobs = tuple(job for job in jobs if job.status == JobStatus.FAILED)
+    failed_jobs = tuple(
+        job for job in jobs if job.status in {JobStatus.FAILED, JobStatus.VALIDATION_FAILED}
+    )
     blocked_jobs = tuple(
         job
         for job in jobs
-        if job.status not in {JobStatus.READY_TO_PROMOTE, JobStatus.PROMOTED}
-        and job.status != JobStatus.FAILED
+        if job.status
+        not in {
+            JobStatus.READY_TO_PROMOTE,
+            JobStatus.PROMOTED,
+            JobStatus.SKIPPED,
+            JobStatus.SIZE_REJECTED,
+        }
+        and job.status not in {JobStatus.FAILED, JobStatus.VALIDATION_FAILED}
     )
 
     return WorkflowPromotionReadiness(
