@@ -38,6 +38,7 @@ from avarch.application.job_control import (
 )
 from avarch.application.job_views import (
     WorkflowJobItem,
+    current_job_progress,
     job_details,
     latest_attempt,
     list_jobs,
@@ -67,6 +68,7 @@ from avarch.application.profile_management import (
     list_available_profiles,
     resolve_profile,
 )
+from avarch.application.progress_views import JobProgressView, job_progress_view
 from avarch.application.promotion import (
     PromotionWorkflowError,
     execute_promotion,
@@ -179,12 +181,17 @@ from avarch.cli_rendering import (
     display_optional_datetime,
     echo_attempt_log_status,
     echo_error_block,
+    echo_job_progress_details,
     echo_promotion_complete,
     echo_promotion_preview,
     event_type_value,
     format_size,
     job_control_label,
     job_outcome_summary,
+    job_progress_compact_label,
+    job_progress_eta_label,
+    job_progress_phase_label,
+    job_progress_updated_label,
     job_stage_value,
     job_status_value,
     truncate_line,
@@ -975,22 +982,40 @@ def jobs_list(
         raise typer.Exit(1) from exc
 
     with db_session(database_url) as session:
+        store = job_view_store(session)
         rows = list_jobs(
-            job_view_store(session),
+            store,
             statuses=status_filters,
             stages=stage_filters,
             profile=profile,
             limit=limit,
         )
+        now = datetime.now(UTC)
+        progress_by_job_id: dict[int, JobProgressView | None] = {}
+        for job in rows:
+            if job.id is not None:
+                progress_by_job_id[job.id] = job_progress_view(
+                    current_job_progress(store, job_id=job.id),
+                    now=now,
+                )
 
-    typer.echo("ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE")
+    typer.echo(
+        "ID  STATUS     PHASE            PROGRESS      ETA       UPDATED   PROFILE          FILE"
+    )
     for job in rows:
         path = job.file_name
-        control = job_control_label(job)
+        progress = progress_by_job_id.get(job.id) if job.id is not None else None
         typer.echo(
-            f"{job.id:<3} {job_status_value(job.status):<10} {job_stage_value(job.stage):<9} "
-            f"{job.priority:>3}  {job.attempts:>3}  {control:<7}  {job.profile_name:<15}  {path}"
+            f"{job.id:<3} {job_status_value(job.status):<10} "
+            f"{job_progress_phase_label(progress):<16} "
+            f"{job_progress_compact_label(progress):<13} "
+            f"{job_progress_eta_label(progress):<9} "
+            f"{job_progress_updated_label(progress):<9} "
+            f"{job.profile_name:<15}  {path}"
         )
+        control = job_control_label(job)
+        if control != "—":
+            typer.echo(f"    control: {control}")
         outcome = job_outcome_summary(job, path=path)
         if outcome is not None:
             typer.echo(f"    {outcome}")
@@ -1006,10 +1031,15 @@ def jobs_show(
     database_url = cli_workspace.database_url
 
     with db_session(database_url) as session:
-        job = job_details(job_view_store(session), job_id=job_id)
+        store = job_view_store(session)
+        job = job_details(store, job_id=job_id)
         if job is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
+        progress = job_progress_view(
+            current_job_progress(store, job_id=job_id),
+            now=datetime.now(UTC),
+        )
 
     typer.echo(f"Job {job_id}")
     typer.echo("")
@@ -1037,6 +1067,12 @@ def jobs_show(
     typer.echo(f"  output:     {job.output_path or '-'}")
     typer.echo(f"  validation: {job.latest_validation_id or '-'}")
     typer.echo(f"  promotion:  {job.latest_promotion_id or '-'}")
+    typer.echo("")
+    if progress is not None:
+        echo_job_progress_details(progress)
+    else:
+        typer.echo("Progress:")
+        typer.echo("  —")
     if job.last_error_message:
         typer.echo("")
         typer.echo("Last error:")
