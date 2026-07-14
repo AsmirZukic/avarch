@@ -8,6 +8,8 @@ from avarch.cli_rendering import (
     job_progress_eta_label,
     job_progress_phase_label,
     job_progress_updated_label,
+    plain_job_progress_line,
+    select_progress_watch_render_mode,
 )
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressSource, ProgressUnit
@@ -54,6 +56,34 @@ def test_progress_list_labels_for_stale_heartbeat() -> None:
     view = _view(heartbeat_stale=True, heartbeat_age=timedelta(seconds=45))
 
     assert job_progress_updated_label(view) == "stale"
+
+
+def test_watch_render_mode_selects_live_for_tty() -> None:
+    mode = select_progress_watch_render_mode(stdout_is_tty=True, no_color=None)
+
+    assert mode.live is True
+    assert mode.color is True
+
+
+def test_watch_render_mode_selects_plain_for_non_tty() -> None:
+    mode = select_progress_watch_render_mode(stdout_is_tty=False, no_color=None)
+
+    assert mode.live is False
+    assert mode.color is False
+
+
+def test_watch_render_mode_disables_color_when_requested() -> None:
+    mode = select_progress_watch_render_mode(stdout_is_tty=True, no_color="1")
+
+    assert mode.live is True
+    assert mode.color is False
+
+
+def test_plain_watch_line_includes_progress_without_ansi() -> None:
+    line = plain_job_progress_line(_view(), label="episode-01.mkv")
+
+    assert line == "episode-01.mkv encoding 40.0% elapsed=10s eta=6s speed=1.50x"
+    assert "\x1b" not in line
 
 
 def _view(

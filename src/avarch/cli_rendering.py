@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,12 @@ from avarch.domain.progress import ProgressSource
 from avarch.models.promotion import PromotionMode
 
 UNAVAILABLE = "—"
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressWatchRenderMode:
+    live: bool
+    color: bool
 
 
 def format_size(size_bytes: int) -> str:
@@ -75,6 +82,28 @@ def job_progress_updated_label(view: JobProgressView | None) -> str:
     if view.heartbeat_stale:
         return "stale"
     return f"{format_compact_duration(view.heartbeat_age)} ago"
+
+
+def select_progress_watch_render_mode(
+    *,
+    stdout_is_tty: bool,
+    no_color: str | None,
+) -> ProgressWatchRenderMode:
+    return ProgressWatchRenderMode(live=stdout_is_tty, color=stdout_is_tty and no_color is None)
+
+
+def plain_job_progress_line(view: JobProgressView, *, label: str) -> str:
+    parts = [
+        label,
+        job_progress_phase_label(view),
+        job_progress_compact_label(view),
+        f"elapsed={format_compact_duration(view.elapsed)}" if view.elapsed is not None else None,
+        f"eta={format_compact_duration(view.eta)}" if view.eta is not None else "eta=unknown",
+        f"speed={view.speed_ratio:.2f}x" if view.speed_ratio is not None else None,
+        "heartbeat=stale" if view.heartbeat_stale else None,
+        "not_advancing" if view.not_advancing else None,
+    ]
+    return " ".join(part for part in parts if part)
 
 
 def echo_job_progress_details(view: JobProgressView) -> None:
