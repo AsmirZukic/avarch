@@ -34,6 +34,46 @@ def parse_av1an_tty_progress(data: bytes) -> list[Av1anTtyProgressSample]:
     ]
 
 
+class Av1anTtyProgressParser:
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    def feed(self, data: bytes) -> list[Av1anTtyProgressSample]:
+        self._buffer.extend(data)
+        records = self._pop_complete_records()
+        return [
+            sample
+            for record in records
+            if (sample := _parse_record(_normalize_for_parser(record))) is not None
+        ]
+
+    def flush(self) -> list[Av1anTtyProgressSample]:
+        if not self._buffer:
+            return []
+        record = bytes(self._buffer)
+        self._buffer.clear()
+        sample = _parse_record(_normalize_for_parser(record))
+        return [] if sample is None else [sample]
+
+    def _pop_complete_records(self) -> list[bytes]:
+        records: list[bytes] = []
+        start = 0
+        index = 0
+        while index < len(self._buffer):
+            byte = self._buffer[index]
+            if byte not in {10, 13}:
+                index += 1
+                continue
+            records.append(bytes(self._buffer[start:index]))
+            index += 1
+            if byte == 13 and index < len(self._buffer) and self._buffer[index] == 10:
+                index += 1
+            start = index
+        if start:
+            del self._buffer[:start]
+        return records
+
+
 def _parse_record(record: str) -> Av1anTtyProgressSample | None:
     match = _PROGRESS_RE.search(record)
     if match is None:
