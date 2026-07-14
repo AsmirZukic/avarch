@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,12 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
-from avarch.models.execution import ToolUnavailableError, WorkDirectoryConflictError
+from avarch.models.execution import (
+    ExecutionInterruptedError,
+    ProcessCancellationToken,
+    ToolUnavailableError,
+    WorkDirectoryConflictError,
+)
 from avarch.models.plan import (
     AudioPlan,
     Av1anCommandSpec,
@@ -269,6 +276,42 @@ def test_execute_plan_writes_markers_and_reuses_receipt(
     assert execute_plan(plan) == "already_complete"
 
 
+def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_cancellable_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    token = ProcessCancellationToken()
+    error_holder: list[BaseException] = []
+    completed = threading.Event()
+
+    def run_plan() -> None:
+        try:
+            execute_plan(plan, cancellation_token=token)
+        except BaseException as exc:
+            error_holder.append(exc)
+        finally:
+            completed.set()
+
+    thread = threading.Thread(target=run_plan)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if plan.runtime.av1an_stdout_log.exists() and "ready" in (
+            plan.runtime.av1an_stdout_log.read_text(encoding="utf-8", errors="ignore")
+        ):
+            break
+        time.sleep(0.02)
+
+    token.request("test cancellation")
+    thread.join(timeout=3.0)
+
+    assert completed.is_set()
+    assert any(isinstance(exc, ExecutionInterruptedError) for exc in error_holder)
+    assert "terminated" in plan.runtime.av1an_stdout_log.read_text(encoding="utf-8")
+
+
 def test_preflight_rejects_panicking_av1an_version_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -399,6 +442,26 @@ exit 1
     ffmpeg.chmod(0o755)
     vspipe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+
+def _install_cancellable_fake_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    av1an = tmp_path / "bin" / "av1an"
+    av1an.write_text(
+        """#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  echo "av1an 0.5.1"
+  exit 0
+fi
+trap 'echo terminated; exit 0' TERM
+echo ready
+while true; do
+  sleep 0.05
+done
+""",
+        encoding="utf-8",
+    )
+    av1an.chmod(0o755)
 
 
 def _sample_plan(tmp_path: Path) -> TranscodePlan:

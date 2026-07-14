@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,7 +10,7 @@ from typing import Any
 from sqlmodel import Session
 
 from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
-from avarch.adapters.scheduler_workers import execute_promotion_job
+from avarch.adapters.scheduler_workers import execute_encode_job, execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
@@ -21,6 +23,7 @@ from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
+from avarch.serialization import canonical_json
 
 
 def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
@@ -168,6 +171,85 @@ def test_scheduler_continues_after_promotion_failure(
             promotion_workflow=_PromotionWorkflowStub(),
         )
     )
+
+
+def test_encode_worker_requests_process_token_when_cancelled(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from avarch.models.execution import ExecutionInterruptedError, ProcessCancellationToken
+    from tests.test_execution import _sample_plan  # pyright: ignore[reportPrivateUsage]
+
+    database_path = tmp_path / "avarch.adapters.sqlite.db"
+    config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
+    engine = create_db_engine(config.database.url)
+    create_db_schema(engine)
+    plan = _sample_plan(tmp_path)
+    plan.artifacts.plan_json.parent.mkdir(parents=True, exist_ok=True)
+    plan.artifacts.plan_json.write_text(canonical_json(plan), encoding="utf-8")
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = MediaFile(
+            path=str(plan.input_path),
+            size_bytes=plan.input_path.stat().st_size,
+            mtime_ns=plan.input_path.stat().st_mtime_ns,
+            device_id=plan.input_path.stat().st_dev,
+            inode=plan.input_path.stat().st_ino,
+            fs_fingerprint=plan.source_fs_fingerprint,
+            discovered_at=now,
+            last_seen_at=now,
+            status=MediaFileStatus.PRESENT,
+        )
+        session.add(media_file)
+        session.flush()
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name=plan.profile_name,
+                profile_hash=plan.profile_hash,
+                source_fs_fingerprint=plan.source_fs_fingerprint,
+                queue_key="encode",
+                plan_hash=plan.plan_hash,
+                plan_path=str(plan.artifacts.plan_json),
+                status=JobStatus.QUEUED,
+                stage=JobStage.ENCODE,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    started = threading.Event()
+    observed_token: dict[str, ProcessCancellationToken | None] = {"token": None}
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: ProcessCancellationToken | None = None,
+    ) -> object:
+        observed_token["token"] = cancellation_token
+        started.set()
+        deadline = time.monotonic() + 2.0
+        while cancellation_token is not None and not cancellation_token.cancel_requested:
+            if time.monotonic() > deadline:
+                raise AssertionError("worker did not request process cancellation")
+            time.sleep(0.02)
+        raise ExecutionInterruptedError("cancelled")
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            execute_encode_job(job_id=1, runner_id="runner", config=config)
+        )
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1.0)
+        task.cancel()
+        await asyncio.wait_for(task, timeout=3.0)
+
+    asyncio.run(scenario())
+
+    token = observed_token["token"]
+    assert token is not None
+    assert token.cancel_requested is True
 
 
 def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path) -> None:

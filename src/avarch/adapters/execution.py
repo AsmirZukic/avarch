@@ -27,6 +27,7 @@ from avarch.models.execution import (
     MuxStageError,
     ProcessCancellationToken,
     ProcessResult,
+    ProcessTerminationReason,
     StaleExecutionPlanError,
     ToolUnavailableError,
     UnsupportedToolVersionError,
@@ -189,7 +190,11 @@ def build_process_tail(data: bytes, *, max_bytes: int = MAX_PROCESS_TAIL_BYTES) 
     return tail.decode("utf-8", errors="replace")
 
 
-def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
+def execute_plan(
+    plan: TranscodePlan,
+    *,
+    cancellation_token: ProcessCancellationToken | None = None,
+) -> EncodeExecutionStatus:
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)
 
@@ -222,6 +227,7 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
             stderr_log=plan.runtime.av1an_stderr_log,
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
+            cancellation_token=cancellation_token,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
@@ -247,6 +253,7 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
             stderr_log=plan.runtime.mux_stderr_log,
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
+            cancellation_token=cancellation_token,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.mux_stderr_log)
@@ -487,15 +494,20 @@ def _run_process(
     stderr_log: Path,
     plan_hash: str,
     command_hash: str,
+    cancellation_token: ProcessCancellationToken | None = None,
 ) -> int:
-    return run_managed_process(
+    result = run_managed_process(
         command,
         cwd=cwd,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
         plan_hash=plan_hash,
         command_hash=command_hash,
-    ).return_code
+        cancellation_token=cancellation_token,
+    )
+    if result.termination_reason is not ProcessTerminationReason.EXITED:
+        raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
+    return result.return_code
 
 
 def run_managed_process(

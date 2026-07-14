@@ -71,7 +71,11 @@ from avarch.application.vapoursynth_identity import (
 from avarch.config import AppConfig
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, job_has_passed_validation
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
-from avarch.models.execution import ExecutionError, ExecutionInterruptedError
+from avarch.models.execution import (
+    ExecutionError,
+    ExecutionInterruptedError,
+    ProcessCancellationToken,
+)
 from avarch.models.plan import TranscodePlan
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
@@ -329,8 +333,23 @@ async def execute_encode_job(
         attempt.temp_dir = str(plan.av1an.temp_dir)
         attempt.output_path = str(plan.output_path)
 
+    process_cancellation = ProcessCancellationToken()
+    execution_task = asyncio.create_task(
+        asyncio.to_thread(execute_plan, plan, cancellation_token=process_cancellation)
+    )
     try:
-        status = await asyncio.to_thread(execute_plan, plan)
+        status = await asyncio.shield(execution_task)
+    except asyncio.CancelledError:
+        process_cancellation.request("scheduler cancellation")
+        try:
+            await asyncio.shield(execution_task)
+        except ExecutionInterruptedError:
+            pass
+        except ExecutionError:
+            pass
+        with Session(engine) as session, session.begin():
+            interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
+        return
     except ExecutionInterruptedError:
         with Session(engine) as session, session.begin():
             interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
