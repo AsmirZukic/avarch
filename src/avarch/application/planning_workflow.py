@@ -21,6 +21,7 @@ from avarch.application.planning import (
     PlanningProfile,
     PlanningRuntimeIdentity,
     PlanningStore,
+    ProfileNotApplicableError,
     eligible_planning_inputs,
     equivalent_plan_exists,
     save_plan,
@@ -220,6 +221,12 @@ def _plan_one_file(
             )
         with open_store() as store:
             save_plan(store, plan=materialized.plan, now=now)
+    except ProfileNotApplicableError as exc:
+        return PlanningWorkflowItem(
+            media_file=media_file,
+            status=PlanningWorkflowItemStatus.SKIPPED,
+            reason=f"profile-not-applicable: {', '.join(exc.reasons)}",
+        )
     except failure_errors as exc:
         return PlanningWorkflowItem(
             media_file=media_file,
