@@ -54,6 +54,30 @@ def test_build_plan_tags_sdr_av1_output_color(tmp_path: Path) -> None:
     ]
 
 
+def test_build_plan_resolves_auto_av1an_workers(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        resolved_profile=_resolved_profile(
+            av1an={
+                "workers": "auto",
+                "video_args": "--preset 6 --crf 28 --keyint 240",
+            }
+        ),
+    )
+
+    plan = build_plan(context, data_dir=tmp_path / ".avarch", available_cpu_count=12)
+
+    assert plan.av1an.workers == 11
+
+
+def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+
+    plan = build_plan(context, data_dir=tmp_path / ".avarch", available_cpu_count=12)
+
+    assert plan.av1an.workers == 2
+
+
 def test_sdr_color_encoder_args_preserve_user_options() -> None:
     arguments = add_sdr_color_encoder_args(
         [
@@ -262,7 +286,14 @@ def _context(
     )
 
 
-def _resolved_profile() -> ResolvedProfile:
+def _resolved_profile(av1an: dict[str, object] | None = None) -> ResolvedProfile:
+    av1an_settings: dict[str, object] = {
+        "encoder": "svt-av1",
+        "workers": 2,
+        "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+    }
+    if av1an is not None:
+        av1an_settings.update(av1an)
     document = ProfileDocument.model_validate(
         {
             "schema_version": 1,
@@ -275,11 +306,7 @@ def _resolved_profile() -> ResolvedProfile:
                 "hdr_to_sdr": True,
                 "source": "vapoursynth",
             },
-            "av1an": {
-                "encoder": "svt-av1",
-                "workers": 2,
-                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
-            },
+            "av1an": av1an_settings,
             "audio": {
                 "codec": "libopus",
                 "bitrate": "128k",

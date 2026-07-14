@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from avarch.application.resources import auto_av1an_worker_count
 from avarch.application.vapoursynth_identity import (
     GENERATOR_VERSION,
     ResolvedVapourSynthFilter,
@@ -200,8 +201,13 @@ def build_profile_hash(
     *,
     template_hash: str | None = None,
     script_hash: str | None = None,
+    available_cpu_count: int | None = None,
 ) -> str:
-    profile_payload = profile.model_dump(mode="json")
+    effective_profile = resolve_profile_runtime_defaults(
+        profile,
+        available_cpu_count=available_cpu_count,
+    )
+    profile_payload = effective_profile.model_dump(mode="json")
     if isinstance(profile_payload.get("vapoursynth"), dict):
         profile_payload["vapoursynth"].pop("script", None)
         profile_payload["vapoursynth"].pop("template", None)
@@ -577,8 +583,13 @@ def build_plan(
     resolved_template: ResolvedVapourSynthTemplate | None = None,
     resolved_filter: ResolvedVapourSynthFilter | None = None,
     generator_version: int = GENERATOR_VERSION,
+    available_cpu_count: int | None = None,
 ) -> TranscodePlan:
-    match = match_profile(context.profile, context.normalized_probe)
+    profile = resolve_profile_runtime_defaults(
+        context.profile,
+        available_cpu_count=available_cpu_count,
+    )
+    match = match_profile(profile, context.normalized_probe)
     if not match.matched:
         raise ProfileNotApplicableError(match.reasons)
 
@@ -586,12 +597,12 @@ def build_plan(
     if media_file_id is None:
         raise PlanningError("Media file must be persisted before planning.")
 
-    profile_template = _profile_template_path(context.profile)
-    if context.profile.vapoursynth.mode == "custom_filter" and resolved_filter is None:
-        resolved_filter = resolve_vapoursynth_filter(context.profile)
-    if context.profile.vapoursynth.mode != "custom_filter" and resolved_filter is not None:
+    profile_template = _profile_template_path(profile)
+    if profile.vapoursynth.mode == "custom_filter" and resolved_filter is None:
+        resolved_filter = resolve_vapoursynth_filter(profile)
+    if profile.vapoursynth.mode != "custom_filter" and resolved_filter is not None:
         raise PlanningError("Resolved filter was provided for a profile without a custom filter.")
-    if context.profile.vapoursynth.mode == "custom_filter" and resolved_template is not None:
+    if profile.vapoursynth.mode == "custom_filter" and resolved_template is not None:
         raise PlanningError("custom_filter VapourSynth mode does not use a template.")
     if profile_template is None and resolved_template is not None:
         raise PlanningError("Resolved template was provided for a profile without a template.")
@@ -604,7 +615,7 @@ def build_plan(
     ):
         raise PlanningError("Resolved template path does not match the selected profile.")
 
-    mode = _vapoursynth_mode(context.profile, resolved_template, resolved_filter)
+    mode = _vapoursynth_mode(profile, resolved_template, resolved_filter)
     template_hash = resolved_template.template_hash if resolved_template is not None else None
     script_hash = resolved_filter.script_hash if resolved_filter is not None else None
     vapoursynth_identity_hash = build_vapoursynth_identity_hash(
@@ -618,9 +629,10 @@ def build_plan(
         filter_api_version=resolved_filter.api_version if resolved_filter is not None else None,
     )
     profile_hash = build_profile_hash(
-        context.profile,
+        profile,
         template_hash=template_hash,
         script_hash=script_hash,
+        available_cpu_count=available_cpu_count,
     )
     execution_identity = build_execution_identity()
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
@@ -639,11 +651,11 @@ def build_plan(
         promotion_policy_hash=promotion_policy.policy_hash,
     )
     paths = build_plan_paths(data_dir=data_dir, work_key=work_key, input_path=input_path)
-    video = select_video(context.normalized_probe, context.profile)
-    audio = select_audio(context.normalized_probe, context.profile)
-    subtitles = select_subtitles(context.normalized_probe, context.profile)
+    video = select_video(context.normalized_probe, profile)
+    audio = select_audio(context.normalized_probe, profile)
+    subtitles = select_subtitles(context.normalized_probe, profile)
     runtime_identity = runtime_identity or default_planning_runtime_identity()
-    encoder_args = add_sdr_color_encoder_args(parse_encoder_args(context.profile.av1an.video_args))
+    encoder_args = add_sdr_color_encoder_args(parse_encoder_args(profile.av1an.video_args))
 
     plan = TranscodePlan(
         plan_hash="",
@@ -694,8 +706,8 @@ def build_plan(
             runtime_platform=runtime_identity.platform,
             vapoursynth_version=runtime_identity.vapoursynth_version,
             template_api_version=(
-                context.profile.vapoursynth.api_version
-                if context.profile.vapoursynth.mode == "custom_template"
+                profile.vapoursynth.api_version
+                if profile.vapoursynth.mode == "custom_template"
                 else None
             ),
             identity_hash=vapoursynth_identity_hash,
@@ -705,9 +717,12 @@ def build_plan(
             video_output_path=paths.video_output_path,
             temp_dir=paths.av1an_temp_dir,
             working_directory=paths.work_dir,
-            encoder=context.profile.av1an.encoder,
+            encoder=profile.av1an.encoder,
             encoder_args=encoder_args,
-            workers=context.profile.av1an.workers,
+            workers=resolve_av1an_workers(
+                profile.av1an.workers,
+                available_cpu_count=available_cpu_count,
+            ),
         ),
         mux=FfmpegMuxSpec(
             video_input_path=paths.video_output_path,
@@ -733,7 +748,7 @@ def build_plan(
         ),
         validation=build_validation_policy(
             probe=context.normalized_probe,
-            profile=context.profile,
+            profile=profile,
             video=video,
             audio=audio,
             subtitles=subtitles,
@@ -743,6 +758,32 @@ def build_plan(
         artifacts=paths.artifacts,
     )
     return finalize_plan_hash(plan)
+
+
+def resolve_profile_runtime_defaults(
+    profile: EncodingProfile,
+    *,
+    available_cpu_count: int | None = None,
+) -> EncodingProfile:
+    workers = resolve_av1an_workers(
+        profile.av1an.workers,
+        available_cpu_count=available_cpu_count,
+    )
+    return profile.model_copy(
+        update={"av1an": profile.av1an.model_copy(update={"workers": workers})}
+    )
+
+
+def resolve_av1an_workers(
+    workers: int | str,
+    *,
+    available_cpu_count: int | None = None,
+) -> int:
+    if workers == "auto":
+        return auto_av1an_worker_count(cpu_count=available_cpu_count)
+    if not isinstance(workers, int) or workers <= 0:
+        raise PlanningError("Av1an workers must be a positive integer or 'auto'.")
+    return workers
 
 
 @dataclass(frozen=True, slots=True)
