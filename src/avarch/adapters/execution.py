@@ -54,6 +54,7 @@ from avarch.models.plan import (
 from avarch.serialization import canonical_json
 
 MAX_PROCESS_TAIL_BYTES = 16_384
+PROCESS_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,17 +561,32 @@ def _run_process(
         else None
     )
     callback = _combined_process_output_callback(heartbeat_callback, output_callback)
-    result = run_managed_process(
-        command,
-        cwd=cwd,
-        stdout_log=stdout_log,
-        stderr_log=stderr_log,
-        plan_hash=plan_hash,
-        command_hash=command_hash,
-        stdout_callback=callback,
-        stderr_callback=callback,
-        cancellation_token=cancellation_token,
+    periodic_heartbeat_stop = threading.Event()
+    periodic_heartbeat = (
+        _start_periodic_process_heartbeat(
+            progress_sink,
+            progress_phase,
+            stop_event=periodic_heartbeat_stop,
+        )
+        if progress_sink is not None and progress_phase is not None
+        else None
     )
+    try:
+        result = run_managed_process(
+            command,
+            cwd=cwd,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            plan_hash=plan_hash,
+            command_hash=command_hash,
+            stdout_callback=callback,
+            stderr_callback=callback,
+            cancellation_token=cancellation_token,
+        )
+    finally:
+        periodic_heartbeat_stop.set()
+        if periodic_heartbeat is not None:
+            periodic_heartbeat.join()
     if result.termination_reason is not ProcessTerminationReason.EXITED:
         raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
     return result.return_code
@@ -633,26 +649,59 @@ def _process_heartbeat_callback(
 ) -> ProcessOutputCallback:
     def callback(record: ProcessOutputRecord) -> None:
         del record
-        now = _utc_now()
-        publish_progress_safely(
-            progress_sink,
-            ProgressSnapshot(
-                phase=phase,
-                current=None,
-                total=None,
-                unit=None,
-                rate_per_second=None,
-                speed_ratio=None,
-                source=ProgressSource.PROCESS_HEARTBEAT,
-                message=None,
-                phase_started_at=now,
-                observed_at=now,
-                heartbeat_at=now,
-                advanced_at=None,
-            ),
-        )
+        _publish_process_heartbeat(progress_sink, phase)
 
     return callback
+
+
+def _start_periodic_process_heartbeat(
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+    *,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=_publish_periodic_process_heartbeat,
+        kwargs={
+            "progress_sink": progress_sink,
+            "phase": phase,
+            "stop_event": stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _publish_periodic_process_heartbeat(
+    *,
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.wait(PROCESS_HEARTBEAT_INTERVAL_SECONDS):
+        _publish_process_heartbeat(progress_sink, phase)
+
+
+def _publish_process_heartbeat(progress_sink: ProgressSink, phase: ProgressPhase) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=phase,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.PROCESS_HEARTBEAT,
+            message=None,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=None,
+        ),
+    )
 
 
 def run_managed_process(
