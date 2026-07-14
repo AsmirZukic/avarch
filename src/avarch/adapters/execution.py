@@ -19,7 +19,11 @@ from typing import BinaryIO, Literal, cast
 from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
-from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser, Av1anTtyProgressSample
+from avarch.adapters.progress.av1an_tty import (
+    Av1anTtyProgressParser,
+    Av1anTtyProgressSample,
+    av1an_tty_progress_supported,
+)
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
 from avarch.application.progress import ProgressSink, publish_progress_safely
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
@@ -226,12 +230,7 @@ def execute_plan(
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
         command = build_av1an_command(plan.av1an)
         _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
-        av1an_parser = Av1anTtyProgressParser()
-        av1an_progress_callback = (
-            _av1an_progress_callback(progress_sink, av1an_parser)
-            if progress_sink is not None
-            else None
-        )
+        av1an_progress_callback = _make_av1an_progress_callback(plan, progress_sink)
         exit_code = _run_process(
             command,
             cwd=plan.av1an.working_directory,
@@ -317,6 +316,20 @@ def _publish_execution_phase(
             advanced_at=None,
         ),
     )
+
+
+def _make_av1an_progress_callback(
+    plan: TranscodePlan,
+    progress_sink: ProgressSink | None,
+) -> ProcessOutputCallback | None:
+    if progress_sink is None:
+        return None
+    if not av1an_tty_progress_supported(
+        plan.execution_identity.av1an_version_family,
+        enabled=os.environ.get("AVARCH_AV1AN_TTY_PROGRESS", "1") != "0",
+    ):
+        return None
+    return _av1an_progress_callback(progress_sink, Av1anTtyProgressParser())
 
 
 def preflight_execution(plan: TranscodePlan) -> None:

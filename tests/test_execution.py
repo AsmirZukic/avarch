@@ -361,6 +361,25 @@ def test_execute_plan_ignores_malformed_av1an_progress_output(
     ]
 
 
+def test_execute_plan_falls_back_to_phase_progress_when_av1an_parser_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=True)
+    monkeypatch.setenv("AVARCH_AV1AN_TTY_PROGRESS", "0")
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert ProgressPhase.ENCODING in [snapshot.phase for snapshot in sink.snapshots]
+    assert not [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+    ]
+
+
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
