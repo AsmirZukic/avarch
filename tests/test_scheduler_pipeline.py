@@ -264,6 +264,41 @@ def test_encode_worker_requests_process_token_when_cancelled(
     token = observed_token["token"]
     assert token is not None
     assert token.cancel_requested is True
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.CANCELLED
+
+
+def test_encode_worker_records_failed_progress_on_execution_error(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from avarch.models.execution import ExecutionError
+
+    config, _plan = _stored_encode_job(tmp_path)
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token, progress_sink
+        raise ExecutionError("encoder failed\nfull diagnostics stay in logs")
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.FAILED
+    assert progress.message == "encoder failed full diagnostics stay in logs"
+    assert len(progress.message) <= 500
 
 
 def test_encode_worker_persists_preparing_then_encoding_progress(

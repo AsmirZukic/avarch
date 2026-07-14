@@ -341,6 +341,11 @@ def mark_promotion_rolled_back(
     job.claimed_by = None
     job.finished_at = None
     job.updated_at = now
+    SqliteProgressStore(session).finalize_snapshot(
+        attempt_id=attempt.id or record.attempt_id,
+        snapshot=_promotion_progress_snapshot(ProgressPhase.CANCELLED, now=now),
+        persisted_at=now,
+    )
     session.add(record)
     session.add(attempt)
     session.add(job)
@@ -393,6 +398,15 @@ def mark_promotion_failed_or_validated(
     job.last_error_type = error.__class__.__name__
     job.last_error_message = str(error)
     job.updated_at = now
+    SqliteProgressStore(session).finalize_snapshot(
+        attempt_id=attempt.id or record.attempt_id,
+        snapshot=_promotion_progress_snapshot(
+            ProgressPhase.FAILED,
+            now=now,
+            message=str(error),
+        ),
+        persisted_at=now,
+    )
     session.add(record)
     session.add(attempt)
     session.add(job)
@@ -469,7 +483,12 @@ def has_active_promotion_lease(session: Session, *, job_id: int, now: datetime) 
     )
 
 
-def _promotion_progress_snapshot(phase: ProgressPhase, *, now: datetime) -> ProgressSnapshot:
+def _promotion_progress_snapshot(
+    phase: ProgressPhase,
+    *,
+    now: datetime,
+    message: str | None = None,
+) -> ProgressSnapshot:
     return ProgressSnapshot(
         phase=phase,
         current=None,
@@ -478,12 +497,21 @@ def _promotion_progress_snapshot(phase: ProgressPhase, *, now: datetime) -> Prog
         rate_per_second=None,
         speed_ratio=None,
         source=ProgressSource.SCHEDULER,
-        message=None,
+        message=_sanitize_progress_message(message),
         phase_started_at=now,
         observed_at=now,
         heartbeat_at=now,
         advanced_at=None,
     )
+
+
+def _sanitize_progress_message(message: str | None, *, max_length: int = 500) -> str | None:
+    if message is None:
+        return None
+    sanitized = " ".join(message.split())
+    if len(sanitized) <= max_length:
+        return sanitized
+    return sanitized[: max_length - 3].rstrip() + "..."
 
 
 def _require_promotion_record(session: Session, promotion_id: int) -> PromotionRecord:
