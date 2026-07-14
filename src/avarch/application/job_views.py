@@ -39,6 +39,7 @@ class CurrentJobProgressView:
     job_id: int
     job_status: JobStatus
     job_stage: JobStage
+    attempt_id: int | None
     attempt: JobAttemptView | None
     progress: ProgressSnapshot | None
 
