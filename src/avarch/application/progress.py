@@ -5,17 +5,22 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from threading import Lock
+from time import monotonic
 from typing import Protocol
 
 from avarch.domain.progress import TERMINAL_PROGRESS_PHASES, ProgressPhase, ProgressSnapshot
 
 __all__ = [
     "CoalescingProgressBridge",
+    "DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS",
     "NoopProgressSink",
+    "ProgressPersistenceThrottle",
     "ProgressSink",
     "RecordingProgressSink",
     "publish_progress_safely",
 ]
+
+DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS = 1.5
 
 
 class ProgressSink(Protocol):
@@ -124,6 +129,69 @@ class CoalescingProgressBridge:
     async def _wait_for_work(self) -> None:
         await self._wake.wait()
         self._wake.clear()
+
+
+class ProgressPersistenceThrottle:
+    def __init__(
+        self,
+        sink: ProgressSink,
+        *,
+        interval_seconds: float = DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self._sink = sink
+        self._interval_seconds = interval_seconds
+        self._clock = clock
+        self._pending_ordinary: ProgressSnapshot | None = None
+        self._last_published_at: float | None = None
+        self._last_phase: ProgressPhase | None = None
+        self._closed = False
+
+    def publish(self, snapshot: ProgressSnapshot) -> bool:
+        if self._closed:
+            return False
+        if self._should_publish_immediately(snapshot):
+            self._pending_ordinary = None
+            return self._publish_now(snapshot)
+        self._pending_ordinary = snapshot
+        return False
+
+    def flush_due(self) -> bool:
+        if self._pending_ordinary is None or self._last_published_at is None:
+            return False
+        if self._clock() - self._last_published_at < self._interval_seconds:
+            return False
+        snapshot = self._pending_ordinary
+        self._pending_ordinary = None
+        return self._publish_now(snapshot)
+
+    def close(self) -> bool:
+        self._closed = True
+        if self._pending_ordinary is None:
+            return False
+        snapshot = self._pending_ordinary
+        self._pending_ordinary = None
+        return self._publish_now(snapshot)
+
+    def _should_publish_immediately(self, snapshot: ProgressSnapshot) -> bool:
+        if self._last_phase is None:
+            return True
+        if snapshot.phase != self._last_phase:
+            return True
+        if snapshot.phase in TERMINAL_PROGRESS_PHASES:
+            return True
+        if self._last_published_at is None:
+            return True
+        return self._clock() - self._last_published_at >= self._interval_seconds
+
+    def _publish_now(self, snapshot: ProgressSnapshot) -> bool:
+        if not publish_progress_safely(self._sink, snapshot):
+            return False
+        self._last_published_at = self._clock()
+        self._last_phase = snapshot.phase
+        return True
 
 
 def publish_progress_safely(
