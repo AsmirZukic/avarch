@@ -19,8 +19,9 @@ from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
-from avarch.application.progress import ProgressSink
+from avarch.application.progress import ProgressSink, publish_progress_safely
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.models.execution import (
     Av1anStageError,
     ExecutionInterruptedError,
@@ -197,7 +198,6 @@ def execute_plan(
     cancellation_token: ProcessCancellationToken | None = None,
     progress_sink: ProgressSink | None = None,
 ) -> EncodeExecutionStatus:
-    del progress_sink
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)
 
@@ -223,6 +223,7 @@ def execute_plan(
             )
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
         command = build_av1an_command(plan.av1an)
+        _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
         exit_code = _run_process(
             command,
             cwd=plan.av1an.working_directory,
@@ -278,6 +279,30 @@ def execute_plan(
         final_output_size=final_output_size,
     )
     return "completed"
+
+
+def _publish_execution_phase(
+    progress_sink: ProgressSink | None,
+    phase: ProgressPhase,
+) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=phase,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.SCHEDULER,
+            message=None,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=None,
+        ),
+    )
 
 
 def preflight_execution(plan: TranscodePlan) -> None:

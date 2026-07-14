@@ -19,7 +19,8 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
-from avarch.application.progress import NoopProgressSink
+from avarch.application.progress import NoopProgressSink, RecordingProgressSink
+from avarch.domain.progress import ProgressPhase
 from avarch.models.execution import (
     ExecutionInterruptedError,
     ProcessCancellationToken,
@@ -286,6 +287,19 @@ def test_execute_plan_accepts_progress_sink_without_requiring_adapter(
     assert execute_plan(plan) == "completed"
 
     assert execute_plan(plan, progress_sink=NoopProgressSink()) == "already_complete"
+
+
+def test_execute_plan_reports_encoding_before_av1an_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert [snapshot.phase for snapshot in sink.snapshots] == [ProgressPhase.ENCODING]
 
 
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
