@@ -65,6 +65,34 @@ def test_job_a_promotes_while_job_b_is_encoding(tmp_path: Path) -> None:
     )
 
 
+def test_job_a_validates_while_job_b_is_encoding(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = _media_file(tmp_path / "movie-a.mkv", now)
+        session.add(media_file)
+        session.flush()
+        session.add(
+            _job(
+                media_file.id or 0,
+                now,
+                queue_key="validate",
+                status=JobStatus.ENCODED,
+                stage=JobStage.VALIDATE,
+            )
+        )
+
+    with Session(engine) as session:
+        claimable = claimable_jobs(session, active_job_ids={2})
+
+    assert [job.stage for job in claimable] == [JobStage.VALIDATE]
+    assert has_resource_capacity(
+        claimable[0].stage,
+        [JobStage.ENCODE],
+        capacity=ResourceCapacity(cheap_workers=4, av1an_jobs=1, file_ops=1),
+    )
+
+
 def test_cleanup_can_run_while_another_job_encodes(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)

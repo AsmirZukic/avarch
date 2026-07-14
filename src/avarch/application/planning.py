@@ -202,10 +202,12 @@ def build_profile_hash(
     template_hash: str | None = None,
     script_hash: str | None = None,
     available_cpu_count: int | None = None,
+    available_memory_bytes: int | None = None,
 ) -> str:
     effective_profile = resolve_profile_runtime_defaults(
         profile,
         available_cpu_count=available_cpu_count,
+        available_memory_bytes=available_memory_bytes,
     )
     profile_payload = effective_profile.model_dump(mode="json")
     if isinstance(profile_payload.get("vapoursynth"), dict):
@@ -584,10 +586,12 @@ def build_plan(
     resolved_filter: ResolvedVapourSynthFilter | None = None,
     generator_version: int = GENERATOR_VERSION,
     available_cpu_count: int | None = None,
+    available_memory_bytes: int | None = None,
 ) -> TranscodePlan:
     profile = resolve_profile_runtime_defaults(
         context.profile,
         available_cpu_count=available_cpu_count,
+        available_memory_bytes=available_memory_bytes,
     )
     match = match_profile(profile, context.normalized_probe)
     if not match.matched:
@@ -633,6 +637,7 @@ def build_plan(
         template_hash=template_hash,
         script_hash=script_hash,
         available_cpu_count=available_cpu_count,
+        available_memory_bytes=available_memory_bytes,
     )
     execution_identity = build_execution_identity()
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
@@ -722,6 +727,7 @@ def build_plan(
             workers=resolve_av1an_workers(
                 profile.av1an.workers,
                 available_cpu_count=available_cpu_count,
+                available_memory_bytes=available_memory_bytes,
             ),
         ),
         mux=FfmpegMuxSpec(
@@ -764,10 +770,12 @@ def resolve_profile_runtime_defaults(
     profile: EncodingProfile,
     *,
     available_cpu_count: int | None = None,
+    available_memory_bytes: int | None = None,
 ) -> EncodingProfile:
     workers = resolve_av1an_workers(
         profile.av1an.workers,
         available_cpu_count=available_cpu_count,
+        available_memory_bytes=available_memory_bytes,
     )
     return profile.model_copy(
         update={"av1an": profile.av1an.model_copy(update={"workers": workers})}
@@ -778,9 +786,13 @@ def resolve_av1an_workers(
     workers: int | str,
     *,
     available_cpu_count: int | None = None,
+    available_memory_bytes: int | None = None,
 ) -> int:
     if workers == "auto":
-        return auto_av1an_worker_count(cpu_count=available_cpu_count)
+        return auto_av1an_worker_count(
+            cpu_count=available_cpu_count,
+            memory_bytes=available_memory_bytes,
+        )
     if not isinstance(workers, int) or workers <= 0:
         raise PlanningError("Av1an workers must be a positive integer or 'auto'.")
     return workers

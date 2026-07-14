@@ -65,15 +65,25 @@ def test_build_plan_resolves_auto_av1an_workers(tmp_path: Path) -> None:
         ),
     )
 
-    plan = build_plan(context, data_dir=tmp_path / ".avarch", available_cpu_count=12)
+    plan = build_plan(
+        context,
+        data_dir=tmp_path / ".avarch",
+        available_cpu_count=12,
+        available_memory_bytes=64 * 1024**3,
+    )
 
-    assert plan.av1an.workers == 11
+    assert plan.av1an.workers == 3
 
 
 def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
     context = _context(tmp_path)
 
-    plan = build_plan(context, data_dir=tmp_path / ".avarch", available_cpu_count=12)
+    plan = build_plan(
+        context,
+        data_dir=tmp_path / ".avarch",
+        available_cpu_count=12,
+        available_memory_bytes=64 * 1024**3,
+    )
 
     assert plan.av1an.workers == 2
 
