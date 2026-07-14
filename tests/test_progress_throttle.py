@@ -75,6 +75,36 @@ def test_throttle_flushes_latest_ordinary_update_after_interval() -> None:
     assert [snapshot.current for snapshot in sink.snapshots] == [1, 3]
 
 
+def test_throttle_merges_heartbeat_into_pending_numeric_snapshot() -> None:
+    clock = _FakeClock()
+    sink = RecordingProgressSink()
+    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
+
+    throttle.publish(_snapshot(current=1))
+    throttle.publish(_snapshot(current=25))
+    throttle.publish(_snapshot(current=None, unit=None, observed_offset_seconds=30))
+    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
+
+    assert throttle.flush_due() is True
+    assert [snapshot.current for snapshot in sink.snapshots] == [1, 25]
+    assert sink.snapshots[-1].advanced_at == datetime(2026, 7, 1, 12, 0, 25, tzinfo=UTC)
+    assert sink.snapshots[-1].heartbeat_at == datetime(2026, 7, 1, 12, 0, 30, tzinfo=UTC)
+
+
+def test_throttle_does_not_publish_heartbeat_over_pending_numeric_when_due() -> None:
+    clock = _FakeClock()
+    sink = RecordingProgressSink()
+    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
+
+    throttle.publish(_snapshot(current=1))
+    throttle.publish(_snapshot(current=25))
+    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
+    throttle.publish(_snapshot(current=None, unit=None, observed_offset_seconds=30))
+
+    assert [snapshot.current for snapshot in sink.snapshots] == [1, 25]
+    assert sink.snapshots[-1].heartbeat_at == datetime(2026, 7, 1, 12, 0, 30, tzinfo=UTC)
+
+
 def test_throttle_bounds_write_count_under_heavy_samples() -> None:
     clock = _FakeClock()
     sink = RecordingProgressSink()
@@ -142,9 +172,12 @@ def _snapshot(
     phase: ProgressPhase = ProgressPhase.ENCODING,
     current: int | None = 1,
     unit: ProgressUnit | None = ProgressUnit.FRAMES,
+    observed_offset_seconds: int | None = None,
 ) -> ProgressSnapshot:
     now = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    if current is not None:
+    if observed_offset_seconds is not None:
+        now += timedelta(seconds=observed_offset_seconds)
+    elif current is not None:
         now += timedelta(seconds=current)
     return ProgressSnapshot(
         phase=phase,

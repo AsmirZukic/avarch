@@ -35,7 +35,22 @@ def test_parse_tty_fixture_extracts_encoding_chunk_context() -> None:
     assert encoding[-1].rate_per_second > 0
     assert encoding[-1].speed_ratio is not None
     assert encoding[-1].speed_ratio > 1
-    assert encoding[-1].message == "1/1 chunks"
+    assert encoding[-1].message == "1/1 chunks, 38.0 Kbps, est. 23.19 KiB"
+
+
+def test_parse_tty_encoding_line_includes_bitrate_context() -> None:
+    samples = parse_av1an_tty_progress(
+        b"00:01:04 [9/317 Chunks] \xe2\x96\x90\xe2\x96\x8c   "
+        b"7% 2345/31625 (36.46 fps, eta 13m, 1344.1 Kbps, "
+        b"est. 211.35 MiB)\r"
+    )
+
+    assert len(samples) == 1
+    assert samples[0].phase == ProgressPhase.ENCODING
+    assert samples[0].current == 2345
+    assert samples[0].total == 31625
+    assert samples[0].rate_per_second == 36.46
+    assert samples[0].message == "9/317 chunks, 1344.1 Kbps, est. 211.35 MiB"
 
 
 def test_parse_non_tty_output_returns_no_samples() -> None:

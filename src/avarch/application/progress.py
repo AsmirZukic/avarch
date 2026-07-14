@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
 from threading import Lock
 from time import monotonic
 from typing import Protocol
@@ -88,7 +89,10 @@ class CoalescingProgressBridge:
                 self._latest_ordinary = None
                 self._important.append(snapshot)
             else:
-                self._latest_ordinary = snapshot
+                self._latest_ordinary = _coalesce_ordinary_snapshot(
+                    self._latest_ordinary,
+                    snapshot,
+                )
             self._last_phase = snapshot.phase
             self._wake.set()
         finally:
@@ -153,10 +157,17 @@ class ProgressPersistenceThrottle:
         if self._closed:
             return
         if self._should_publish_immediately(snapshot):
+            snapshot_to_publish = _coalesce_ordinary_snapshot(
+                self._pending_ordinary,
+                snapshot,
+            )
             self._pending_ordinary = None
-            self._publish_now(snapshot)
+            self._publish_now(snapshot_to_publish)
             return
-        self._pending_ordinary = snapshot
+        self._pending_ordinary = _coalesce_ordinary_snapshot(
+            self._pending_ordinary,
+            snapshot,
+        )
 
     def flush_due(self) -> bool:
         if self._pending_ordinary is None or self._last_published_at is None:
@@ -205,3 +216,24 @@ def publish_progress_safely(
     except Exception:
         return False
     return True
+
+
+def _coalesce_ordinary_snapshot(
+    pending: ProgressSnapshot | None,
+    incoming: ProgressSnapshot,
+) -> ProgressSnapshot:
+    if pending is None:
+        return incoming
+    if pending.phase != incoming.phase:
+        return incoming
+    if _has_numeric_progress(pending) and not _has_numeric_progress(incoming):
+        return replace(
+            pending,
+            observed_at=max(pending.observed_at, incoming.observed_at),
+            heartbeat_at=max(pending.heartbeat_at, incoming.heartbeat_at),
+        )
+    return incoming
+
+
+def _has_numeric_progress(snapshot: ProgressSnapshot) -> bool:
+    return snapshot.current is not None and snapshot.total is not None

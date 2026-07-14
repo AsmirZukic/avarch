@@ -108,6 +108,29 @@ def test_bridge_shutdown_flushes_latest_snapshot() -> None:
     assert consumed[-1].current == 249
 
 
+def test_bridge_merges_heartbeat_into_pending_numeric_snapshot() -> None:
+    async def scenario() -> list[ProgressSnapshot]:
+        consumed: list[ProgressSnapshot] = []
+
+        async def consume(snapshot: ProgressSnapshot) -> None:
+            consumed.append(snapshot)
+
+        bridge = CoalescingProgressBridge(consume)
+        bridge.publish(_snapshot(current=1))
+        bridge.publish(_snapshot(current=25))
+        bridge.publish(_snapshot(current=None, unit=None, observed_offset_seconds=30))
+
+        await bridge.aclose()
+        return consumed
+
+    consumed = asyncio.run(scenario())
+
+    assert consumed[-1].current == 25
+    assert consumed[-1].total == 1_000
+    assert consumed[-1].advanced_at == datetime(2026, 7, 1, 12, 0, 25, tzinfo=UTC)
+    assert consumed[-1].heartbeat_at == datetime(2026, 7, 1, 12, 0, 30, tzinfo=UTC)
+
+
 def test_bridge_publication_after_shutdown_is_safe() -> None:
     async def scenario() -> list[ProgressSnapshot]:
         consumed: list[ProgressSnapshot] = []
@@ -132,9 +155,12 @@ def _snapshot(
     phase: ProgressPhase = ProgressPhase.ENCODING,
     current: int | None = 1,
     unit: ProgressUnit | None = ProgressUnit.FRAMES,
+    observed_offset_seconds: int | None = None,
 ) -> ProgressSnapshot:
     now = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    if current is not None:
+    if observed_offset_seconds is not None:
+        now += timedelta(seconds=observed_offset_seconds)
+    elif current is not None:
         now += timedelta(seconds=current)
     return ProgressSnapshot(
         phase=phase,
