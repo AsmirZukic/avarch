@@ -382,14 +382,41 @@ async def execute_encode_job(
             pass
         except ExecutionError:
             pass
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.CANCELLED,
+                now=_utc_now(),
+                message="scheduler cancellation",
+            ),
+        )
         with Session(engine) as session, session.begin():
             interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
         return
     except ExecutionInterruptedError:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.CANCELLED,
+                now=_utc_now(),
+                message="execution interrupted",
+            ),
+        )
         with Session(engine) as session, session.begin():
             interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
         return
     except ExecutionError as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -483,6 +510,15 @@ async def execute_validation_job(
             clock=_utc_now,
         )
     except OutputValidationError as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -492,6 +528,15 @@ async def execute_validation_job(
         )
         return None
     except Exception as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -708,7 +753,12 @@ def _size_policy_decision(
     )
 
 
-def _phase_snapshot(phase: ProgressPhase, *, now: datetime) -> ProgressSnapshot:
+def _phase_snapshot(
+    phase: ProgressPhase,
+    *,
+    now: datetime,
+    message: str | None = None,
+) -> ProgressSnapshot:
     return ProgressSnapshot(
         phase=phase,
         current=None,
@@ -717,7 +767,7 @@ def _phase_snapshot(phase: ProgressPhase, *, now: datetime) -> ProgressSnapshot:
         rate_per_second=None,
         speed_ratio=None,
         source=ProgressSource.SCHEDULER,
-        message=None,
+        message=_sanitize_progress_message(message),
         phase_started_at=now,
         observed_at=now,
         heartbeat_at=now,
@@ -741,7 +791,11 @@ def _save_attempt_progress(
 ) -> None:
     with Session(engine) as session:
         store = SqliteProgressStore(session)
-        if snapshot.phase == ProgressPhase.COMPLETED:
+        if snapshot.phase in {
+            ProgressPhase.COMPLETED,
+            ProgressPhase.FAILED,
+            ProgressPhase.CANCELLED,
+        }:
             store.finalize_snapshot(
                 attempt_id=attempt_id,
                 snapshot=snapshot,
@@ -754,6 +808,15 @@ def _save_attempt_progress(
                 persisted_at=snapshot.observed_at,
             )
         session.commit()
+
+
+def _sanitize_progress_message(message: str | None, *, max_length: int = 500) -> str | None:
+    if message is None:
+        return None
+    sanitized = " ".join(message.split())
+    if len(sanitized) <= max_length:
+        return sanitized
+    return sanitized[: max_length - 3].rstrip() + "..."
 
 
 def _utc_now() -> datetime:
