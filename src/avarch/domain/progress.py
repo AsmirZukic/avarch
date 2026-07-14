@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 
@@ -34,6 +34,15 @@ class ProgressSource(StrEnum):
     FFMPEG_PROGRESS = "ffmpeg_progress"
     SCHEDULER = "scheduler"
     PROCESS_HEARTBEAT = "process_heartbeat"
+
+
+TERMINAL_PROGRESS_PHASES = frozenset(
+    {
+        ProgressPhase.COMPLETED,
+        ProgressPhase.FAILED,
+        ProgressPhase.CANCELLED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,15 @@ def _validate_optional_positive_float(label: str, value: float | None) -> None:
         raise ValueError(f"{label} must be finite and non-negative")
 
 
+@dataclass(frozen=True, slots=True)
+class ProgressTiming:
+    phase_elapsed: timedelta
+    heartbeat_age: timedelta
+    advance_age: timedelta | None
+    heartbeat_stale: bool
+    not_advancing: bool
+
+
 def phase_progress_percent(snapshot: ProgressSnapshot) -> float | None:
     if snapshot.current is None or snapshot.total is None:
         return None
@@ -99,3 +117,34 @@ def phase_progress_percent(snapshot: ProgressSnapshot) -> float | None:
         return None
     percent = (snapshot.current / snapshot.total) * 100.0
     return min(100.0, max(0.0, percent))
+
+
+def derive_progress_timing(
+    snapshot: ProgressSnapshot,
+    *,
+    now: datetime,
+    heartbeat_stale_after: timedelta,
+    advancement_stale_after: timedelta,
+) -> ProgressTiming:
+    terminal = snapshot.phase in TERMINAL_PROGRESS_PHASES
+    heartbeat_age = _non_negative_duration(now - snapshot.heartbeat_at)
+    advance_age = (
+        _non_negative_duration(now - snapshot.advanced_at)
+        if snapshot.advanced_at is not None
+        else None
+    )
+    return ProgressTiming(
+        phase_elapsed=_non_negative_duration(now - snapshot.phase_started_at),
+        heartbeat_age=heartbeat_age,
+        advance_age=advance_age,
+        heartbeat_stale=False if terminal else heartbeat_age > heartbeat_stale_after,
+        not_advancing=False
+        if terminal or advance_age is None
+        else advance_age > advancement_stale_after,
+    )
+
+
+def _non_negative_duration(duration: timedelta) -> timedelta:
+    if duration < timedelta():
+        return timedelta()
+    return duration
