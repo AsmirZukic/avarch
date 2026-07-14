@@ -67,6 +67,13 @@ class PlanningError(RuntimeError):
     pass
 
 
+class ProfileNotApplicableError(PlanningError):
+    def __init__(self, reasons: Sequence[str]) -> None:
+        self.reasons = tuple(reasons)
+        reason_text = ", ".join(self.reasons)
+        super().__init__(f"Profile does not apply to this file: {reason_text}")
+
+
 @dataclass(frozen=True, slots=True)
 class PlanningRuntimeIdentity:
     manifest_hash: str
@@ -570,8 +577,7 @@ def build_plan(
 ) -> TranscodePlan:
     match = match_profile(context.profile, context.normalized_probe)
     if not match.matched:
-        reasons = ", ".join(match.reasons)
-        raise PlanningError(f"Profile does not apply to this file: {reasons}")
+        raise ProfileNotApplicableError(match.reasons)
 
     media_file_id = context.media_file.id
     if media_file_id is None:
