@@ -16,7 +16,7 @@ from avarch.models.promotion import PromotionMode
 runner = CliRunner()
 
 
-def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
+def test_workflow_run_promotes_replace_atomic_during_scheduler_when_confirmed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -89,7 +89,7 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
                 queue_key="queue",
                 plan_hash="plan-hash",
                 output_path=str(tmp_path / "movie.av1.mkv"),
-                status=JobStatus.READY_TO_PROMOTE,
+                status=JobStatus.PROMOTED,
                 stage=JobStage.PROMOTE,
                 created_at=now,
                 updated_at=now,
@@ -141,13 +141,12 @@ def test_workflow_run_orchestrates_full_pipeline_with_promotion_mode(
         ("probe", [movie], False),
         ("plan", "av1_1080p_sdr", [movie], False, False),
         ("enqueue", [movie], None, 7),
-        ("run", True, False, False, "foreground", False),
+        ("run", True, False, False, "foreground", True),
         ("verify", ["plan-hash"]),
-        ("promote", 42, PromotionMode.REPLACE_ATOMIC, False, True, False),
     ]
     assert "== scan ==" in result.output
     assert "== verify ==" in result.output
-    assert "Validated jobs ready for promotion: 1" in result.output
+    assert "Promotion completed by scheduler." in result.output
 
 
 def test_workflow_run_previews_promotion_without_confirm(
@@ -317,7 +316,7 @@ def test_workflow_run_processes_mixed_terminal_and_promotable_batch(
             "--profile",
             "av1_1080p_sdr",
             "--mode",
-            "replace-atomic",
+            "move-original-to-backup",
             "--confirm",
         ],
     )
@@ -326,8 +325,8 @@ def test_workflow_run_processes_mixed_terminal_and_promotable_batch(
     assert calls == [
         ("run", False),
         ("verify", ("skip-av1", "encode", "size", "existing-promote", "skip-match")),
-        ("promote", 2, PromotionMode.REPLACE_ATOMIC, False, True),
-        ("promote", 4, PromotionMode.REPLACE_ATOMIC, False, True),
+        ("promote", 2, PromotionMode.MOVE_ORIGINAL_TO_BACKUP, False, True),
+        ("promote", 4, PromotionMode.MOVE_ORIGINAL_TO_BACKUP, False, True),
     ]
     assert "Validated jobs ready for promotion: 2" in result.output
 

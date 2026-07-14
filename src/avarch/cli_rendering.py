@@ -328,6 +328,12 @@ def source_retained_path(record: PromotionRecordView) -> str:
     mode = promotion_mode_value(record.mode)
     if mode == PromotionMode.KEEP_ORIGINAL.value:
         return record.source_path
-    if record.backup_path is not None:
+    if mode == PromotionMode.MOVE_ORIGINAL_TO_BACKUP.value and record.backup_path is not None:
+        return record.backup_path
+    if (
+        mode == PromotionMode.REPLACE_ATOMIC.value
+        and not record.cleanup_completed
+        and record.backup_path is not None
+    ):
         return record.backup_path
     return "none"
