@@ -5,7 +5,13 @@ from datetime import UTC, datetime
 from sqlmodel import Session
 
 from avarch.adapters.sqlite.models import JobAttempt, JobAttemptProgress
-from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
+from avarch.domain.progress import (
+    TERMINAL_PROGRESS_PHASES,
+    ProgressPhase,
+    ProgressSnapshot,
+    ProgressSource,
+    ProgressUnit,
+)
 
 __all__ = [
     "ProgressPersistenceError",
@@ -67,6 +73,23 @@ class SqliteProgressStore:
             observed_at=row.observed_at,
             heartbeat_at=row.heartbeat_at,
             advanced_at=row.advanced_at,
+        )
+
+    def finalize_snapshot(
+        self,
+        *,
+        attempt_id: int,
+        snapshot: ProgressSnapshot,
+        persisted_at: datetime,
+    ) -> bool:
+        if snapshot.phase not in TERMINAL_PROGRESS_PHASES:
+            raise ProgressPersistenceError(
+                f"Cannot finalize non-terminal progress phase: {snapshot.phase}"
+            )
+        return self.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+            persisted_at=persisted_at,
         )
 
 
