@@ -90,6 +90,30 @@ def test_throttle_bounds_write_count_under_heavy_samples() -> None:
     assert [snapshot.current for snapshot in sink.snapshots] == [0, 9_999]
 
 
+def test_throttle_preserves_transitions_and_latest_snapshot_in_high_frequency_stream() -> None:
+    clock = _FakeClock()
+    sink = RecordingProgressSink()
+    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
+
+    throttle.publish(_snapshot(phase=ProgressPhase.PREPARING, current=None, unit=None))
+    for value in range(1, 5_000):
+        throttle.publish(_snapshot(current=value))
+    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
+    assert throttle.flush_due() is True
+    throttle.publish(_snapshot(phase=ProgressPhase.MUXING, current=None, unit=None))
+    throttle.publish(_snapshot(phase=ProgressPhase.COMPLETED, current=5_000))
+
+    assert [snapshot.phase for snapshot in sink.snapshots] == [
+        ProgressPhase.PREPARING,
+        ProgressPhase.ENCODING,
+        ProgressPhase.ENCODING,
+        ProgressPhase.MUXING,
+        ProgressPhase.COMPLETED,
+    ]
+    assert sink.snapshots[2].current == 4_999
+    assert len(sink.snapshots) == 5
+
+
 def test_throttle_shutdown_flushes_pending_snapshot() -> None:
     clock = _FakeClock()
     sink = RecordingProgressSink()

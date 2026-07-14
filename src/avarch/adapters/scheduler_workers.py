@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -789,6 +790,7 @@ def _save_attempt_progress(
     attempt_id: int,
     snapshot: ProgressSnapshot,
 ) -> None:
+    snapshot = _snapshot_with_sanitized_message(snapshot)
     with Session(engine) as session:
         store = SqliteProgressStore(session)
         if snapshot.phase in {
@@ -810,10 +812,36 @@ def _save_attempt_progress(
         session.commit()
 
 
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _snapshot_with_sanitized_message(snapshot: ProgressSnapshot) -> ProgressSnapshot:
+    sanitized = _sanitize_progress_message(snapshot.message)
+    if sanitized == snapshot.message:
+        return snapshot
+    return ProgressSnapshot(
+        phase=snapshot.phase,
+        current=snapshot.current,
+        total=snapshot.total,
+        unit=snapshot.unit,
+        rate_per_second=snapshot.rate_per_second,
+        speed_ratio=snapshot.speed_ratio,
+        source=snapshot.source,
+        message=sanitized,
+        phase_started_at=snapshot.phase_started_at,
+        observed_at=snapshot.observed_at,
+        heartbeat_at=snapshot.heartbeat_at,
+        advanced_at=snapshot.advanced_at,
+    )
+
+
 def _sanitize_progress_message(message: str | None, *, max_length: int = 500) -> str | None:
     if message is None:
         return None
-    sanitized = " ".join(message.split())
+    without_ansi = ANSI_ESCAPE_PATTERN.sub("", message)
+    without_control = CONTROL_CHARACTER_PATTERN.sub(" ", without_ansi)
+    sanitized = " ".join(without_control.split())
     if len(sanitized) <= max_length:
         return sanitized
     return sanitized[: max_length - 3].rstrip() + "..."

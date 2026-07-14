@@ -130,6 +130,27 @@ def test_jobs_watch_exits_nonzero_for_failed_terminal_job(tmp_path: Path) -> Non
     assert "movie-watch-failed.mkv failed 40.0%" in result.output
 
 
+def test_legacy_job_without_progress_displays_cleanly(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    job_id = _insert_job(
+        config_path,
+        tmp_path / "movie-legacy.mkv",
+        status=JobStatus.PROMOTED,
+        stage=JobStage.PROMOTE,
+    )
+
+    list_result = runner.invoke(app, ["jobs", "list"])
+    show_result = runner.invoke(app, ["jobs", "show", str(job_id)])
+    watch_result = runner.invoke(app, ["jobs", "watch", str(job_id), "--poll-interval", "0.01"])
+
+    assert list_result.exit_code == 0
+    assert "movie-legacy.mkv" in list_result.output
+    assert show_result.exit_code == 0
+    assert "Progress:" in show_result.output
+    assert watch_result.exit_code == 0
+    assert "movie-legacy.mkv — — eta=unknown" in watch_result.output
+
+
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
@@ -360,7 +381,7 @@ def _insert_job(
     stage: JobStage,
     outcome_reason: JobOutcomeReason | None = None,
     last_error_message: str | None = None,
-) -> None:
+) -> int:
     media_path.write_bytes(b"media")
     app_config = load_config(config_path)
     engine = create_db_engine(resolve_database_url(app_config, config_path))
@@ -380,21 +401,24 @@ def _insert_job(
         )
         session.add(media_file)
         session.flush()
-        session.add(
-            Job(
-                media_file_id=media_file.id or 0,
-                profile_name="av1_1080p_sdr",
-                profile_hash="profile",
-                source_fs_fingerprint=media_file.fs_fingerprint,
-                queue_key=f"queue:{media_path.name}",
-                status=status,
-                stage=stage,
-                outcome_reason=outcome_reason,
-                last_error_message=last_error_message,
-                created_at=now,
-                updated_at=now,
-            )
+        job = Job(
+            media_file_id=media_file.id or 0,
+            profile_name="av1_1080p_sdr",
+            profile_hash="profile",
+            source_fs_fingerprint=media_file.fs_fingerprint,
+            queue_key=f"queue:{media_path.name}",
+            status=status,
+            stage=stage,
+            outcome_reason=outcome_reason,
+            last_error_message=last_error_message,
+            created_at=now,
+            updated_at=now,
         )
+        session.add(job)
+        session.flush()
+        job_id = job.id
+        assert job_id is not None
+        return job_id
 
 
 def _insert_job_with_progress(
