@@ -18,6 +18,14 @@ _INPUT_FPS_RE = re.compile(
     r"\bInput:\s+.+?\s+@\s+(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
     re.IGNORECASE,
 )
+_BITRATE_RE = re.compile(
+    r",\s*(?P<bitrate>\d+(?:\.\d+)?\s+[KMGT]?bps)\b",
+    re.IGNORECASE,
+)
+_ESTIMATED_SIZE_RE = re.compile(
+    r",\s*(?P<size>est\.\s+\d+(?:\.\d+)?\s+[KMGT]?i?B)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +121,7 @@ def _parse_record(
         message = None
     else:
         phase = ProgressPhase.ENCODING
-        message = f"{int(chunks.group('current'))}/{int(chunks.group('total'))} chunks"
+        message = _encoding_message(record, chunks=chunks)
     return Av1anTtyProgressSample(
         phase=phase,
         current=current,
@@ -134,6 +142,17 @@ def _parse_source_fps(record: str) -> float | None:
     except ValueError:
         return None
     return fps if fps > 0 else None
+
+
+def _encoding_message(record: str, *, chunks: re.Match[str]) -> str:
+    parts = [f"{int(chunks.group('current'))}/{int(chunks.group('total'))} chunks"]
+    bitrate = _BITRATE_RE.search(record)
+    if bitrate is not None:
+        parts.append(bitrate.group("bitrate"))
+    estimated_size = _ESTIMATED_SIZE_RE.search(record)
+    if estimated_size is not None:
+        parts.append(estimated_size.group("size"))
+    return ", ".join(parts)
 
 
 def _speed_ratio(rate: float, *, source_fps: float | None) -> float | None:
