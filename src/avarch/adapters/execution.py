@@ -508,8 +508,8 @@ def run_managed_process(
     stdout_callback: ProcessOutputCallback | None = None,
     stderr_callback: ProcessOutputCallback | None = None,
     cancellation_token: ProcessCancellationToken | None = None,
+    termination_grace_seconds: float = 10.0,
 ) -> ProcessResult:
-    del cancellation_token
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
     started_at = _utc_now()
@@ -567,8 +567,27 @@ def run_managed_process(
             )
         for reader in readers:
             reader.start()
+        cancelled = False
+        forced_kill = False
         try:
-            exit_code = process.wait()
+            while True:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    break
+                if cancellation_token is not None and cancellation_token.cancel_requested:
+                    cancelled = True
+                    process.terminate()
+                    try:
+                        exit_code = process.wait(timeout=termination_grace_seconds)
+                    except subprocess.TimeoutExpired:
+                        forced_kill = True
+                        process.kill()
+                        exit_code = process.wait()
+                    break
+                if cancellation_token is None:
+                    exit_code = process.wait()
+                    break
+                cancellation_token.wait(timeout_seconds=0.05)
             for reader in readers:
                 reader.join()
             if reader_errors:
@@ -586,11 +605,27 @@ def run_managed_process(
             _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=True)
             raise ExecutionInterruptedError(f"Interrupted while running {command[0]}") from exc
         _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=interrupted)
+    result_command = tuple(command)
+    finished_at = _utc_now()
+    if forced_kill:
+        return ProcessResult.killed(
+            command=result_command,
+            return_code=exit_code,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+    if cancelled:
+        return ProcessResult.cancelled(
+            command=result_command,
+            return_code=exit_code,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
     return ProcessResult.exited(
-        command=tuple(command),
+        command=result_command,
         return_code=exit_code,
         started_at=started_at,
-        finished_at=_utc_now(),
+        finished_at=finished_at,
     )
 
 

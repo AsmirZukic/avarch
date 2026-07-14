@@ -3,8 +3,16 @@ import threading
 import time
 from pathlib import Path
 
-from avarch.adapters.execution import ProcessOutputRecord, run_managed_process
-from avarch.models.execution import ProcessCancellationToken, ProcessTerminationReason
+from avarch.adapters.execution import (
+    ProcessOutputCallback,
+    ProcessOutputRecord,
+    run_managed_process,
+)
+from avarch.models.execution import (
+    ProcessCancellationToken,
+    ProcessResult,
+    ProcessTerminationReason,
+)
 
 
 def test_managed_process_streams_stdout_before_child_exits(tmp_path: Path) -> None:
@@ -114,6 +122,96 @@ def test_managed_process_accepts_unset_cancellation_token(tmp_path: Path) -> Non
     )
 
     assert result.succeeded is True
+
+
+def test_managed_process_gracefully_terminates_on_cancellation(tmp_path: Path) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    token = ProcessCancellationToken()
+    ready = threading.Event()
+
+    def on_stdout(record: ProcessOutputRecord) -> None:
+        if record.text == "ready\n":
+            ready.set()
+
+    child_code = """
+import signal
+import sys
+import time
+
+deadline = time.monotonic() + 1.5
+
+def term(_signum, _frame):
+    print("received-term", flush=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, term)
+print("ready", flush=True)
+while time.monotonic() < deadline:
+    time.sleep(0.02)
+sys.exit(7)
+"""
+    result_holder = _run_process_in_thread(
+        [sys.executable, "-c", child_code],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="cancel",
+        stdout_callback=on_stdout,
+        cancellation_token=token,
+        termination_grace_seconds=2.0,
+    )
+
+    assert ready.wait(timeout=1.0)
+    token.request("test cancellation")
+    result_holder.thread.join(timeout=3.0)
+
+    assert not result_holder.thread.is_alive()
+    result = result_holder.result
+    assert result is not None
+    assert result.termination_reason is ProcessTerminationReason.CANCELLED
+    assert result.succeeded is False
+    assert b"received-term\n" in stdout_log.read_bytes()
+    assert b"interrupted=false" in stdout_log.read_bytes()
+
+
+class _ThreadedProcessResult:
+    def __init__(self, thread: threading.Thread) -> None:
+        self.thread = thread
+        self.result: ProcessResult | None = None
+
+
+def _run_process_in_thread(
+    command: list[str],
+    *,
+    cwd: Path,
+    stdout_log: Path,
+    stderr_log: Path,
+    plan_hash: str,
+    command_hash: str,
+    stdout_callback: ProcessOutputCallback | None = None,
+    cancellation_token: ProcessCancellationToken | None = None,
+    termination_grace_seconds: float = 10.0,
+) -> _ThreadedProcessResult:
+    holder = _ThreadedProcessResult(thread=threading.Thread())
+
+    def target() -> None:
+        holder.result = run_managed_process(
+            command,
+            cwd=cwd,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            plan_hash=plan_hash,
+            command_hash=command_hash,
+            stdout_callback=stdout_callback,
+            cancellation_token=cancellation_token,
+            termination_grace_seconds=termination_grace_seconds,
+        )
+
+    holder.thread = threading.Thread(target=target)
+    holder.thread.start()
+    return holder
 
 
 def test_managed_process_streams_stdout_and_stderr_to_separate_logs(tmp_path: Path) -> None:
