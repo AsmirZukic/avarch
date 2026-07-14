@@ -208,6 +208,7 @@ from avarch.cli_rendering import (
     job_control_label,
     job_outcome_summary,
     job_progress_compact_label,
+    job_progress_detail_label,
     job_progress_eta_label,
     job_progress_phase_label,
     job_progress_updated_label,
@@ -1296,7 +1297,7 @@ def _watch_job_progress_rich(
 
 def _rich_progress_renderable(view: JobProgressView, *, label: str) -> Group:
     title = Text(label, style="bold")
-    phase = job_progress_phase_label(view)
+    phase = _rich_progress_phase_label(view)
     progress = Progress(
         TextColumn("{task.description}"),
         BarColumn(bar_width=None),
@@ -1306,16 +1307,47 @@ def _rich_progress_renderable(view: JobProgressView, *, label: str) -> Group:
     if view.percent is None:
         progress.add_task(phase, total=None)
     else:
-        progress.add_task(phase, total=100, completed=int(view.percent))
+        progress.add_task(phase, total=1000, completed=int(view.percent * 10))
     details = Table.grid(padding=(0, 1))
-    details.add_row(
-        job_progress_compact_label(view),
-        f"ETA {job_progress_eta_label(view)}",
-        f"updated {job_progress_updated_label(view)}",
-    )
-    if view.speed_ratio is not None:
-        details.add_row(f"speed {view.speed_ratio:.2f}x")
+    details.add_row(*_rich_progress_detail_parts(view))
+    if view.message:
+        details.add_row(f"stage {truncate_line(view.message, max_length=90)}")
     return Group(title, Panel.fit(Group(progress, details), border_style="cyan"))
+
+
+def _rich_progress_phase_label(view: JobProgressView) -> str:
+    stage = job_stage_value(view.job_stage)
+    phase = job_progress_phase_label(view)
+    return phase if stage == phase else f"{stage}: {phase}"
+
+
+def _rich_progress_detail_parts(view: JobProgressView) -> tuple[str, ...]:
+    parts = [
+        job_progress_detail_label(view),
+        _rich_eta_label(view),
+        _rich_rate_label(view),
+        _rich_speed_label(view),
+        f"updated {job_progress_updated_label(view)}",
+    ]
+    return tuple(part for part in parts if part)
+
+
+def _rich_eta_label(view: JobProgressView) -> str:
+    eta = job_progress_eta_label(view)
+    return "eta unknown" if eta == "—" else f"eta {eta}"
+
+
+def _rich_rate_label(view: JobProgressView) -> str | None:
+    if view.rate_per_second is None:
+        return None
+    unit = f" {view.unit.value}" if view.unit is not None else ""
+    return f"rate {view.rate_per_second:.2f}{unit}/s"
+
+
+def _rich_speed_label(view: JobProgressView) -> str | None:
+    if view.speed_ratio is None:
+        return None
+    return f"speed {view.speed_ratio:.2f}x"
 
 
 def _watch_exit_code(view: JobProgressView) -> int:

@@ -363,6 +363,7 @@ def test_execute_plan_emits_numeric_av1an_progress_from_child_output(
     assert numeric[-1].total == 120.0
     assert numeric[-1].unit is not None
     assert numeric[-1].rate_per_second == 60.0
+    assert numeric[-1].speed_ratio == 2.5
     assert b"120/120" in plan.runtime.av1an_stderr_log.read_bytes()
 
 
@@ -502,6 +503,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 if [ "__AV1AN_PROGRESS__" = "yes" ]; then
+  printf 'INFO encode_file: Input: 160x90 @ 24.000 fps\\n' >&2
   printf '00:00:00 [0/1 Chunks] 0/120 (0 fps, eta unknown)\\r' >&2
   printf '00:00:01 [0/1 Chunks] 120/120 (60 fps, eta 0s)\\r' >&2
 fi

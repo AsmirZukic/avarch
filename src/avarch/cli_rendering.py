@@ -110,7 +110,7 @@ def echo_job_progress_details(view: JobProgressView) -> None:
     typer.echo("Progress:")
     typer.echo(f"  attempt:          {_attempt_identity(view)}")
     typer.echo(f"  phase:            {job_progress_phase_label(view)}")
-    typer.echo(f"  phase progress:   {_progress_detail_label(view)}")
+    typer.echo(f"  phase progress:   {job_progress_detail_label(view)}")
     if view.elapsed is not None:
         typer.echo(f"  elapsed:          {format_compact_duration(view.elapsed)}")
     if view.eta is not None:
@@ -156,7 +156,7 @@ def _attempt_identity(view: JobProgressView) -> str:
     return f"{view.attempt_number} (id {view.attempt_id})"
 
 
-def _progress_detail_label(view: JobProgressView) -> str:
+def job_progress_detail_label(view: JobProgressView) -> str:
     if view.current is None:
         return job_progress_compact_label(view)
     unit = f" {view.unit.value}" if view.unit is not None else ""

@@ -33,6 +33,8 @@ def test_parse_tty_fixture_extracts_encoding_chunk_context() -> None:
     assert encoding[-1].total == 120
     assert encoding[-1].rate_per_second is not None
     assert encoding[-1].rate_per_second > 0
+    assert encoding[-1].speed_ratio is not None
+    assert encoding[-1].speed_ratio > 1
     assert encoding[-1].message == "1/1 chunks"
 
 
@@ -61,14 +63,17 @@ def test_av1an_tty_progress_supported_only_for_tested_version_family() -> None:
 
 def test_incremental_parser_handles_one_record_split_across_reads() -> None:
     parser = Av1anTtyProgressParser()
-    record = b"\x1b[1m00:00:00\x1b[0m [0/1 Chunks] 0/120 (0 fps, eta unknown)\r"
+    source = b"\x1b[1mencode_file\x1b[0m: Input: 160x90 @ 24.000 fps\n"
+    record = b"\x1b[1m00:00:00\x1b[0m [0/1 Chunks] 48/120 (48 fps, eta 1s)\r"
 
+    assert parser.feed(source) == []
     assert parser.feed(record[:17]) == []
     samples = parser.feed(record[17:])
 
     assert len(samples) == 1
     assert samples[0].phase == ProgressPhase.ENCODING
-    assert samples[0].current == 0
+    assert samples[0].current == 48
+    assert samples[0].speed_ratio == 2.0
 
 
 def test_incremental_parser_handles_multiple_records_in_one_read() -> None:

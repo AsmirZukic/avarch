@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import pty
 import re
 import shlex
 import shutil
@@ -243,6 +245,7 @@ def execute_plan(
             progress_sink=progress_sink,
             progress_phase=ProgressPhase.ENCODING,
             output_callback=av1an_progress_callback,
+            stderr_tty=av1an_progress_callback is not None,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
@@ -554,6 +557,7 @@ def _run_process(
     progress_sink: ProgressSink | None = None,
     progress_phase: ProgressPhase | None = None,
     output_callback: ProcessOutputCallback | None = None,
+    stderr_tty: bool = False,
 ) -> int:
     heartbeat_callback = (
         _process_heartbeat_callback(progress_sink, progress_phase)
@@ -582,6 +586,7 @@ def _run_process(
             stdout_callback=callback,
             stderr_callback=callback,
             cancellation_token=cancellation_token,
+            stderr_tty=stderr_tty,
         )
     finally:
         periodic_heartbeat_stop.set()
@@ -716,6 +721,7 @@ def run_managed_process(
     stderr_callback: ProcessOutputCallback | None = None,
     cancellation_token: ProcessCancellationToken | None = None,
     termination_grace_seconds: float = 10.0,
+    stderr_tty: bool = False,
 ) -> ProcessResult:
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
@@ -735,14 +741,24 @@ def run_managed_process(
             log_file.write(start_separator.encode("utf-8"))
             log_file.flush()
         interrupted = False
-        process = subprocess.Popen(
-            list(command),
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            start_new_session=(os.name == "posix"),
-        )
+        stderr_master_fd: int | None = None
+        stderr_slave_fd: int | None = None
+        stderr_target: int | object = subprocess.PIPE
+        if stderr_tty and os.name == "posix":
+            stderr_master_fd, stderr_slave_fd = pty.openpty()
+            stderr_target = stderr_slave_fd
+        try:
+            process = subprocess.Popen(
+                list(command),
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=stderr_target,
+                stdin=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+        finally:
+            if stderr_slave_fd is not None:
+                os.close(stderr_slave_fd)
         reader_errors: list[BaseException] = []
         readers: list[threading.Thread] = []
         if process.stdout is not None:
@@ -759,7 +775,21 @@ def run_managed_process(
                     daemon=False,
                 )
             )
-        if process.stderr is not None:
+        if stderr_master_fd is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": os.fdopen(stderr_master_fd, "rb", buffering=0),
+                        "log_file": stderr_file,
+                        "stream": "stderr",
+                        "callback": stderr_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
+                )
+            )
+        elif process.stderr is not None:
             readers.append(
                 threading.Thread(
                     target=_stream_process_output_thread,
@@ -869,6 +899,9 @@ def _stream_process_output_thread(
         _stream_process_output(pipe, log_file, stream=stream, callback=callback)
     except BaseException as exc:
         errors.append(exc)
+    finally:
+        with suppress(Exception):
+            pipe.close()
 
 
 def _stream_process_output(
@@ -880,7 +913,12 @@ def _stream_process_output(
 ) -> None:
     pending = bytearray()
     while True:
-        chunk = pipe.read(1)
+        try:
+            chunk = pipe.read(1)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                break
+            raise
         if not chunk:
             break
         log_file.write(chunk)
