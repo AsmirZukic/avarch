@@ -110,6 +110,21 @@ class ProgressTiming:
     not_advancing: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ProgressRateState:
+    attempt_id: int
+    phase: ProgressPhase
+    current: int | float | None
+    observed_at: datetime
+    smoothed_rate_per_second: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressRateEstimate:
+    rate_per_second: float | None
+    eta: timedelta | None
+
+
 def phase_progress_percent(snapshot: ProgressSnapshot) -> float | None:
     if snapshot.current is None or snapshot.total is None:
         return None
@@ -148,3 +163,69 @@ def _non_negative_duration(duration: timedelta) -> timedelta:
     if duration < timedelta():
         return timedelta()
     return duration
+
+
+def estimate_rate_and_eta(
+    *,
+    previous: ProgressRateState | None,
+    attempt_id: int,
+    snapshot: ProgressSnapshot,
+    alpha: float = 0.3,
+) -> tuple[ProgressRateState | None, ProgressRateEstimate]:
+    if alpha <= 0 or alpha > 1 or not math.isfinite(alpha):
+        raise ValueError("alpha must be finite and within (0, 1]")
+    state = ProgressRateState(
+        attempt_id=attempt_id,
+        phase=snapshot.phase,
+        current=snapshot.current,
+        observed_at=snapshot.observed_at,
+        smoothed_rate_per_second=None,
+    )
+    empty = ProgressRateEstimate(rate_per_second=None, eta=None)
+    if snapshot.current is None:
+        return state, empty
+    if snapshot.phase in TERMINAL_PROGRESS_PHASES:
+        return state, empty
+    if (
+        previous is None
+        or previous.attempt_id != attempt_id
+        or previous.phase != snapshot.phase
+        or previous.current is None
+    ):
+        return state, empty
+
+    elapsed = (snapshot.observed_at - previous.observed_at).total_seconds()
+    advanced = snapshot.current - previous.current
+    if elapsed <= 0 or advanced <= 0:
+        return state, empty
+
+    instant_rate = advanced / elapsed
+    smoothed_rate = (
+        instant_rate
+        if previous.smoothed_rate_per_second is None
+        else (alpha * instant_rate) + ((1.0 - alpha) * previous.smoothed_rate_per_second)
+    )
+    state = ProgressRateState(
+        attempt_id=attempt_id,
+        phase=snapshot.phase,
+        current=snapshot.current,
+        observed_at=snapshot.observed_at,
+        smoothed_rate_per_second=smoothed_rate,
+    )
+    eta = _estimate_eta(snapshot=snapshot, rate_per_second=smoothed_rate)
+    return state, ProgressRateEstimate(rate_per_second=smoothed_rate, eta=eta)
+
+
+def _estimate_eta(
+    *,
+    snapshot: ProgressSnapshot,
+    rate_per_second: float,
+) -> timedelta | None:
+    if snapshot.current is None or snapshot.total is None:
+        return None
+    if rate_per_second <= 0 or not math.isfinite(rate_per_second):
+        return None
+    remaining = snapshot.total - snapshot.current
+    if remaining <= 0:
+        return None
+    return timedelta(seconds=remaining / rate_per_second)
