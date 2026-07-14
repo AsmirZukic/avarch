@@ -282,6 +282,73 @@ def test_save_snapshot_persists_unknown_total(tmp_path: Path) -> None:
     assert row.unit == ProgressUnit.FRAMES
 
 
+def test_save_snapshot_allows_resume_starting_above_zero(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(observed_at=observed, current=75, total=120),
+            persisted_at=observed,
+        )
+        session.commit()
+
+        row = session.get(JobAttemptProgress, attempt_id)
+
+    assert row is not None
+    assert row.current_value == 75.0
+    assert row.total_value == 120.0
+
+
+def test_save_snapshot_allows_total_change_without_resetting_attempt(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    first = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    second = first + timedelta(seconds=5)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(observed_at=first, current=20, total=100),
+            persisted_at=first,
+        )
+        saved = store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(observed_at=second, current=25, total=120),
+            persisted_at=second,
+        )
+        session.commit()
+
+        row = session.get(JobAttemptProgress, attempt_id)
+
+    assert saved is True
+    assert row is not None
+    assert row.current_value == 25.0
+    assert row.total_value == 120.0
+
+
+def test_save_snapshot_preserves_current_above_reported_total(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(observed_at=observed, current=125, total=120),
+            persisted_at=observed,
+        )
+        session.commit()
+
+        row = session.get(JobAttemptProgress, attempt_id)
+
+    assert row is not None
+    assert row.current_value == 125.0
+    assert row.total_value == 120.0
+
+
 def test_save_snapshot_does_not_modify_job_state_version(tmp_path: Path) -> None:
     engine, job_id, attempt_id = _stored_running_attempt(tmp_path)
     observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
