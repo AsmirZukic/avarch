@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from avarch.domain.progress import ProgressPhase, ProgressUnit
 
+SUPPORTED_AV1AN_TTY_PROGRESS_VERSION_FAMILY = "0.5.x"
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _CHUNKS_RE = re.compile(r"\[(?P<current>\d+)/(?P<total>\d+)\s+Chunks\]", re.IGNORECASE)
 _PROGRESS_RE = re.compile(
@@ -23,6 +25,10 @@ class Av1anTtyProgressSample:
     rate_per_second: float | None
     speed_ratio: float | None
     message: str | None
+
+
+def av1an_tty_progress_supported(version_family: str, *, enabled: bool = True) -> bool:
+    return enabled and version_family == SUPPORTED_AV1AN_TTY_PROGRESS_VERSION_FAMILY
 
 
 def parse_av1an_tty_progress(data: bytes) -> list[Av1anTtyProgressSample]:

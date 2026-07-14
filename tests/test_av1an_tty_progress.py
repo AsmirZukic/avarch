@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser, parse_av1an_tty_progress
+from avarch.adapters.progress.av1an_tty import (
+    Av1anTtyProgressParser,
+    av1an_tty_progress_supported,
+    parse_av1an_tty_progress,
+)
 from avarch.domain.progress import ProgressPhase, ProgressUnit
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "av1an_progress"
@@ -46,6 +50,13 @@ def test_parse_failure_output_returns_no_samples() -> None:
 
 def test_parse_unsupported_record_returns_no_sample() -> None:
     assert parse_av1an_tty_progress(b"progress: eighty percent maybe\n") == []
+
+
+def test_av1an_tty_progress_supported_only_for_tested_version_family() -> None:
+    assert av1an_tty_progress_supported("0.5.x") is True
+    assert av1an_tty_progress_supported("0.6.x") is False
+    assert av1an_tty_progress_supported("unknown") is False
+    assert av1an_tty_progress_supported("0.5.x", enabled=False) is False
 
 
 def test_incremental_parser_handles_one_record_split_across_reads() -> None:
