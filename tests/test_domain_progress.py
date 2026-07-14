@@ -9,6 +9,7 @@ from avarch.domain.progress import (
     ProgressSnapshot,
     ProgressSource,
     ProgressUnit,
+    phase_progress_percent,
 )
 
 NOW = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
@@ -163,3 +164,75 @@ def test_progress_snapshot_rejects_invalid_values(updates: dict[str, object]) ->
 
     with pytest.raises(ValueError):
         ProgressSnapshot(**cast(Any, values))
+
+
+@pytest.mark.parametrize(
+    ("current", "total", "expected"),
+    [
+        (0, 100, 0.0),
+        (25, 100, 25.0),
+        (100, 100, 100.0),
+        (2.5, 10.0, 25.0),
+        (101, 100, 100.0),
+    ],
+)
+def test_phase_progress_percent_for_known_progress(
+    current: int | float,
+    total: int | float,
+    expected: float,
+) -> None:
+    snapshot = ProgressSnapshot(
+        phase=ProgressPhase.ENCODING,
+        current=current,
+        total=total,
+        unit=ProgressUnit.FRAMES,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.AV1AN_OUTPUT,
+        message=None,
+        phase_started_at=NOW,
+        observed_at=NOW,
+        heartbeat_at=NOW,
+        advanced_at=NOW,
+    )
+
+    assert phase_progress_percent(snapshot) == expected
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        ProgressSnapshot(
+            phase=ProgressPhase.MUXING,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.SCHEDULER,
+            message=None,
+            phase_started_at=NOW,
+            observed_at=NOW,
+            heartbeat_at=NOW,
+            advanced_at=None,
+        ),
+        ProgressSnapshot(
+            phase=ProgressPhase.ENCODING,
+            current=20,
+            total=None,
+            unit=ProgressUnit.FRAMES,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.AV1AN_OUTPUT,
+            message=None,
+            phase_started_at=NOW,
+            observed_at=NOW,
+            heartbeat_at=NOW,
+            advanced_at=NOW,
+        ),
+    ],
+)
+def test_phase_progress_percent_returns_none_for_unknown_progress(
+    snapshot: ProgressSnapshot,
+) -> None:
+    assert phase_progress_percent(snapshot) is None
