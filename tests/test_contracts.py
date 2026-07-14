@@ -38,11 +38,12 @@ def test_current_alembic_revision_chain() -> None:
     revisions = sorted((repo_root / "migrations" / "versions").glob("*.py"))
 
     assert ALEMBIC_BASELINE_REVISION == "0001_initial"
-    assert ALEMBIC_HEAD_REVISION == "0005_job_state_version"
+    assert ALEMBIC_HEAD_REVISION == "0006_job_attempt_progress"
     assert [revision.name for revision in revisions] == [
         "0001_initial_schema.py",
         "0002_media_plan.py",
         "0003_job_outcome_reason.py",
         "0004_promotion_target_lock.py",
         "0005_job_state_version.py",
+        "0006_job_attempt_progress.py",
     ]
