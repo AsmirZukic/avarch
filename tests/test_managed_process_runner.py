@@ -97,3 +97,87 @@ def test_managed_process_handles_empty_and_non_utf8_stdout(tmp_path: Path) -> No
     assert non_utf8.succeeded is True
     assert records[-1].data == b"bad: \xff"
     assert records[-1].text == "bad: \ufffd"
+
+
+def test_managed_process_streams_stdout_and_stderr_to_separate_logs(tmp_path: Path) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    stdout_records: list[bytes] = []
+    stderr_records: list[bytes] = []
+
+    result = run_managed_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "sys.stdout.write('out-1\\n'); sys.stdout.flush(); "
+            "sys.stderr.write('err-1\\n'); sys.stderr.flush(); "
+            "sys.stdout.write('out-2'); sys.stdout.flush(); "
+            "sys.stderr.write('err-2'); sys.stderr.flush()",
+        ],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="interleaved",
+        stdout_callback=lambda record: stdout_records.append(record.data),
+        stderr_callback=lambda record: stderr_records.append(record.data),
+    )
+
+    assert result.succeeded is True
+    assert stdout_records == [b"out-1\n", b"out-2"]
+    assert stderr_records == [b"err-1\n", b"err-2"]
+    assert b"out-1\nout-2" in stdout_log.read_bytes()
+    assert b"err-1\nerr-2" in stderr_log.read_bytes()
+
+
+def test_managed_process_does_not_deadlock_on_large_stdout_and_stderr(
+    tmp_path: Path,
+) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+
+    result = run_managed_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "sys.stdout.buffer.write(b'o' * 200000); sys.stdout.flush(); "
+            "sys.stderr.buffer.write(b'e' * 200000); sys.stderr.flush()",
+        ],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="large",
+    )
+
+    assert result.succeeded is True
+    assert b"o" * 200000 in stdout_log.read_bytes()
+    assert b"e" * 200000 in stderr_log.read_bytes()
+
+
+def test_managed_process_preserves_stderr_partial_and_carriage_records(
+    tmp_path: Path,
+) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    stderr_records: list[bytes] = []
+
+    result = run_managed_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.buffer.write(b'progress\\rpartial'); sys.stderr.flush()",
+        ],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="stderr-partial",
+        stderr_callback=lambda record: stderr_records.append(record.data),
+    )
+
+    assert result.succeeded is True
+    assert stderr_records == [b"progress\r", b"partial"]
+    assert b"progress\rpartial" in stderr_log.read_bytes()

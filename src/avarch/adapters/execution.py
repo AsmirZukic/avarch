@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -504,6 +505,7 @@ def run_managed_process(
     plan_hash: str,
     command_hash: str,
     stdout_callback: ProcessOutputCallback | None = None,
+    stderr_callback: ProcessOutputCallback | None = None,
 ) -> ProcessResult:
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
@@ -527,18 +529,47 @@ def run_managed_process(
             list(command),
             cwd=cwd,
             stdout=subprocess.PIPE,
-            stderr=stderr_file,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
         )
-        try:
-            if process.stdout is not None:
-                _stream_process_output(
-                    cast(BinaryIO, process.stdout),
-                    stdout_file,
-                    stream="stdout",
-                    callback=stdout_callback,
+        reader_errors: list[BaseException] = []
+        readers: list[threading.Thread] = []
+        if process.stdout is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": cast(BinaryIO, process.stdout),
+                        "log_file": stdout_file,
+                        "stream": "stdout",
+                        "callback": stdout_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
                 )
+            )
+        if process.stderr is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": cast(BinaryIO, process.stderr),
+                        "log_file": stderr_file,
+                        "stream": "stderr",
+                        "callback": stderr_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
+                )
+            )
+        for reader in readers:
+            reader.start()
+        try:
             exit_code = process.wait()
+            for reader in readers:
+                reader.join()
+            if reader_errors:
+                raise reader_errors[0]
         except KeyboardInterrupt as exc:
             interrupted = True
             process.terminate()
@@ -547,6 +578,8 @@ def run_managed_process(
             except subprocess.TimeoutExpired:
                 process.kill()
                 exit_code = process.wait()
+            for reader in readers:
+                reader.join()
             _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=True)
             raise ExecutionInterruptedError(f"Interrupted while running {command[0]}") from exc
         _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=interrupted)
@@ -556,6 +589,20 @@ def run_managed_process(
         started_at=started_at,
         finished_at=_utc_now(),
     )
+
+
+def _stream_process_output_thread(
+    *,
+    pipe: BinaryIO,
+    log_file: BinaryIO,
+    stream: Literal["stdout", "stderr"],
+    callback: ProcessOutputCallback | None,
+    errors: list[BaseException],
+) -> None:
+    try:
+        _stream_process_output(pipe, log_file, stream=stream, callback=callback)
+    except BaseException as exc:
+        errors.append(exc)
 
 
 def _stream_process_output(
