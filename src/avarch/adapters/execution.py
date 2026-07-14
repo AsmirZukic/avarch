@@ -250,6 +250,7 @@ def execute_plan(
     _validate_mux_temporary_path(plan, temporary_output)
     command = build_ffmpeg_mux_command(plan.mux, temporary_output)
     try:
+        _publish_execution_phase(progress_sink, ProgressPhase.MUXING)
         exit_code = _run_process(
             command,
             cwd=plan.temp_dir,

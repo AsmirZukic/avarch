@@ -15,6 +15,7 @@ from avarch.adapters.sqlite.models import (
     MediaFileStatus,
     PromotionRecord,
 )
+from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.domain.jobs import (
     AttemptStatus,
     JobOutcomeReason,
@@ -22,6 +23,7 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 
 
@@ -215,6 +217,11 @@ def persist_promotion_claim(
     session.flush()
     if record.id is None:
         raise PromotionClaimPersistenceError("Promotion record id was not assigned.")
+    SqliteProgressStore(session).save_snapshot(
+        attempt_id=attempt.id,
+        snapshot=_promotion_progress_snapshot(ProgressPhase.PROMOTING, now=claim.now),
+        persisted_at=claim.now,
+    )
     job.latest_promotion_id = record.id
     session.add(job)
     return record
@@ -438,6 +445,11 @@ def commit_verified_promotion(
         media_file.status = MediaFileStatus.PRESENT
         media_file.latest_probe_id = None
         session.add(media_file)
+    SqliteProgressStore(session).finalize_snapshot(
+        attempt_id=attempt.id or record.attempt_id,
+        snapshot=_promotion_progress_snapshot(ProgressPhase.COMPLETED, now=now),
+        persisted_at=now,
+    )
     session.add(record)
     session.add(attempt)
     session.add(job)
@@ -454,6 +466,23 @@ def has_active_promotion_lease(session: Session, *, job_id: int, now: datetime) 
             )
         ).first()
         is not None
+    )
+
+
+def _promotion_progress_snapshot(phase: ProgressPhase, *, now: datetime) -> ProgressSnapshot:
+    return ProgressSnapshot(
+        phase=phase,
+        current=None,
+        total=None,
+        unit=None,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.SCHEDULER,
+        message=None,
+        phase_started_at=now,
+        observed_at=now,
+        heartbeat_at=now,
+        advanced_at=None,
     )
 
 

@@ -299,7 +299,10 @@ def test_execute_plan_reports_encoding_before_av1an_execution(
 
     assert execute_plan(plan, progress_sink=sink) == "completed"
 
-    assert [snapshot.phase for snapshot in sink.snapshots] == [ProgressPhase.ENCODING]
+    assert [snapshot.phase for snapshot in sink.snapshots] == [
+        ProgressPhase.ENCODING,
+        ProgressPhase.MUXING,
+    ]
 
 
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
