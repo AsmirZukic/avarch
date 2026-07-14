@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, func, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import claim_job_stage, interrupt_job_stage
@@ -313,6 +313,125 @@ def test_get_snapshot_returns_none_when_attempt_has_no_progress(tmp_path: Path) 
         store = SqliteProgressStore(session)
 
         assert store.get_snapshot(attempt_id=attempt_id) is None
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [ProgressPhase.COMPLETED, ProgressPhase.FAILED, ProgressPhase.CANCELLED],
+)
+def test_finalize_snapshot_retains_terminal_progress(
+    tmp_path: Path,
+    phase: ProgressPhase,
+) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    heartbeat = observed + timedelta(seconds=2)
+    snapshot = ProgressSnapshot(
+        phase=phase,
+        current=100,
+        total=100,
+        unit=ProgressUnit.FRAMES,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.SCHEDULER,
+        message=None,
+        phase_started_at=observed,
+        observed_at=heartbeat,
+        heartbeat_at=heartbeat,
+        advanced_at=observed,
+    )
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        saved = store.finalize_snapshot(
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+            persisted_at=heartbeat,
+        )
+        session.commit()
+
+        stored = store.get_snapshot(attempt_id=attempt_id)
+
+    assert saved is True
+    assert stored is not None
+    assert stored.phase == phase
+    assert stored.heartbeat_at == heartbeat.replace(tzinfo=None)
+
+
+def test_finalize_snapshot_is_idempotent(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    snapshot = _snapshot(observed_at=observed, phase=ProgressPhase.COMPLETED, current=100)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        first_saved = store.finalize_snapshot(
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+            persisted_at=observed,
+        )
+        second_saved = store.finalize_snapshot(
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+            persisted_at=observed + timedelta(seconds=1),
+        )
+        session.commit()
+
+        row_count = session.exec(select(func.count()).select_from(JobAttemptProgress)).one()
+        stored = store.get_snapshot(attempt_id=attempt_id)
+
+    assert first_saved is True
+    assert second_saved is True
+    assert row_count == 1
+    assert stored is not None
+    assert stored.phase == ProgressPhase.COMPLETED
+
+
+def test_retry_after_terminal_progress_keeps_previous_attempt_progress(
+    tmp_path: Path,
+) -> None:
+    engine, job_id, first_attempt_id = _stored_running_attempt(tmp_path)
+    first = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    second = first + timedelta(seconds=5)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.finalize_snapshot(
+            attempt_id=first_attempt_id,
+            snapshot=_snapshot(observed_at=first, phase=ProgressPhase.CANCELLED, current=50),
+            persisted_at=first,
+        )
+        interrupt_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=first_attempt_id,
+            now=second - timedelta(seconds=1),
+        )
+        second_attempt = claim_job_stage(
+            session,
+            job_id=job_id,
+            runner_id="runner-2",
+            now=second,
+        )
+        assert second_attempt.id is not None
+        second_attempt_id = second_attempt.id
+        store.save_snapshot(
+            attempt_id=second_attempt_id,
+            snapshot=_snapshot(observed_at=second, current=5),
+            persisted_at=second,
+        )
+        session.commit()
+
+        progress = list(
+            session.exec(
+                select(JobAttemptProgress).order_by(col(JobAttemptProgress.attempt_id))
+            ).all()
+        )
+
+    assert [(row.attempt_id, row.phase, row.current_value) for row in progress] == [
+        (first_attempt_id, ProgressPhase.CANCELLED, 50.0),
+        (second_attempt_id, ProgressPhase.ENCODING, 5.0),
+    ]
 
 
 def _stored_running_attempt(tmp_path: Path) -> tuple[Engine, int, int]:
