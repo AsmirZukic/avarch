@@ -9,6 +9,7 @@ from avarch.domain.progress import (
     ProgressSnapshot,
     ProgressSource,
     ProgressUnit,
+    derive_progress_timing,
     phase_progress_percent,
 )
 
@@ -236,3 +237,132 @@ def test_phase_progress_percent_returns_none_for_unknown_progress(
     snapshot: ProgressSnapshot,
 ) -> None:
     assert phase_progress_percent(snapshot) is None
+
+
+def test_progress_timing_derives_elapsed_and_recent_heartbeat() -> None:
+    snapshot = _snapshot(
+        phase=ProgressPhase.ENCODING,
+        phase_started_at=NOW,
+        observed_at=NOW + timedelta(seconds=10),
+        heartbeat_at=NOW + timedelta(seconds=9),
+        advanced_at=NOW + timedelta(seconds=8),
+    )
+
+    timing = derive_progress_timing(
+        snapshot,
+        now=NOW + timedelta(seconds=12),
+        heartbeat_stale_after=timedelta(seconds=5),
+        advancement_stale_after=timedelta(seconds=5),
+    )
+
+    assert timing.phase_elapsed == timedelta(seconds=12)
+    assert timing.heartbeat_age == timedelta(seconds=3)
+    assert timing.advance_age == timedelta(seconds=4)
+    assert timing.heartbeat_stale is False
+    assert timing.not_advancing is False
+
+
+def test_progress_timing_distinguishes_stale_heartbeat_from_no_advancement() -> None:
+    snapshot = _snapshot(
+        phase=ProgressPhase.ENCODING,
+        phase_started_at=NOW,
+        observed_at=NOW + timedelta(seconds=30),
+        heartbeat_at=NOW + timedelta(seconds=29),
+        advanced_at=NOW + timedelta(seconds=5),
+    )
+
+    timing = derive_progress_timing(
+        snapshot,
+        now=NOW + timedelta(seconds=31),
+        heartbeat_stale_after=timedelta(seconds=5),
+        advancement_stale_after=timedelta(seconds=10),
+    )
+
+    assert timing.heartbeat_stale is False
+    assert timing.not_advancing is True
+
+
+def test_progress_timing_marks_old_heartbeat_stale() -> None:
+    snapshot = _snapshot(
+        phase=ProgressPhase.ENCODING,
+        phase_started_at=NOW,
+        observed_at=NOW + timedelta(seconds=10),
+        heartbeat_at=NOW + timedelta(seconds=2),
+        advanced_at=None,
+    )
+
+    timing = derive_progress_timing(
+        snapshot,
+        now=NOW + timedelta(seconds=12),
+        heartbeat_stale_after=timedelta(seconds=5),
+        advancement_stale_after=timedelta(seconds=5),
+    )
+
+    assert timing.heartbeat_stale is True
+    assert timing.advance_age is None
+    assert timing.not_advancing is False
+
+
+def test_progress_timing_does_not_mark_terminal_phase_stale() -> None:
+    snapshot = _snapshot(
+        phase=ProgressPhase.COMPLETED,
+        phase_started_at=NOW,
+        observed_at=NOW + timedelta(seconds=20),
+        heartbeat_at=NOW + timedelta(seconds=20),
+        advanced_at=NOW + timedelta(seconds=3),
+    )
+
+    timing = derive_progress_timing(
+        snapshot,
+        now=NOW + timedelta(minutes=5),
+        heartbeat_stale_after=timedelta(seconds=5),
+        advancement_stale_after=timedelta(seconds=5),
+    )
+
+    assert timing.heartbeat_stale is False
+    assert timing.not_advancing is False
+
+
+def test_progress_timing_clamps_clock_skew_to_zero() -> None:
+    snapshot = _snapshot(
+        phase=ProgressPhase.ENCODING,
+        phase_started_at=NOW,
+        observed_at=NOW,
+        heartbeat_at=NOW,
+        advanced_at=NOW,
+    )
+
+    timing = derive_progress_timing(
+        snapshot,
+        now=NOW - timedelta(seconds=1),
+        heartbeat_stale_after=timedelta(seconds=5),
+        advancement_stale_after=timedelta(seconds=5),
+    )
+
+    assert timing.phase_elapsed == timedelta()
+    assert timing.heartbeat_age == timedelta()
+    assert timing.advance_age == timedelta()
+
+
+def _snapshot(
+    *,
+    phase: ProgressPhase,
+    phase_started_at: datetime,
+    observed_at: datetime,
+    heartbeat_at: datetime,
+    advanced_at: datetime | None,
+) -> ProgressSnapshot:
+    return ProgressSnapshot(
+        phase=phase,
+        current=None,
+        total=None,
+        unit=None,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.SCHEDULER,
+        message=None,
+        phase_started_at=phase_started_at,
+        observed_at=observed_at,
+        heartbeat_at=heartbeat_at,
+        advanced_at=advanced_at,
+    )
