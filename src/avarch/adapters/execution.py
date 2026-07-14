@@ -232,6 +232,8 @@ def execute_plan(
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
             cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+            progress_phase=ProgressPhase.ENCODING,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
@@ -259,6 +261,8 @@ def execute_plan(
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
             cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+            progress_phase=ProgressPhase.MUXING,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.mux_stderr_log)
@@ -524,7 +528,14 @@ def _run_process(
     plan_hash: str,
     command_hash: str,
     cancellation_token: ProcessCancellationToken | None = None,
+    progress_sink: ProgressSink | None = None,
+    progress_phase: ProgressPhase | None = None,
 ) -> int:
+    heartbeat_callback = (
+        _process_heartbeat_callback(progress_sink, progress_phase)
+        if progress_sink is not None and progress_phase is not None
+        else None
+    )
     result = run_managed_process(
         command,
         cwd=cwd,
@@ -532,11 +543,41 @@ def _run_process(
         stderr_log=stderr_log,
         plan_hash=plan_hash,
         command_hash=command_hash,
+        stdout_callback=heartbeat_callback,
+        stderr_callback=heartbeat_callback,
         cancellation_token=cancellation_token,
     )
     if result.termination_reason is not ProcessTerminationReason.EXITED:
         raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
     return result.return_code
+
+
+def _process_heartbeat_callback(
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+) -> ProcessOutputCallback:
+    def callback(record: ProcessOutputRecord) -> None:
+        del record
+        now = _utc_now()
+        publish_progress_safely(
+            progress_sink,
+            ProgressSnapshot(
+                phase=phase,
+                current=None,
+                total=None,
+                unit=None,
+                rate_per_second=None,
+                speed_ratio=None,
+                source=ProgressSource.PROCESS_HEARTBEAT,
+                message=None,
+                phase_started_at=now,
+                observed_at=now,
+                heartbeat_at=now,
+                advanced_at=None,
+            ),
+        )
+
+    return callback
 
 
 def run_managed_process(
