@@ -14,6 +14,10 @@ _PROGRESS_RE = re.compile(
     r"\(\s*(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
     re.IGNORECASE,
 )
+_INPUT_FPS_RE = re.compile(
+    r"\bInput:\s+.+?\s+@\s+(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,32 +37,41 @@ def av1an_tty_progress_supported(version_family: str, *, enabled: bool = True) -
 
 def parse_av1an_tty_progress(data: bytes) -> list[Av1anTtyProgressSample]:
     text = _normalize_for_parser(data)
-    return [
-        sample
-        for record in re.split(r"[\r\n]+", text)
-        if (sample := _parse_record(record)) is not None
-    ]
+    source_fps: float | None = None
+    samples: list[Av1anTtyProgressSample] = []
+    for record in re.split(r"[\r\n]+", text):
+        source_fps = _parse_source_fps(record) or source_fps
+        sample = _parse_record(record, source_fps=source_fps)
+        if sample is not None:
+            samples.append(sample)
+    return samples
 
 
 class Av1anTtyProgressParser:
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._source_fps: float | None = None
 
     def feed(self, data: bytes) -> list[Av1anTtyProgressSample]:
         self._buffer.extend(data)
         records = self._pop_complete_records()
-        return [
-            sample
-            for record in records
-            if (sample := _parse_record(_normalize_for_parser(record))) is not None
-        ]
+        samples: list[Av1anTtyProgressSample] = []
+        for record in records:
+            normalized = _normalize_for_parser(record)
+            self._source_fps = _parse_source_fps(normalized) or self._source_fps
+            sample = _parse_record(normalized, source_fps=self._source_fps)
+            if sample is not None:
+                samples.append(sample)
+        return samples
 
     def flush(self) -> list[Av1anTtyProgressSample]:
         if not self._buffer:
             return []
         record = bytes(self._buffer)
         self._buffer.clear()
-        sample = _parse_record(_normalize_for_parser(record))
+        normalized = _normalize_for_parser(record)
+        self._source_fps = _parse_source_fps(normalized) or self._source_fps
+        sample = _parse_record(normalized, source_fps=self._source_fps)
         return [] if sample is None else [sample]
 
     def _pop_complete_records(self) -> list[bytes]:
@@ -80,7 +93,11 @@ class Av1anTtyProgressParser:
         return records
 
 
-def _parse_record(record: str) -> Av1anTtyProgressSample | None:
+def _parse_record(
+    record: str,
+    *,
+    source_fps: float | None,
+) -> Av1anTtyProgressSample | None:
     match = _PROGRESS_RE.search(record)
     if match is None:
         return None
@@ -103,9 +120,26 @@ def _parse_record(record: str) -> Av1anTtyProgressSample | None:
         total=total,
         unit=ProgressUnit.FRAMES,
         rate_per_second=rate,
-        speed_ratio=None,
+        speed_ratio=_speed_ratio(rate, source_fps=source_fps),
         message=message,
     )
+
+
+def _parse_source_fps(record: str) -> float | None:
+    match = _INPUT_FPS_RE.search(record)
+    if match is None:
+        return None
+    try:
+        fps = float(match.group("fps"))
+    except ValueError:
+        return None
+    return fps if fps > 0 else None
+
+
+def _speed_ratio(rate: float, *, source_fps: float | None) -> float | None:
+    if rate <= 0 or source_fps is None:
+        return None
+    return rate / source_fps
 
 
 def _normalize_for_parser(data: bytes) -> str:

@@ -366,6 +366,31 @@ def test_managed_process_streams_stdout_and_stderr_to_separate_logs(tmp_path: Pa
     assert b"err-1\nerr-2" in stderr_log.read_bytes()
 
 
+def test_managed_process_can_attach_stderr_to_pseudo_terminal(tmp_path: Path) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    stderr_records: list[str] = []
+
+    result = run_managed_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print(f'tty={sys.stderr.isatty()}', file=sys.stderr, flush=True)",
+        ],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="stderr-tty",
+        stderr_callback=lambda record: stderr_records.append(record.text),
+        stderr_tty=True,
+    )
+
+    assert result.succeeded is True
+    assert any("tty=True" in record for record in stderr_records)
+    assert b"tty=True" in stderr_log.read_bytes()
+
+
 def test_managed_process_does_not_deadlock_on_large_stdout_and_stderr(
     tmp_path: Path,
 ) -> None:
