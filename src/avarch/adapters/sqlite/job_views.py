@@ -169,6 +169,7 @@ class SqliteJobViewStore:
             job_id=job_id,
             job_status=JobStatus(job.status),
             job_stage=JobStage(job.stage),
+            attempt_id=attempt.id if attempt is not None else None,
             attempt=_attempt_view(attempt) if attempt is not None else None,
             progress=progress,
         )
