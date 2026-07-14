@@ -322,6 +322,28 @@ def test_process_output_callback_publishes_heartbeat_without_advancement() -> No
     assert snapshot.heartbeat_at == snapshot.observed_at
 
 
+def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("avarch.adapters.execution.PROCESS_HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    _install_fake_tools(tmp_path, monkeypatch, av1an_start_delay=0.08)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    heartbeats = [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+        and snapshot.phase == ProgressPhase.ENCODING
+    ]
+    assert heartbeats
+    assert all(snapshot.current is None for snapshot in heartbeats)
+    assert all(snapshot.advanced_at is None for snapshot in heartbeats)
+
+
 def test_execute_plan_emits_numeric_av1an_progress_from_child_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -459,9 +481,11 @@ def _install_fake_tools(
     ffmpeg_encoders: list[str] | None = None,
     av1an_progress: bool = False,
     av1an_noise: bool = False,
+    av1an_start_delay: float = 0.0,
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    av1an_start_delay_literal = "0" if av1an_start_delay == 0 else str(av1an_start_delay)
     av1an = bin_dir / "av1an"
     av1an.write_text(
         """#!/usr/bin/env bash
@@ -484,10 +508,16 @@ fi
 if [ "__AV1AN_NOISE__" = "yes" ]; then
   printf 'not really progress: maybe soon\\r' >&2
 fi
+if [ "__AV1AN_START_DELAY__" != "0" ]; then
+  sleep "__AV1AN_START_DELAY__"
+fi
 printf video > "$out"
 """.replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no").replace(
             "__AV1AN_NOISE__",
             "yes" if av1an_noise else "no",
+        ).replace(
+            "__AV1AN_START_DELAY__",
+            av1an_start_delay_literal,
         ),
         encoding="utf-8",
     )

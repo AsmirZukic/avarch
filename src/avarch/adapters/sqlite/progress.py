@@ -147,14 +147,18 @@ def _new_progress_row(
 
 
 def _apply_snapshot(row: JobAttemptProgress, *, snapshot: ProgressSnapshot) -> None:
+    preserve_existing_progress = _preserve_existing_progress(row, snapshot=snapshot)
     row.phase = snapshot.phase
-    _apply_numeric_fields(row, snapshot=snapshot)
+    if not preserve_existing_progress:
+        _apply_numeric_fields(row, snapshot=snapshot)
     row.source = snapshot.source
     row.message = snapshot.message
-    row.phase_started_at = _sqlite_datetime(snapshot.phase_started_at)
+    if not preserve_existing_progress:
+        row.phase_started_at = _sqlite_datetime(snapshot.phase_started_at)
     row.observed_at = _sqlite_datetime(snapshot.observed_at)
     row.heartbeat_at = _sqlite_datetime(snapshot.heartbeat_at)
-    row.advanced_at = _sqlite_datetime(snapshot.advanced_at) if snapshot.advanced_at else None
+    if not preserve_existing_progress:
+        row.advanced_at = _sqlite_datetime(snapshot.advanced_at) if snapshot.advanced_at else None
 
 
 def _apply_numeric_fields(row: JobAttemptProgress, *, snapshot: ProgressSnapshot) -> None:
@@ -163,6 +167,14 @@ def _apply_numeric_fields(row: JobAttemptProgress, *, snapshot: ProgressSnapshot
     row.unit = snapshot.unit
     row.rate_per_second = snapshot.rate_per_second
     row.speed_ratio = snapshot.speed_ratio
+
+
+def _preserve_existing_progress(row: JobAttemptProgress, *, snapshot: ProgressSnapshot) -> bool:
+    return (
+        ProgressPhase(row.phase) == snapshot.phase
+        and row.current_value is not None
+        and snapshot.current is None
+    )
 
 
 def _should_ignore(

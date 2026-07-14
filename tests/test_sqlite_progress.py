@@ -78,6 +78,47 @@ def test_save_snapshot_updates_existing_progress_and_preserves_created_at(
     assert row.updated_at == second_persisted.replace(tzinfo=None)
 
 
+def test_save_snapshot_refreshes_heartbeat_without_erasing_progress(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    first_observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    heartbeat_observed = first_observed + timedelta(seconds=10)
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(observed_at=first_observed, current=40, total=120),
+            persisted_at=first_observed,
+        )
+        store.save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=_snapshot(
+                observed_at=heartbeat_observed,
+                current=None,
+                total=None,
+                unit=None,
+                source=ProgressSource.PROCESS_HEARTBEAT,
+                message=None,
+            ),
+            persisted_at=heartbeat_observed,
+        )
+        session.commit()
+
+        row = session.get(JobAttemptProgress, attempt_id)
+
+    assert row is not None
+    assert row.current_value == 40.0
+    assert row.total_value == 120.0
+    assert row.unit == ProgressUnit.FRAMES
+    assert row.rate_per_second == 2.0
+    assert row.speed_ratio == 1.5
+    assert row.phase_started_at == first_observed.replace(tzinfo=None)
+    assert row.advanced_at == first_observed.replace(tzinfo=None)
+    assert row.observed_at == heartbeat_observed.replace(tzinfo=None)
+    assert row.heartbeat_at == heartbeat_observed.replace(tzinfo=None)
+    assert row.source == ProgressSource.PROCESS_HEARTBEAT
+
+
 def test_get_snapshot_returns_domain_snapshot(tmp_path: Path) -> None:
     engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
     observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
