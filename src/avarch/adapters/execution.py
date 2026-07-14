@@ -1,27 +1,43 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import pty
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal, cast
 
 from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.progress.av1an_tty import (
+    Av1anTtyProgressParser,
+    Av1anTtyProgressSample,
+    av1an_tty_progress_supported,
+)
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
+from avarch.application.progress import ProgressSink, publish_progress_safely
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.models.execution import (
     Av1anStageError,
     ExecutionInterruptedError,
     InvalidExecutionPlanError,
     MuxStageError,
+    ProcessCancellationToken,
+    ProcessResult,
+    ProcessTerminationReason,
     StaleExecutionPlanError,
     ToolUnavailableError,
     UnsupportedToolVersionError,
@@ -40,6 +56,17 @@ from avarch.models.plan import (
 from avarch.serialization import canonical_json
 
 MAX_PROCESS_TAIL_BYTES = 16_384
+PROCESS_HEARTBEAT_INTERVAL_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessOutputRecord:
+    stream: Literal["stdout", "stderr"]
+    data: bytes
+    text: str
+
+
+ProcessOutputCallback = Callable[[ProcessOutputRecord], None]
 
 
 def serialize_encoder_arguments(arguments: Sequence[str]) -> str:
@@ -174,7 +201,12 @@ def build_process_tail(data: bytes, *, max_bytes: int = MAX_PROCESS_TAIL_BYTES) 
     return tail.decode("utf-8", errors="replace")
 
 
-def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
+def execute_plan(
+    plan: TranscodePlan,
+    *,
+    cancellation_token: ProcessCancellationToken | None = None,
+    progress_sink: ProgressSink | None = None,
+) -> EncodeExecutionStatus:
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)
 
@@ -200,6 +232,8 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
             )
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
         command = build_av1an_command(plan.av1an)
+        _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
+        av1an_progress_callback = _make_av1an_progress_callback(plan, progress_sink)
         exit_code = _run_process(
             command,
             cwd=plan.av1an.working_directory,
@@ -207,6 +241,11 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
             stderr_log=plan.runtime.av1an_stderr_log,
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
+            cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+            progress_phase=ProgressPhase.ENCODING,
+            output_callback=av1an_progress_callback,
+            stderr_tty=av1an_progress_callback is not None,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
@@ -225,6 +264,7 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
     _validate_mux_temporary_path(plan, temporary_output)
     command = build_ffmpeg_mux_command(plan.mux, temporary_output)
     try:
+        _publish_execution_phase(progress_sink, ProgressPhase.MUXING)
         exit_code = _run_process(
             command,
             cwd=plan.temp_dir,
@@ -232,6 +272,9 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
             stderr_log=plan.runtime.mux_stderr_log,
             plan_hash=plan.plan_hash,
             command_hash=_command_hash(command),
+            cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+            progress_phase=ProgressPhase.MUXING,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.mux_stderr_log)
@@ -253,6 +296,44 @@ def execute_plan(plan: TranscodePlan) -> EncodeExecutionStatus:
         final_output_size=final_output_size,
     )
     return "completed"
+
+
+def _publish_execution_phase(
+    progress_sink: ProgressSink | None,
+    phase: ProgressPhase,
+) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=phase,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.SCHEDULER,
+            message=None,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=None,
+        ),
+    )
+
+
+def _make_av1an_progress_callback(
+    plan: TranscodePlan,
+    progress_sink: ProgressSink | None,
+) -> ProcessOutputCallback | None:
+    if progress_sink is None:
+        return None
+    if not av1an_tty_progress_supported(
+        plan.execution_identity.av1an_version_family,
+        enabled=os.environ.get("AVARCH_AV1AN_TTY_PROGRESS", "1") != "0",
+    ):
+        return None
+    return _av1an_progress_callback(progress_sink, Av1anTtyProgressParser())
 
 
 def preflight_execution(plan: TranscodePlan) -> None:
@@ -472,13 +553,182 @@ def _run_process(
     stderr_log: Path,
     plan_hash: str,
     command_hash: str,
+    cancellation_token: ProcessCancellationToken | None = None,
+    progress_sink: ProgressSink | None = None,
+    progress_phase: ProgressPhase | None = None,
+    output_callback: ProcessOutputCallback | None = None,
+    stderr_tty: bool = False,
 ) -> int:
+    heartbeat_callback = (
+        _process_heartbeat_callback(progress_sink, progress_phase)
+        if progress_sink is not None and progress_phase is not None
+        else None
+    )
+    callback = _combined_process_output_callback(heartbeat_callback, output_callback)
+    periodic_heartbeat_stop = threading.Event()
+    periodic_heartbeat = (
+        _start_periodic_process_heartbeat(
+            progress_sink,
+            progress_phase,
+            stop_event=periodic_heartbeat_stop,
+        )
+        if progress_sink is not None and progress_phase is not None
+        else None
+    )
+    try:
+        result = run_managed_process(
+            command,
+            cwd=cwd,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            plan_hash=plan_hash,
+            command_hash=command_hash,
+            stdout_callback=callback,
+            stderr_callback=callback,
+            cancellation_token=cancellation_token,
+            stderr_tty=stderr_tty,
+        )
+    finally:
+        periodic_heartbeat_stop.set()
+        if periodic_heartbeat is not None:
+            periodic_heartbeat.join()
+    if result.termination_reason is not ProcessTerminationReason.EXITED:
+        raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
+    return result.return_code
+
+
+def _combined_process_output_callback(
+    first: ProcessOutputCallback | None,
+    second: ProcessOutputCallback | None,
+) -> ProcessOutputCallback | None:
+    callbacks = tuple(callback for callback in (first, second) if callback is not None)
+    if not callbacks:
+        return None
+
+    def callback(record: ProcessOutputRecord) -> None:
+        for process_callback in callbacks:
+            with suppress(Exception):
+                process_callback(record)
+
+    return callback
+
+
+def _av1an_progress_callback(
+    progress_sink: ProgressSink,
+    parser: Av1anTtyProgressParser,
+) -> ProcessOutputCallback:
+    def callback(record: ProcessOutputRecord) -> None:
+        for sample in parser.feed(record.data):
+            _publish_av1an_sample(progress_sink, sample)
+
+    return callback
+
+
+def _publish_av1an_sample(
+    progress_sink: ProgressSink,
+    sample: Av1anTtyProgressSample,
+) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=sample.phase,
+            current=float(sample.current),
+            total=float(sample.total),
+            unit=sample.unit,
+            rate_per_second=sample.rate_per_second,
+            speed_ratio=sample.speed_ratio,
+            source=ProgressSource.AV1AN_OUTPUT,
+            message=sample.message,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=now,
+        ),
+    )
+
+
+def _process_heartbeat_callback(
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+) -> ProcessOutputCallback:
+    def callback(record: ProcessOutputRecord) -> None:
+        del record
+        _publish_process_heartbeat(progress_sink, phase)
+
+    return callback
+
+
+def _start_periodic_process_heartbeat(
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+    *,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=_publish_periodic_process_heartbeat,
+        kwargs={
+            "progress_sink": progress_sink,
+            "phase": phase,
+            "stop_event": stop_event,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _publish_periodic_process_heartbeat(
+    *,
+    progress_sink: ProgressSink,
+    phase: ProgressPhase,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.wait(PROCESS_HEARTBEAT_INTERVAL_SECONDS):
+        _publish_process_heartbeat(progress_sink, phase)
+
+
+def _publish_process_heartbeat(progress_sink: ProgressSink, phase: ProgressPhase) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=phase,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            source=ProgressSource.PROCESS_HEARTBEAT,
+            message=None,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=None,
+        ),
+    )
+
+
+def run_managed_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    stdout_log: Path,
+    stderr_log: Path,
+    plan_hash: str,
+    command_hash: str,
+    stdout_callback: ProcessOutputCallback | None = None,
+    stderr_callback: ProcessOutputCallback | None = None,
+    cancellation_token: ProcessCancellationToken | None = None,
+    termination_grace_seconds: float = 10.0,
+    stderr_tty: bool = False,
+) -> ProcessResult:
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
-    started_at = _utc_now().isoformat()
+    started_at = _utc_now()
     start_separator = (
         "=== avarch process start ===\n"
-        f"started_at={started_at}\n"
+        f"started_at={started_at.isoformat()}\n"
         f"plan_hash={plan_hash}\n"
         f"command_hash={command_hash}\n"
         f"executable={command[0]}\n"
@@ -491,27 +741,211 @@ def _run_process(
             log_file.write(start_separator.encode("utf-8"))
             log_file.flush()
         interrupted = False
-        process = subprocess.Popen(
-            list(command),
-            cwd=cwd,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            stdin=subprocess.DEVNULL,
-        )
+        stderr_master_fd: int | None = None
+        stderr_slave_fd: int | None = None
+        stderr_target: int | object = subprocess.PIPE
+        if stderr_tty and os.name == "posix":
+            stderr_master_fd, stderr_slave_fd = pty.openpty()
+            stderr_target = stderr_slave_fd
         try:
-            exit_code = process.wait()
+            process = subprocess.Popen(
+                list(command),
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=stderr_target,
+                stdin=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+        finally:
+            if stderr_slave_fd is not None:
+                os.close(stderr_slave_fd)
+        reader_errors: list[BaseException] = []
+        readers: list[threading.Thread] = []
+        if process.stdout is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": cast(BinaryIO, process.stdout),
+                        "log_file": stdout_file,
+                        "stream": "stdout",
+                        "callback": stdout_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
+                )
+            )
+        if stderr_master_fd is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": os.fdopen(stderr_master_fd, "rb", buffering=0),
+                        "log_file": stderr_file,
+                        "stream": "stderr",
+                        "callback": stderr_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
+                )
+            )
+        elif process.stderr is not None:
+            readers.append(
+                threading.Thread(
+                    target=_stream_process_output_thread,
+                    kwargs={
+                        "pipe": cast(BinaryIO, process.stderr),
+                        "log_file": stderr_file,
+                        "stream": "stderr",
+                        "callback": stderr_callback,
+                        "errors": reader_errors,
+                    },
+                    daemon=False,
+                )
+            )
+        for reader in readers:
+            reader.start()
+        cancelled = False
+        forced_kill = False
+        try:
+            while True:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    break
+                if cancellation_token is not None and cancellation_token.cancel_requested:
+                    cancelled = True
+                    _terminate_process(process)
+                    try:
+                        exit_code = process.wait(timeout=termination_grace_seconds)
+                    except subprocess.TimeoutExpired:
+                        forced_kill = True
+                        _kill_process(process)
+                        exit_code = process.wait()
+                    break
+                if cancellation_token is None:
+                    exit_code = process.wait()
+                    break
+                cancellation_token.wait(timeout_seconds=0.05)
+            for reader in readers:
+                reader.join()
+            if reader_errors:
+                raise reader_errors[0]
         except KeyboardInterrupt as exc:
             interrupted = True
-            process.terminate()
+            _terminate_process(process)
             try:
                 exit_code = process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                _kill_process(process)
                 exit_code = process.wait()
+            for reader in readers:
+                reader.join()
             _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=True)
             raise ExecutionInterruptedError(f"Interrupted while running {command[0]}") from exc
         _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=interrupted)
-    return exit_code
+    result_command = tuple(command)
+    finished_at = _utc_now()
+    if forced_kill:
+        return ProcessResult.killed(
+            command=result_command,
+            return_code=exit_code,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+    if cancelled:
+        return ProcessResult.cancelled(
+            command=result_command,
+            return_code=exit_code,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+    return ProcessResult.exited(
+        command=result_command,
+        return_code=exit_code,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+    process.terminate()
+
+
+def _kill_process(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+    process.kill()
+
+
+def _stream_process_output_thread(
+    *,
+    pipe: BinaryIO,
+    log_file: BinaryIO,
+    stream: Literal["stdout", "stderr"],
+    callback: ProcessOutputCallback | None,
+    errors: list[BaseException],
+) -> None:
+    try:
+        _stream_process_output(pipe, log_file, stream=stream, callback=callback)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        with suppress(Exception):
+            pipe.close()
+
+
+def _stream_process_output(
+    pipe: BinaryIO,
+    log_file: BinaryIO,
+    *,
+    stream: Literal["stdout", "stderr"],
+    callback: ProcessOutputCallback | None,
+) -> None:
+    pending = bytearray()
+    while True:
+        try:
+            chunk = pipe.read(1)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        log_file.write(chunk)
+        log_file.flush()
+        pending.extend(chunk)
+        if chunk in {b"\n", b"\r"}:
+            _publish_process_output(stream=stream, data=bytes(pending), callback=callback)
+            pending.clear()
+    if pending:
+        _publish_process_output(stream=stream, data=bytes(pending), callback=callback)
+
+
+def _publish_process_output(
+    *,
+    stream: Literal["stdout", "stderr"],
+    data: bytes,
+    callback: ProcessOutputCallback | None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        ProcessOutputRecord(
+            stream=stream,
+            data=data,
+            text=data.decode("utf-8", errors="replace"),
+        )
+    )
 
 
 def _write_process_end(

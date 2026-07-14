@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import ClassVar
 
-from sqlalchemy import Column, Integer, String, UniqueConstraint
+from sqlalchemy import Column, Float, Integer, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from avarch.domain.jobs import (
@@ -14,6 +15,7 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
+from avarch.domain.progress import ProgressPhase, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import SchedulerMode
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 
@@ -201,6 +203,29 @@ class JobAttempt(SQLModel, table=True):
 
     started_at: datetime
     finished_at: datetime | None = None
+
+
+class JobAttemptProgress(SQLModel, table=True):
+    __tablename__: ClassVar[str] = "job_attempt_progress"  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    attempt_id: int = Field(foreign_key="jobattempt.id", primary_key=True)
+
+    phase: ProgressPhase = Field(sa_column=Column(String(), nullable=False))
+    current_value: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
+    total_value: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
+    unit: ProgressUnit | None = Field(default=None, sa_column=Column(String(), nullable=True))
+    rate_per_second: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
+    speed_ratio: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
+    source: ProgressSource = Field(sa_column=Column(String(), nullable=False))
+    message: str | None = None
+
+    phase_started_at: datetime
+    observed_at: datetime
+    heartbeat_at: datetime
+    advanced_at: datetime | None = None
+
+    created_at: datetime
+    updated_at: datetime
 
 
 class ValidationResult(SQLModel, table=True):

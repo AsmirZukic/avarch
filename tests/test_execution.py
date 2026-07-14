@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 import shlex
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from avarch.adapters.execution import (
+    ProcessOutputRecord,
+    _process_heartbeat_callback,  # pyright: ignore[reportPrivateUsage]
     _validate_mux_temporary_path,  # pyright: ignore[reportPrivateUsage]
     build_av1an_command,
     build_ffmpeg_mux_command,
@@ -17,7 +21,14 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
-from avarch.models.execution import ToolUnavailableError, WorkDirectoryConflictError
+from avarch.application.progress import NoopProgressSink, RecordingProgressSink
+from avarch.domain.progress import ProgressPhase, ProgressSource
+from avarch.models.execution import (
+    ExecutionInterruptedError,
+    ProcessCancellationToken,
+    ToolUnavailableError,
+    WorkDirectoryConflictError,
+)
 from avarch.models.plan import (
     AudioPlan,
     Av1anCommandSpec,
@@ -269,6 +280,165 @@ def test_execute_plan_writes_markers_and_reuses_receipt(
     assert execute_plan(plan) == "already_complete"
 
 
+def test_execute_plan_accepts_progress_sink_without_requiring_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    assert execute_plan(plan) == "completed"
+
+    assert execute_plan(plan, progress_sink=NoopProgressSink()) == "already_complete"
+
+
+def test_execute_plan_reports_encoding_before_av1an_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert [snapshot.phase for snapshot in sink.snapshots] == [
+        ProgressPhase.ENCODING,
+        ProgressPhase.MUXING,
+    ]
+
+
+def test_process_output_callback_publishes_heartbeat_without_advancement() -> None:
+    sink = RecordingProgressSink()
+    callback = _process_heartbeat_callback(sink, ProgressPhase.ENCODING)
+
+    callback(ProcessOutputRecord(stream="stderr", data=b"frame\n", text="frame\n"))
+
+    assert len(sink.snapshots) == 1
+    snapshot = sink.snapshots[0]
+    assert snapshot.phase == ProgressPhase.ENCODING
+    assert snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+    assert snapshot.current is None
+    assert snapshot.advanced_at is None
+    assert snapshot.heartbeat_at == snapshot.observed_at
+
+
+def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("avarch.adapters.execution.PROCESS_HEARTBEAT_INTERVAL_SECONDS", 0.02)
+    _install_fake_tools(tmp_path, monkeypatch, av1an_start_delay=0.08)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    heartbeats = [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+        and snapshot.phase == ProgressPhase.ENCODING
+    ]
+    assert heartbeats
+    assert all(snapshot.current is None for snapshot in heartbeats)
+    assert all(snapshot.advanced_at is None for snapshot in heartbeats)
+
+
+def test_execute_plan_emits_numeric_av1an_progress_from_child_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=True)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    numeric = [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT and snapshot.current is not None
+    ]
+    assert [snapshot.current for snapshot in numeric] == [0.0, 120.0]
+    assert numeric[-1].total == 120.0
+    assert numeric[-1].unit is not None
+    assert numeric[-1].rate_per_second == 60.0
+    assert numeric[-1].speed_ratio == 2.5
+    assert b"120/120" in plan.runtime.av1an_stderr_log.read_bytes()
+
+
+def test_execute_plan_ignores_malformed_av1an_progress_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=False, av1an_noise=True)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert not [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+    ]
+
+
+def test_execute_plan_falls_back_to_phase_progress_when_av1an_parser_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=True)
+    monkeypatch.setenv("AVARCH_AV1AN_TTY_PROGRESS", "0")
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert ProgressPhase.ENCODING in [snapshot.phase for snapshot in sink.snapshots]
+    assert not [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+    ]
+
+
+def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_cancellable_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    token = ProcessCancellationToken()
+    error_holder: list[BaseException] = []
+    completed = threading.Event()
+
+    def run_plan() -> None:
+        try:
+            execute_plan(plan, cancellation_token=token)
+        except BaseException as exc:
+            error_holder.append(exc)
+        finally:
+            completed.set()
+
+    thread = threading.Thread(target=run_plan)
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if plan.runtime.av1an_stdout_log.exists() and "ready" in (
+            plan.runtime.av1an_stdout_log.read_text(encoding="utf-8", errors="ignore")
+        ):
+            break
+        time.sleep(0.02)
+
+    token.request("test cancellation")
+    thread.join(timeout=3.0)
+
+    assert completed.is_set()
+    assert any(isinstance(exc, ExecutionInterruptedError) for exc in error_holder)
+    assert "terminated" in plan.runtime.av1an_stdout_log.read_text(encoding="utf-8")
+
+
 def test_preflight_rejects_panicking_av1an_version_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -310,9 +480,13 @@ def _install_fake_tools(
     *,
     ffmpeg_decoders: list[str] | None = None,
     ffmpeg_encoders: list[str] | None = None,
+    av1an_progress: bool = False,
+    av1an_noise: bool = False,
+    av1an_start_delay: float = 0.0,
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    av1an_start_delay_literal = "0" if av1an_start_delay == 0 else str(av1an_start_delay)
     av1an = bin_dir / "av1an"
     av1an.write_text(
         """#!/usr/bin/env bash
@@ -328,8 +502,25 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
+if [ "__AV1AN_PROGRESS__" = "yes" ]; then
+  printf 'INFO encode_file: Input: 160x90 @ 24.000 fps\\n' >&2
+  printf '00:00:00 [0/1 Chunks] 0/120 (0 fps, eta unknown)\\r' >&2
+  printf '00:00:01 [0/1 Chunks] 120/120 (60 fps, eta 0s)\\r' >&2
+fi
+if [ "__AV1AN_NOISE__" = "yes" ]; then
+  printf 'not really progress: maybe soon\\r' >&2
+fi
+if [ "__AV1AN_START_DELAY__" != "0" ]; then
+  sleep "__AV1AN_START_DELAY__"
+fi
 printf video > "$out"
-""",
+""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no").replace(
+            "__AV1AN_NOISE__",
+            "yes" if av1an_noise else "no",
+        ).replace(
+            "__AV1AN_START_DELAY__",
+            av1an_start_delay_literal,
+        ),
         encoding="utf-8",
     )
     ffmpeg = bin_dir / "ffmpeg"
@@ -399,6 +590,26 @@ exit 1
     ffmpeg.chmod(0o755)
     vspipe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+
+def _install_cancellable_fake_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    av1an = tmp_path / "bin" / "av1an"
+    av1an.write_text(
+        """#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  echo "av1an 0.5.1"
+  exit 0
+fi
+trap 'echo terminated; exit 0' TERM
+echo ready
+while true; do
+  sleep 0.05
+done
+""",
+        encoding="utf-8",
+    )
+    av1an.chmod(0o755)
 
 
 def _sample_plan(tmp_path: Path) -> TranscodePlan:

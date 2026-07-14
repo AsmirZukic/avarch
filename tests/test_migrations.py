@@ -23,6 +23,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0003_job_outcome_reason.py",
         "0004_promotion_target_lock.py",
         "0005_job_state_version.py",
+        "0006_job_attempt_progress.py",
     ]
 
 
@@ -69,10 +70,18 @@ def test_promotion_target_lock_revision_depends_on_job_outcome_reason() -> None:
 
 def test_job_state_version_revision_depends_on_promotion_target_lock() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0005_job_state_version")
 
     assert revision is not None
     assert revision.down_revision == "0004_promotion_target_lock"
+
+
+def test_job_attempt_progress_revision_depends_on_job_state_version() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0005_job_state_version"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -89,6 +98,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
         "proberesult",
         "job",
         "jobattempt",
+        "job_attempt_progress",
         "mediaplan",
         "promotionrecord",
         "schedulerstate",
@@ -178,6 +188,42 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
         columns=["validation_result_id"],
         referred_table="validationresult",
     )
+    assert _has_foreign_key(
+        inspector,
+        table="job_attempt_progress",
+        columns=["attempt_id"],
+        referred_table="jobattempt",
+    )
+
+
+def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    columns = {
+        column["name"]: column
+        for column in inspector.get_columns("job_attempt_progress")
+    }
+    primary_key = inspector.get_pk_constraint("job_attempt_progress")
+
+    assert primary_key["constrained_columns"] == ["attempt_id"]
+    assert columns["attempt_id"]["nullable"] is False
+    assert columns["phase"]["nullable"] is False
+    assert columns["current_value"]["nullable"] is True
+    assert columns["total_value"]["nullable"] is True
+    assert columns["unit"]["nullable"] is True
+    assert columns["rate_per_second"]["nullable"] is True
+    assert columns["speed_ratio"]["nullable"] is True
+    assert columns["source"]["nullable"] is False
+    assert columns["message"]["nullable"] is True
+    assert columns["phase_started_at"]["nullable"] is False
+    assert columns["observed_at"]["nullable"] is False
+    assert columns["heartbeat_at"]["nullable"] is False
+    assert columns["advanced_at"]["nullable"] is True
+    assert columns["created_at"]["nullable"] is False
+    assert columns["updated_at"]["nullable"] is False
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
@@ -292,6 +338,43 @@ def test_upgrade_adds_job_state_version(tmp_path: Path) -> None:
         for column in inspect(create_db_engine(database_url)).get_columns("job")
     }
     assert columns["state_version"]["nullable"] is False
+
+
+def test_upgrade_from_job_state_version_adds_progress_without_changing_jobs(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+    config = _alembic_config(database_url)
+    now = datetime(2026, 7, 1, tzinfo=UTC)
+
+    command.upgrade(config, "0005_job_state_version")
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        media_id = _insert(connection, "mediafile", _media_values(now))
+        probe_id = _insert(connection, "proberesult", _probe_values(media_id, now))
+        job_id = _insert(connection, "job", _job_values(media_id, probe_id, now))
+        attempt_id = _insert(connection, "jobattempt", _attempt_values(job_id, now))
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    with create_db_engine(database_url).connect() as connection:
+        job = connection.execute(
+            sa.text("SELECT id, status, stage FROM job WHERE id = :job_id"),
+            {"job_id": job_id},
+        ).one()
+        attempt = connection.execute(
+            sa.text("SELECT id, status, stage FROM jobattempt WHERE id = :attempt_id"),
+            {"attempt_id": attempt_id},
+        ).one()
+        progress_count = connection.execute(
+            sa.text("SELECT COUNT(*) FROM job_attempt_progress"),
+        ).scalar_one()
+
+    assert "job_attempt_progress" in set(inspector.get_table_names())
+    assert job == (job_id, "pending", "encode")
+    assert attempt == (attempt_id, "completed", "encode")
+    assert progress_count == 0
 
 
 def test_alembic_has_one_head() -> None:

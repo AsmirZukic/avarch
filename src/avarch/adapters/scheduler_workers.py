@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import Engine
 from sqlmodel import Session
 
 from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
@@ -41,6 +42,7 @@ from avarch.adapters.sqlite.job_transitions import (
 from avarch.adapters.sqlite.models import Job, MediaFile, ProbeResult, ValidationResult
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
+from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.adapters.sqlite.queue import (
     plan_hash_conflicts_with_other_job,
     queue_key_conflicts_with_other_job,
@@ -61,6 +63,12 @@ from avarch.adapters.vapoursynth import (
 )
 from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
 from avarch.application.planning import PlanningError, build_plan, match_profile
+from avarch.application.progress import (
+    CoalescingProgressBridge,
+    ProgressPersistenceThrottle,
+    ProgressSink,
+    publish_progress_safely,
+)
 from avarch.application.promotion import PromotionWorkflow, promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.application.validation_summary import failed_check_summary, failed_required_check_names
@@ -70,13 +78,25 @@ from avarch.application.vapoursynth_identity import (
 )
 from avarch.config import AppConfig
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, job_has_passed_validation
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
-from avarch.models.execution import ExecutionError, ExecutionInterruptedError
+from avarch.models.execution import (
+    ExecutionError,
+    ExecutionInterruptedError,
+    ProcessCancellationToken,
+)
 from avarch.models.plan import TranscodePlan
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
 
-ProgressCallback = Callable[[int, float | None], None]
+
+class _ProgressFanoutSink:
+    def __init__(self, sinks: tuple[ProgressSink, ...]) -> None:
+        self._sinks = sinks
+
+    def publish(self, snapshot: ProgressSnapshot) -> None:
+        for sink in self._sinks:
+            publish_progress_safely(sink, snapshot)
 
 
 async def execute_probe_job(
@@ -287,9 +307,8 @@ async def execute_encode_job(
     job_id: int,
     runner_id: str,
     config: AppConfig,
-    progress_callback: ProgressCallback | None = None,
+    progress_sink: ProgressSink | None = None,
 ) -> None:
-    del progress_callback
     engine = create_db_engine(config.database.url)
     now = _utc_now()
     with Session(engine) as session, session.begin():
@@ -329,13 +348,76 @@ async def execute_encode_job(
         attempt.temp_dir = str(plan.av1an.temp_dir)
         attempt.output_path = str(plan.output_path)
 
+    preparing = _phase_snapshot(ProgressPhase.PREPARING, now=now)
+    await _persist_attempt_progress(engine, attempt_id=attempt_id, snapshot=preparing)
+    publish_progress_safely(progress_sink, preparing)
+    progress_bridge = CoalescingProgressBridge(
+        lambda snapshot: _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+        )
+    )
+    persisted_progress_sink = ProgressPersistenceThrottle(progress_bridge)
+    execution_progress_sink = _ProgressFanoutSink(
+        (persisted_progress_sink, progress_sink)
+        if progress_sink is not None
+        else (persisted_progress_sink,)
+    )
+    process_cancellation = ProcessCancellationToken()
+    execution_task = asyncio.create_task(
+        asyncio.to_thread(
+            execute_plan,
+            plan,
+            cancellation_token=process_cancellation,
+            progress_sink=execution_progress_sink,
+        )
+    )
     try:
-        status = await asyncio.to_thread(execute_plan, plan)
+        status = await asyncio.shield(execution_task)
+    except asyncio.CancelledError:
+        process_cancellation.request("scheduler cancellation")
+        try:
+            await asyncio.shield(execution_task)
+        except ExecutionInterruptedError:
+            pass
+        except ExecutionError:
+            pass
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.CANCELLED,
+                now=_utc_now(),
+                message="scheduler cancellation",
+            ),
+        )
+        with Session(engine) as session, session.begin():
+            interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
+        return
     except ExecutionInterruptedError:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.CANCELLED,
+                now=_utc_now(),
+                message="execution interrupted",
+            ),
+        )
         with Session(engine) as session, session.begin():
             interrupt_job_stage(session, job_id=job_id, attempt_id=attempt_id, now=_utc_now())
         return
     except ExecutionError as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -344,7 +426,13 @@ async def execute_encode_job(
             now=_utc_now(),
         )
         return
+    finally:
+        persisted_progress_sink.close()
+        await progress_bridge.aclose()
 
+    completed = _phase_snapshot(ProgressPhase.COMPLETED, now=_utc_now())
+    await _persist_attempt_progress(engine, attempt_id=attempt_id, snapshot=completed)
+    publish_progress_safely(progress_sink, completed)
     with Session(engine) as session, session.begin():
         attempt = require_attempt(session, attempt_id)
         attempt.details_json = canonical_json(
@@ -409,6 +497,11 @@ async def execute_validation_job(
         attempt.stderr_log = str(plan.runtime.validation_decode_stderr_log)
         attempt.output_path = str(plan.output_path)
 
+    await _persist_attempt_progress(
+        engine,
+        attempt_id=attempt_id,
+        snapshot=_phase_snapshot(ProgressPhase.VALIDATING, now=now),
+    )
     try:
         report = await validate_output(
             job=validation_job,
@@ -418,6 +511,15 @@ async def execute_validation_job(
             clock=_utc_now,
         )
     except OutputValidationError as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -427,6 +529,15 @@ async def execute_validation_job(
         )
         return None
     except Exception as exc:
+        await _persist_attempt_progress(
+            engine,
+            attempt_id=attempt_id,
+            snapshot=_phase_snapshot(
+                ProgressPhase.FAILED,
+                now=_utc_now(),
+                message=str(exc),
+            ),
+        )
         job_transition_adapter.fail_job_after_external(
             engine,
             job_id=job_id,
@@ -463,6 +574,12 @@ async def execute_validation_job(
             )
         if report.passed and job.hold_requested_at is not None:
             clear_hold_fields(job)
+        if report.passed:
+            SqliteProgressStore(session).finalize_snapshot(
+                attempt_id=attempt_id,
+                snapshot=_phase_snapshot(ProgressPhase.COMPLETED, now=report.finished_at),
+                persisted_at=report.finished_at,
+            )
         return result
 
 
@@ -635,6 +752,99 @@ def _size_policy_decision(
             minimum_savings_percent=profile.promotion.minimum_savings_percent,
         ),
     )
+
+
+def _phase_snapshot(
+    phase: ProgressPhase,
+    *,
+    now: datetime,
+    message: str | None = None,
+) -> ProgressSnapshot:
+    return ProgressSnapshot(
+        phase=phase,
+        current=None,
+        total=None,
+        unit=None,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.SCHEDULER,
+        message=_sanitize_progress_message(message),
+        phase_started_at=now,
+        observed_at=now,
+        heartbeat_at=now,
+        advanced_at=None,
+    )
+
+
+async def _persist_attempt_progress(
+    engine: Engine,
+    *,
+    attempt_id: int,
+    snapshot: ProgressSnapshot,
+) -> None:
+    await asyncio.to_thread(_save_attempt_progress, engine, attempt_id, snapshot)
+
+
+def _save_attempt_progress(
+    engine: Engine,
+    attempt_id: int,
+    snapshot: ProgressSnapshot,
+) -> None:
+    snapshot = _snapshot_with_sanitized_message(snapshot)
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        if snapshot.phase in {
+            ProgressPhase.COMPLETED,
+            ProgressPhase.FAILED,
+            ProgressPhase.CANCELLED,
+        }:
+            store.finalize_snapshot(
+                attempt_id=attempt_id,
+                snapshot=snapshot,
+                persisted_at=snapshot.observed_at,
+            )
+        else:
+            store.save_snapshot(
+                attempt_id=attempt_id,
+                snapshot=snapshot,
+                persisted_at=snapshot.observed_at,
+            )
+        session.commit()
+
+
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _snapshot_with_sanitized_message(snapshot: ProgressSnapshot) -> ProgressSnapshot:
+    sanitized = _sanitize_progress_message(snapshot.message)
+    if sanitized == snapshot.message:
+        return snapshot
+    return ProgressSnapshot(
+        phase=snapshot.phase,
+        current=snapshot.current,
+        total=snapshot.total,
+        unit=snapshot.unit,
+        rate_per_second=snapshot.rate_per_second,
+        speed_ratio=snapshot.speed_ratio,
+        source=snapshot.source,
+        message=sanitized,
+        phase_started_at=snapshot.phase_started_at,
+        observed_at=snapshot.observed_at,
+        heartbeat_at=snapshot.heartbeat_at,
+        advanced_at=snapshot.advanced_at,
+    )
+
+
+def _sanitize_progress_message(message: str | None, *, max_length: int = 500) -> str | None:
+    if message is None:
+        return None
+    without_ansi = ANSI_ESCAPE_PATTERN.sub("", message)
+    without_control = CONTROL_CHARACTER_PATTERN.sub(" ", without_ansi)
+    sanitized = " ".join(without_control.split())
+    if len(sanitized) <= max_length:
+        return sanitized
+    return sanitized[: max_length - 3].rstrip() + "..."
 
 
 def _utc_now() -> datetime:
