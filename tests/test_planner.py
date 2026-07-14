@@ -3,8 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlmodel import Session
+
 from avarch.adapters.probe import build_probe_hash, normalize_probe
-from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, ProbeResult
+from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
+from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, MediaPlan, ProbeResult
+from avarch.adapters.sqlite.planning import SqlitePlanningStore
 from avarch.application.planning import (
     PlanningContext,
     add_sdr_color_encoder_args,
@@ -74,6 +78,81 @@ def test_sdr_color_encoder_args_preserve_user_options() -> None:
         "--chroma-sample-position",
         "1",
     ]
+
+
+def test_equivalent_current_plan_requires_matching_source_fingerprint(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'planning.db'}")
+    create_db_schema(engine)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
+    with Session(engine) as session:
+        media_file = MediaFile(
+            path=str(tmp_path / "movie.mkv"),
+            size_bytes=100,
+            mtime_ns=1,
+            device_id=2,
+            inode=3,
+            fs_fingerprint="new-fingerprint",
+            discovered_at=now,
+            last_seen_at=now,
+            status=MediaFileStatus.PRESENT,
+        )
+        session.add(media_file)
+        session.flush()
+        media_file_id = media_file.id
+        assert media_file_id is not None
+        probe = ProbeResult(
+            media_file_id=media_file_id,
+            ffprobe_json="{}",
+            normalized_json="{}",
+            probe_hash="probe",
+            source_fs_fingerprint="old-fingerprint",
+            created_at=now,
+        )
+        session.add(probe)
+        session.flush()
+        probe_id = probe.id
+        assert probe_id is not None
+        session.add(
+            MediaPlan(
+                media_file_id=media_file_id,
+                probe_result_id=probe_id,
+                profile_name="av1_1080p_sdr",
+                profile_hash="profile",
+                probe_hash="probe",
+                source_fs_fingerprint="old-fingerprint",
+                execution_identity_hash="execution",
+                plan_hash="plan",
+                plan_path="plan.json",
+                output_path="movie.av1.mkv",
+                is_current=True,
+                is_valid=True,
+                created_at=now,
+            )
+        )
+        session.commit()
+
+        store = SqlitePlanningStore(session)
+
+        assert (
+            store.equivalent_current_plan_exists(
+                media_file_id=media_file_id,
+                probe_hash="probe",
+                source_fs_fingerprint="new-fingerprint",
+                profile_hash="profile",
+                execution_identity_hash="execution",
+            )
+            is False
+        )
+        assert (
+            store.equivalent_current_plan_exists(
+                media_file_id=media_file_id,
+                probe_hash="probe",
+                source_fs_fingerprint="old-fingerprint",
+                profile_hash="profile",
+                execution_identity_hash="execution",
+            )
+            is True
+        )
 
 
 def test_build_plan_populates_target_dimensions(tmp_path: Path) -> None:
