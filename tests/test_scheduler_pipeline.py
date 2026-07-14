@@ -225,7 +225,9 @@ def test_encode_worker_requests_process_token_when_cancelled(
         _plan: object,
         *,
         cancellation_token: ProcessCancellationToken | None = None,
+        progress_sink: object | None = None,
     ) -> object:
+        del progress_sink
         observed_token["token"] = cancellation_token
         started.set()
         deadline = time.monotonic() + 2.0
