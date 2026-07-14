@@ -10,6 +10,7 @@ from avarch.domain.progress import (
     ProgressSource,
     ProgressUnit,
     derive_progress_timing,
+    estimate_rate_and_eta,
     phase_progress_percent,
 )
 
@@ -366,3 +367,130 @@ def _snapshot(
         heartbeat_at=heartbeat_at,
         advanced_at=advanced_at,
     )
+
+
+def _numeric_snapshot(
+    *,
+    current: int | float,
+    total: int | float | None = 100,
+    observed_at: datetime,
+    phase: ProgressPhase = ProgressPhase.ENCODING,
+) -> ProgressSnapshot:
+    return ProgressSnapshot(
+        phase=phase,
+        current=current,
+        total=total,
+        unit=ProgressUnit.FRAMES,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.AV1AN_OUTPUT,
+        message=None,
+        phase_started_at=NOW,
+        observed_at=observed_at,
+        heartbeat_at=observed_at,
+        advanced_at=observed_at,
+    )
+
+
+def test_rate_estimator_first_sample_has_no_eta() -> None:
+    state, estimate = estimate_rate_and_eta(
+        previous=None,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=10, observed_at=NOW),
+    )
+
+    assert state is not None
+    assert estimate.rate_per_second is None
+    assert estimate.eta is None
+
+
+def test_rate_estimator_calculates_rate_and_eta_from_two_samples() -> None:
+    state, _estimate = estimate_rate_and_eta(
+        previous=None,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=10, observed_at=NOW),
+    )
+    state, estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=30, observed_at=NOW + timedelta(seconds=10)),
+    )
+
+    assert state is not None
+    assert estimate.rate_per_second == 2.0
+    assert estimate.eta == timedelta(seconds=35)
+
+
+def test_rate_estimator_smooths_changing_rates() -> None:
+    state, _estimate = estimate_rate_and_eta(
+        previous=None,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=0, observed_at=NOW),
+        alpha=0.5,
+    )
+    state, estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=10, observed_at=NOW + timedelta(seconds=10)),
+        alpha=0.5,
+    )
+    state, estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=40, observed_at=NOW + timedelta(seconds=20)),
+        alpha=0.5,
+    )
+
+    assert estimate.rate_per_second == 2.0
+    assert estimate.eta == timedelta(seconds=30)
+
+
+@pytest.mark.parametrize(
+    "next_snapshot",
+    [
+        _numeric_snapshot(current=10, observed_at=NOW + timedelta(seconds=10)),
+        _numeric_snapshot(current=5, observed_at=NOW + timedelta(seconds=10)),
+        _numeric_snapshot(current=20, total=None, observed_at=NOW + timedelta(seconds=10)),
+        _numeric_snapshot(current=100, observed_at=NOW + timedelta(seconds=10)),
+    ],
+)
+def test_rate_estimator_omits_eta_when_inputs_are_unreliable(
+    next_snapshot: ProgressSnapshot,
+) -> None:
+    state, _estimate = estimate_rate_and_eta(
+        previous=None,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=10, observed_at=NOW),
+    )
+    _state, estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=1,
+        snapshot=next_snapshot,
+    )
+
+    assert estimate.eta is None
+
+
+def test_rate_estimator_resets_on_phase_or_attempt_change() -> None:
+    state, _estimate = estimate_rate_and_eta(
+        previous=None,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(current=10, observed_at=NOW),
+    )
+    _state, phase_estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=1,
+        snapshot=_numeric_snapshot(
+            current=20,
+            observed_at=NOW + timedelta(seconds=10),
+            phase=ProgressPhase.MUXING,
+        ),
+    )
+    _state, retry_estimate = estimate_rate_and_eta(
+        previous=state,
+        attempt_id=2,
+        snapshot=_numeric_snapshot(current=20, observed_at=NOW + timedelta(seconds=10)),
+    )
+
+    assert phase_estimate.eta is None
+    assert retry_estimate.eta is None
