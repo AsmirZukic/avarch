@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -534,6 +535,7 @@ def run_managed_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
+            start_new_session=(os.name == "posix"),
         )
         reader_errors: list[BaseException] = []
         readers: list[threading.Thread] = []
@@ -576,12 +578,12 @@ def run_managed_process(
                     break
                 if cancellation_token is not None and cancellation_token.cancel_requested:
                     cancelled = True
-                    process.terminate()
+                    _terminate_process(process)
                     try:
                         exit_code = process.wait(timeout=termination_grace_seconds)
                     except subprocess.TimeoutExpired:
                         forced_kill = True
-                        process.kill()
+                        _kill_process(process)
                         exit_code = process.wait()
                     break
                 if cancellation_token is None:
@@ -594,11 +596,11 @@ def run_managed_process(
                 raise reader_errors[0]
         except KeyboardInterrupt as exc:
             interrupted = True
-            process.terminate()
+            _terminate_process(process)
             try:
                 exit_code = process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                _kill_process(process)
                 exit_code = process.wait()
             for reader in readers:
                 reader.join()
@@ -627,6 +629,26 @@ def run_managed_process(
         started_at=started_at,
         finished_at=finished_at,
     )
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+    process.terminate()
+
+
+def _kill_process(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+    process.kill()
 
 
 def _stream_process_output_thread(
