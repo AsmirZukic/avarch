@@ -24,6 +24,7 @@ from avarch.models.execution import (
     ExecutionInterruptedError,
     InvalidExecutionPlanError,
     MuxStageError,
+    ProcessCancellationToken,
     ProcessResult,
     StaleExecutionPlanError,
     ToolUnavailableError,
@@ -506,7 +507,9 @@ def run_managed_process(
     command_hash: str,
     stdout_callback: ProcessOutputCallback | None = None,
     stderr_callback: ProcessOutputCallback | None = None,
+    cancellation_token: ProcessCancellationToken | None = None,
 ) -> ProcessResult:
+    del cancellation_token
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
     started_at = _utc_now()
