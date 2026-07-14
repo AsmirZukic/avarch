@@ -1930,13 +1930,15 @@ def workflow_run(
         typer.echo("No plans were selected for the workflow.")
         return
 
+    promote_during_scheduler = confirm and mode == PromotionMode.REPLACE_ATOMIC
+
     _echo_workflow_stage("run")
     run_queue(
         resume=True,
         detached=False,
         managed_child=False,
         mode="foreground",
-        promote=False,
+        promote=promote_during_scheduler,
     )
 
     _echo_workflow_stage("verify")
@@ -1952,6 +1954,9 @@ def workflow_run(
         _echo_workflow_jobs(readiness.blocked_jobs)
         raise typer.Exit(1)
     if not readiness.promotable_jobs:
+        if promote_during_scheduler:
+            typer.echo("Promotion completed by scheduler.")
+            return
         typer.echo("No validated jobs are ready for promotion.")
         return
     typer.echo(f"Validated jobs ready for promotion: {len(readiness.promotable_jobs)}")

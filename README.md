@@ -163,6 +163,11 @@ choose the promotion mode explicitly:
 avarch workflow run --profile av1_1080p_sdr --mode replace-atomic --confirm .
 ```
 
+Confirmed `replace-atomic` workflow runs allow the scheduler to promote and
+clean each file as soon as it passes validation and size policy. Other modes are
+promoted after the scheduler finishes so the requested final filesystem action
+can be applied explicitly.
+
 Promotion modes are `keep-original`, `move-original-to-backup`, and
 `replace-atomic`. The source file is not encoded in place; promotion happens only
 after validation passes.
