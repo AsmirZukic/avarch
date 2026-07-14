@@ -10,7 +10,11 @@ from typing import Any
 from sqlmodel import Session
 
 from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
-from avarch.adapters.scheduler_workers import execute_encode_job, execute_promotion_job
+from avarch.adapters.scheduler_workers import (
+    execute_encode_job,
+    execute_promotion_job,
+    execute_validation_job,
+)
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import Job, JobAttemptProgress, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
@@ -25,6 +29,12 @@ from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
+from avarch.models.validation import (
+    ObservedValidationMedia,
+    ValidationCheck,
+    ValidationCheckStatus,
+    ValidationReport,
+)
 from avarch.serialization import canonical_json
 
 
@@ -292,7 +302,7 @@ def test_encode_worker_persists_preparing_then_encoding_progress(
 
     assert observed_phases == [ProgressPhase.PREPARING]
     assert progress is not None
-    assert ProgressPhase(progress.phase) == ProgressPhase.ENCODING
+    assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
     assert progress.updated_at >= progress.created_at
     assert plan.plan_hash
 
@@ -335,7 +345,36 @@ def test_encode_worker_ignores_external_progress_sink_failure(
         progress = session.get(JobAttemptProgress, 1)
 
     assert progress is not None
-    assert ProgressPhase(progress.phase) == ProgressPhase.ENCODING
+    assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
+
+
+def test_validation_worker_persists_validating_then_completed_progress(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, plan = _stored_validation_job(tmp_path)
+    observed_phases: list[ProgressPhase] = []
+
+    async def fake_validate_output(**_kwargs: object) -> ValidationReport:
+        engine = create_db_engine(config.database.url)
+        with Session(engine) as session:
+            progress = session.get(JobAttemptProgress, 1)
+            assert progress is not None
+            observed_phases.append(ProgressPhase(progress.phase))
+        return _validation_report(plan=plan, now=datetime.now(UTC))
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.validate_output", fake_validate_output)
+
+    result = asyncio.run(execute_validation_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+
+    assert result is not None
+    assert observed_phases == [ProgressPhase.VALIDATING]
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
 
 
 def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path) -> None:
@@ -484,6 +523,56 @@ def _stored_encode_job(tmp_path: Path) -> tuple[AppConfig, Any]:
             )
         )
     return config, plan
+
+
+def _stored_validation_job(tmp_path: Path) -> tuple[AppConfig, Any]:
+    config, plan = _stored_encode_job(tmp_path)
+    plan.output_path.parent.mkdir(parents=True, exist_ok=True)
+    plan.output_path.write_bytes(b"validated output")
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session, session.begin():
+        job = session.get(Job, 1)
+        assert job is not None
+        job.status = JobStatus.ENCODED
+        job.stage = JobStage.VALIDATE
+        job.output_path = str(plan.output_path)
+        job.updated_at = datetime.now(UTC)
+        session.add(job)
+    return config, plan
+
+
+def _validation_report(*, plan: Any, now: datetime) -> ValidationReport:
+    return ValidationReport(
+        plan_hash=plan.plan_hash,
+        policy_hash=plan.validation.policy_hash,
+        source_path=plan.input_path,
+        output_path=plan.output_path,
+        source_fs_fingerprint_before=plan.source_fs_fingerprint,
+        source_fs_fingerprint_after=plan.source_fs_fingerprint,
+        output_fs_fingerprint_before="output-before",
+        output_fs_fingerprint_after="output-after",
+        passed=True,
+        checks=[
+            ValidationCheck(
+                name="output_exists",
+                status=ValidationCheckStatus.PASS,
+                required=True,
+                expected=True,
+                observed=True,
+            )
+        ],
+        warnings=[],
+        observed=ObservedValidationMedia(
+            output_size_bytes=plan.output_path.stat().st_size,
+            container="matroska,webm",
+            duration_seconds=plan.validation.source_duration_seconds,
+            video_streams=[],
+            audio_streams=[],
+            subtitle_streams=[],
+        ),
+        started_at=now,
+        finished_at=now,
+    )
 
 
 def _phase_snapshot(phase: ProgressPhase) -> ProgressSnapshot:

@@ -402,6 +402,9 @@ async def execute_encode_job(
         persisted_progress_sink.close()
         await progress_bridge.aclose()
 
+    completed = _phase_snapshot(ProgressPhase.COMPLETED, now=_utc_now())
+    await _persist_attempt_progress(engine, attempt_id=attempt_id, snapshot=completed)
+    publish_progress_safely(progress_sink, completed)
     with Session(engine) as session, session.begin():
         attempt = require_attempt(session, attempt_id)
         attempt.details_json = canonical_json(
@@ -466,6 +469,11 @@ async def execute_validation_job(
         attempt.stderr_log = str(plan.runtime.validation_decode_stderr_log)
         attempt.output_path = str(plan.output_path)
 
+    await _persist_attempt_progress(
+        engine,
+        attempt_id=attempt_id,
+        snapshot=_phase_snapshot(ProgressPhase.VALIDATING, now=now),
+    )
     try:
         report = await validate_output(
             job=validation_job,
@@ -520,6 +528,12 @@ async def execute_validation_job(
             )
         if report.passed and job.hold_requested_at is not None:
             clear_hold_fields(job)
+        if report.passed:
+            SqliteProgressStore(session).finalize_snapshot(
+                attempt_id=attempt_id,
+                snapshot=_phase_snapshot(ProgressPhase.COMPLETED, now=report.finished_at),
+                persisted_at=report.finished_at,
+            )
         return result
 
 
@@ -726,11 +740,19 @@ def _save_attempt_progress(
     snapshot: ProgressSnapshot,
 ) -> None:
     with Session(engine) as session:
-        SqliteProgressStore(session).save_snapshot(
-            attempt_id=attempt_id,
-            snapshot=snapshot,
-            persisted_at=snapshot.observed_at,
-        )
+        store = SqliteProgressStore(session)
+        if snapshot.phase == ProgressPhase.COMPLETED:
+            store.finalize_snapshot(
+                attempt_id=attempt_id,
+                snapshot=snapshot,
+                persisted_at=snapshot.observed_at,
+            )
+        else:
+            store.save_snapshot(
+                attempt_id=attempt_id,
+                snapshot=snapshot,
+                persisted_at=snapshot.observed_at,
+            )
         session.commit()
 
 

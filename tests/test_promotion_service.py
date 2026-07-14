@@ -17,6 +17,7 @@ from avarch.adapters.sqlite.job_transitions import JobTransitionError, transitio
 from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
+    JobAttemptProgress,
     MediaFile,
     MediaFileStatus,
     PromotionRecord,
@@ -30,6 +31,7 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
+from avarch.domain.progress import ProgressPhase
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 from avarch.serialization import canonical_json
 from tests.test_plan_models import sample_plan
@@ -44,6 +46,41 @@ def test_promotion_replaces_original_with_encoded_file(tmp_path: Path) -> None:
     assert result.status == PromotionStatus.COMPLETED
     assert source.read_bytes() == b"encoded"
     assert not encoded.exists()
+
+
+def test_promotion_claim_records_promoting_progress(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        record = claim_promotion(
+            session,
+            job_id=job_id,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            owner_token="owner",
+            now=now,
+        )
+        progress = session.get(JobAttemptProgress, record.attempt_id)
+        progress_phase = ProgressPhase(progress.phase) if progress is not None else None
+
+    assert progress is not None
+    assert progress_phase == ProgressPhase.PROMOTING
+
+
+def test_completed_promotion_records_completed_progress(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+
+    result = asyncio.run(promote_job(job_id, config=config, mode=PromotionMode.REPLACE_ATOMIC))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        record = session.get(PromotionRecord, result.promotion_id)
+        assert record is not None
+        progress = session.get(JobAttemptProgress, record.attempt_id)
+
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
 
 
 def test_promotion_never_deletes_original_first(tmp_path: Path) -> None:
