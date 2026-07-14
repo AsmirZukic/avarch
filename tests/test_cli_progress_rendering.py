@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from avarch.application.progress_views import JobProgressView
+from avarch.application.promotion import PromotionRecordView
 from avarch.cli import _scheduler_live_progress_enabled  # pyright: ignore[reportPrivateUsage]
 from avarch.cli_rendering import (
     job_progress_compact_label,
@@ -11,9 +12,11 @@ from avarch.cli_rendering import (
     job_progress_updated_label,
     plain_job_progress_line,
     select_progress_watch_render_mode,
+    source_retained_path,
 )
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressSource, ProgressUnit
+from avarch.models.promotion import PromotionMode
 
 
 def test_progress_list_labels_for_missing_progress() -> None:
@@ -93,6 +96,36 @@ def test_plain_watch_line_includes_progress_without_ansi() -> None:
     assert "\x1b" not in line
 
 
+def test_replace_atomic_promotion_completion_does_not_report_retained_source() -> None:
+    record = _promotion_record(
+        mode=PromotionMode.REPLACE_ATOMIC,
+        backup_path="/media/movie.mkv.avarch-original",
+        cleanup_completed=True,
+    )
+
+    assert source_retained_path(record) == "none"
+
+
+def test_replace_atomic_promotion_warning_reports_possible_retained_backup() -> None:
+    record = _promotion_record(
+        mode=PromotionMode.REPLACE_ATOMIC,
+        backup_path="/media/movie.mkv.avarch-original",
+        cleanup_completed=False,
+    )
+
+    assert source_retained_path(record) == "/media/movie.mkv.avarch-original"
+
+
+def test_move_original_to_backup_reports_retained_backup() -> None:
+    record = _promotion_record(
+        mode=PromotionMode.MOVE_ORIGINAL_TO_BACKUP,
+        backup_path="/media/movie.mkv.avarch-original",
+        cleanup_completed=True,
+    )
+
+    assert source_retained_path(record) == "/media/movie.mkv.avarch-original"
+
+
 def _view(
     *,
     phase: ProgressPhase = ProgressPhase.ENCODING,
@@ -129,4 +162,23 @@ def _view(
         observed_at=None,
         heartbeat_at=None,
         advanced_at=None,
+    )
+
+
+def _promotion_record(
+    *,
+    mode: PromotionMode,
+    backup_path: str | None,
+    cleanup_completed: bool,
+) -> PromotionRecordView:
+    return PromotionRecordView(
+        id=1,
+        job_id=2,
+        mode=mode,
+        source_path="/media/movie.mkv",
+        backup_path=backup_path,
+        final_path="/media/movie.mkv",
+        validation_result_id=3,
+        cleanup_completed=cleanup_completed,
+        cleanup_error=None,
     )
