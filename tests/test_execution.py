@@ -322,6 +322,45 @@ def test_process_output_callback_publishes_heartbeat_without_advancement() -> No
     assert snapshot.heartbeat_at == snapshot.observed_at
 
 
+def test_execute_plan_emits_numeric_av1an_progress_from_child_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=True)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    numeric = [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT and snapshot.current is not None
+    ]
+    assert [snapshot.current for snapshot in numeric] == [0.0, 120.0]
+    assert numeric[-1].total == 120.0
+    assert numeric[-1].unit is not None
+    assert numeric[-1].rate_per_second == 60.0
+    assert b"120/120" in plan.runtime.av1an_stderr_log.read_bytes()
+
+
+def test_execute_plan_ignores_malformed_av1an_progress_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch, av1an_progress=False, av1an_noise=True)
+    plan = _sample_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert not [
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+    ]
+
+
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -399,6 +438,8 @@ def _install_fake_tools(
     *,
     ffmpeg_decoders: list[str] | None = None,
     ffmpeg_encoders: list[str] | None = None,
+    av1an_progress: bool = False,
+    av1an_noise: bool = False,
 ) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -417,8 +458,18 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
+if [ "__AV1AN_PROGRESS__" = "yes" ]; then
+  printf '00:00:00 [0/1 Chunks] 0/120 (0 fps, eta unknown)\\r' >&2
+  printf '00:00:01 [0/1 Chunks] 120/120 (60 fps, eta 0s)\\r' >&2
+fi
+if [ "__AV1AN_NOISE__" = "yes" ]; then
+  printf 'not really progress: maybe soon\\r' >&2
+fi
 printf video > "$out"
-""",
+""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no").replace(
+            "__AV1AN_NOISE__",
+            "yes" if av1an_noise else "no",
+        ),
         encoding="utf-8",
     )
     ffmpeg = bin_dir / "ffmpeg"
