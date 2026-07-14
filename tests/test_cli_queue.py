@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ from avarch.adapters.sqlite.models import (
     MediaPlan,
     ProbeResult,
 )
+from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.application.scheduler_run import SchedulerRunSummary
 from avarch.cli import app
@@ -27,6 +28,7 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 
 runner = CliRunner()
 
@@ -65,6 +67,36 @@ def test_jobs_list_prints_table_without_internal_info_logs(tmp_path: Path) -> No
     assert result.output.startswith("ID  STATUS")
     assert "config_loaded" not in result.output
     assert "alembic.runtime.migration" not in result.output
+
+
+def test_jobs_list_shows_current_progress(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    _insert_job_with_progress(config_path, tmp_path / "movie-progress.mkv")
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    assert result.exit_code == 0
+    assert "PHASE" in result.output
+    assert "encoding" in result.output
+    assert "40.0%" in result.output
+    assert "6s" in result.output
+    assert "movie-progress.mkv" in result.output
+
+
+def test_jobs_show_prints_progress_details(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    job_id = _insert_job_with_progress(config_path, tmp_path / "movie-show-progress.mkv")
+
+    result = runner.invoke(app, ["jobs", "show", str(job_id)])
+
+    assert result.exit_code == 0
+    assert "Progress:" in result.output
+    assert "attempt:          1 (id " in result.output
+    assert "phase:            encoding" in result.output
+    assert "phase progress:   48 / 120 frames (40.0%)" in result.output
+    assert "estimated left:   6s" in result.output
+    assert "speed:            1.50x" in result.output
+    assert "source:           av1an" in result.output
 
 
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
@@ -332,3 +364,74 @@ def _insert_job(
                 updated_at=now,
             )
         )
+
+
+def _insert_job_with_progress(config_path: Path, media_path: Path) -> int:
+    media_path.write_bytes(b"media")
+    app_config = load_config(config_path)
+    engine = create_db_engine(resolve_database_url(app_config, config_path))
+    now = datetime.now(UTC)
+    stat_result = media_path.stat()
+    with Session(engine) as session, session.begin():
+        media_file = MediaFile(
+            path=str(media_path.resolve()),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+            device_id=stat_result.st_dev,
+            inode=stat_result.st_ino,
+            fs_fingerprint=f"fingerprint:{media_path.name}",
+            status=MediaFileStatus.PRESENT,
+            discovered_at=now,
+            last_seen_at=now,
+        )
+        session.add(media_file)
+        session.flush()
+        job = Job(
+            media_file_id=media_file.id or 0,
+            profile_name="av1_1080p_sdr",
+            profile_hash="profile",
+            source_fs_fingerprint=media_file.fs_fingerprint,
+            queue_key=f"queue:{media_path.name}",
+            status=JobStatus.ENCODING,
+            stage=JobStage.ENCODE,
+            attempts=1,
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+        )
+        session.add(job)
+        session.flush()
+        attempt = JobAttempt(
+            job_id=job.id or 0,
+            attempt_number=1,
+            stage=JobStage.ENCODE,
+            resource_class=ResourceClass.HEAVY_AV1AN,
+            status=AttemptStatus.RUNNING,
+            runner_id="runner",
+            started_at=now,
+        )
+        session.add(attempt)
+        session.flush()
+        attempt_id = attempt.id
+        assert attempt_id is not None
+        SqliteProgressStore(session).save_snapshot(
+            attempt_id=attempt_id,
+            snapshot=ProgressSnapshot(
+                phase=ProgressPhase.ENCODING,
+                current=48,
+                total=120,
+                unit=ProgressUnit.FRAMES,
+                rate_per_second=12,
+                speed_ratio=1.5,
+                source=ProgressSource.AV1AN_OUTPUT,
+                message="48/120 frames",
+                phase_started_at=now - timedelta(seconds=10),
+                observed_at=now,
+                heartbeat_at=now,
+                advanced_at=now,
+            ),
+            persisted_at=now,
+        )
+        job_id = job.id
+        assert job_id is not None
+        return job_id
