@@ -153,6 +153,7 @@ class PlanningStore(Protocol):
         *,
         media_file_id: int | None,
         probe_hash: str,
+        source_fs_fingerprint: str,
         profile_hash: str,
         execution_identity_hash: str,
     ) -> bool: ...
@@ -269,12 +270,14 @@ def equivalent_plan_exists(
     *,
     media_file_id: int | None,
     probe_hash: str,
+    source_fs_fingerprint: str,
     profile_hash: str,
     execution_identity_hash: str,
 ) -> bool:
     return store.equivalent_current_plan_exists(
         media_file_id=media_file_id,
         probe_hash=probe_hash,
+        source_fs_fingerprint=source_fs_fingerprint,
         profile_hash=profile_hash,
         execution_identity_hash=execution_identity_hash,
     )

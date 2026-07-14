@@ -276,6 +276,7 @@ def _build_and_materialize_plan(
             store,
             media_file_id=media_file.id,
             probe_hash=plan.probe_hash,
+            source_fs_fingerprint=plan.source_fs_fingerprint,
             profile_hash=plan.profile_hash,
             execution_identity_hash=plan.execution_identity.identity_hash,
         ):
