@@ -175,7 +175,7 @@ def test_repeated_plan_command_is_idempotent(tmp_path: Path) -> None:
     assert "Processed: 0" in second.output
 
 
-def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
+def test_plan_command_skips_av1_input(tmp_path: Path) -> None:
     config_path = _init_config(tmp_path)
     media_file = _tracked_file(config_path, tmp_path / "movie.mkv")
     _store_normalized_probe(
@@ -196,8 +196,11 @@ def test_plan_command_rejects_av1_input(tmp_path: Path) -> None:
         ["plan", "--profile", "av1_1080p_sdr", "--file", str(media_file)],
     )
 
-    assert result.exit_code != 0
-    assert "video codec is excluded: av1" in result.output
+    assert result.exit_code == 0
+    assert "Skipped" in result.output
+    assert "profile-not-applicable: video codec is excluded: av1" in result.output
+    assert "Skipped: 1" in result.output
+    assert "Failed: 0" in result.output
 
 
 def test_plan_command_accepts_builtin_hdr_source_with_hdr_to_sdr(tmp_path: Path) -> None:
