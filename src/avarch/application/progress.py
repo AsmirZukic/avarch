@@ -149,14 +149,14 @@ class ProgressPersistenceThrottle:
         self._last_phase: ProgressPhase | None = None
         self._closed = False
 
-    def publish(self, snapshot: ProgressSnapshot) -> bool:
+    def publish(self, snapshot: ProgressSnapshot) -> None:
         if self._closed:
-            return False
+            return
         if self._should_publish_immediately(snapshot):
             self._pending_ordinary = None
-            return self._publish_now(snapshot)
+            self._publish_now(snapshot)
+            return
         self._pending_ordinary = snapshot
-        return False
 
     def flush_due(self) -> bool:
         if self._pending_ordinary is None or self._last_published_at is None:

@@ -12,8 +12,9 @@ from sqlmodel import Session
 from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
 from avarch.adapters.scheduler_workers import execute_encode_job, execute_promotion_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
-from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.models import Job, JobAttemptProgress, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.application.progress import ProgressSink
 from avarch.application.promotion import (
     PromotionPreflightView,
     PromotionRecordView,
@@ -21,6 +22,7 @@ from avarch.application.promotion import (
 )
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
 from avarch.serialization import canonical_json
@@ -254,6 +256,88 @@ def test_encode_worker_requests_process_token_when_cancelled(
     assert token.cancel_requested is True
 
 
+def test_encode_worker_persists_preparing_then_encoding_progress(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, plan = _stored_encode_job(tmp_path)
+    observed_phases: list[ProgressPhase] = []
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token
+        engine = create_db_engine(config.database.url)
+        with Session(engine) as session:
+            progress = session.get(JobAttemptProgress, 1)
+            assert progress is not None
+            observed_phases.append(ProgressPhase(progress.phase))
+            assert progress.phase_started_at == progress.observed_at
+            assert progress.heartbeat_at == progress.observed_at
+        assert progress_sink is not None
+        progress_sink.publish(_phase_snapshot(ProgressPhase.ENCODING))
+        progress_sink.publish(_phase_snapshot(ProgressPhase.ENCODING))
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+
+    assert observed_phases == [ProgressPhase.PREPARING]
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.ENCODING
+    assert progress.updated_at >= progress.created_at
+    assert plan.plan_hash
+
+
+def test_encode_worker_ignores_external_progress_sink_failure(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, _plan = _stored_encode_job(tmp_path)
+
+    class BrokenSink:
+        def publish(self, snapshot: ProgressSnapshot) -> None:
+            del snapshot
+            raise RuntimeError("observer failed")
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token
+        assert progress_sink is not None
+        progress_sink.publish(_phase_snapshot(ProgressPhase.ENCODING))
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(
+        execute_encode_job(
+            job_id=1,
+            runner_id="runner",
+            config=config,
+            progress_sink=BrokenSink(),
+        )
+    )
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.ENCODING
+
+
 def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path) -> None:
     database_path = tmp_path / "avarch.adapters.sqlite.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
@@ -357,6 +441,67 @@ def _engine(tmp_path: Path) -> Any:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
     return engine
+
+
+def _stored_encode_job(tmp_path: Path) -> tuple[AppConfig, Any]:
+    from tests.test_execution import _sample_plan  # pyright: ignore[reportPrivateUsage]
+
+    database_path = tmp_path / "avarch.adapters.sqlite.db"
+    config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
+    engine = create_db_engine(config.database.url)
+    create_db_schema(engine)
+    plan = _sample_plan(tmp_path)
+    plan.artifacts.plan_json.parent.mkdir(parents=True, exist_ok=True)
+    plan.artifacts.plan_json.write_text(canonical_json(plan), encoding="utf-8")
+    now = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        media_file = MediaFile(
+            path=str(plan.input_path),
+            size_bytes=plan.input_path.stat().st_size,
+            mtime_ns=plan.input_path.stat().st_mtime_ns,
+            device_id=plan.input_path.stat().st_dev,
+            inode=plan.input_path.stat().st_ino,
+            fs_fingerprint=plan.source_fs_fingerprint,
+            discovered_at=now,
+            last_seen_at=now,
+            status=MediaFileStatus.PRESENT,
+        )
+        session.add(media_file)
+        session.flush()
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name=plan.profile_name,
+                profile_hash=plan.profile_hash,
+                source_fs_fingerprint=plan.source_fs_fingerprint,
+                queue_key="encode",
+                plan_hash=plan.plan_hash,
+                plan_path=str(plan.artifacts.plan_json),
+                status=JobStatus.QUEUED,
+                stage=JobStage.ENCODE,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return config, plan
+
+
+def _phase_snapshot(phase: ProgressPhase) -> ProgressSnapshot:
+    now = datetime.now(UTC)
+    return ProgressSnapshot(
+        phase=phase,
+        current=None,
+        total=None,
+        unit=None,
+        rate_per_second=None,
+        speed_ratio=None,
+        source=ProgressSource.SCHEDULER,
+        message=None,
+        phase_started_at=now,
+        observed_at=now,
+        heartbeat_at=now,
+        advanced_at=None,
+    )
 
 
 def _promotion_record(job_id: int) -> PromotionRecordView:
