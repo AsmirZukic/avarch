@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Annotated, Literal
 
 import structlog
 import typer
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn
@@ -119,6 +120,7 @@ from avarch.application.scheduler_run import (
     MAX_CLI_LOG_TAIL_BYTES,
     SchedulerAlreadyRunningError,
     SchedulerControlError,
+    SchedulerRunSummary,
     cli_actor,
     new_runner_id,
     run_scheduler,
@@ -242,6 +244,13 @@ class CliWorkspace:
     runtime_config: AppConfig
     workspace: WorkspaceContext
     workspace_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerProgressRow:
+    label: str
+    view: JobProgressView
+
 
 app = typer.Typer(
     name="avarch",
@@ -707,21 +716,13 @@ def run_queue(
         write_current_metadata(process_controller, workspace=workspace, mode=mode)
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
-            run_scheduler(
-                scheduler_runner(
-                    claimable_stages=None
-                    if promote
-                    else {
-                        JobStage.PROBE,
-                        JobStage.PLAN,
-                        JobStage.ENCODE,
-                        JobStage.VALIDATE,
-                        JobStage.CLEANUP,
-                    }
-                ),
-                config=runtime_config,
+            _run_scheduler_with_optional_live_progress(
+                database_url=database_url,
+                runtime_config=runtime_config,
                 runner_id=runner_id,
                 resume=resume,
+                promote=promote,
+                mode=mode,
             )
         )
     except SchedulerLifecycleError as exc:
@@ -744,6 +745,99 @@ def run_queue(
     )
     if summary.failed:
         _echo_recent_failed_jobs(database_url)
+
+
+async def _run_scheduler_with_optional_live_progress(
+    *,
+    database_url: str,
+    runtime_config: AppConfig,
+    runner_id: str,
+    resume: bool,
+    promote: bool,
+    mode: Literal["foreground", "detached"],
+) -> SchedulerRunSummary:
+    runtime = scheduler_runner(
+        claimable_stages=None
+        if promote
+        else {
+            JobStage.PROBE,
+            JobStage.PLAN,
+            JobStage.ENCODE,
+            JobStage.VALIDATE,
+            JobStage.CLEANUP,
+        }
+    )
+    scheduler_task = asyncio.create_task(
+        run_scheduler(
+            runtime,
+            config=runtime_config,
+            runner_id=runner_id,
+            resume=resume,
+        )
+    )
+    if not _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty()):
+        return await scheduler_task
+
+    monitor_task = asyncio.create_task(_render_scheduler_live_progress(database_url))
+    try:
+        return await scheduler_task
+    finally:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+
+
+def _scheduler_live_progress_enabled(
+    *,
+    mode: Literal["foreground", "detached"],
+    stdout_is_tty: bool,
+) -> bool:
+    return mode == "foreground" and stdout_is_tty
+
+
+async def _render_scheduler_live_progress(database_url: str) -> None:
+    color = os.environ.get("NO_COLOR") is None
+    console = Console(file=sys.stdout, color_system="auto" if color else None)
+    with Live(console=console, refresh_per_second=4, transient=False) as live:
+        while True:
+            live.update(_scheduler_progress_renderable(_active_scheduler_progress_rows(database_url)))
+            await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
+
+
+def _active_scheduler_progress_rows(database_url: str) -> list[SchedulerProgressRow]:
+    active_statuses = {
+        JobStatus.ENCODING,
+        JobStatus.VALIDATING,
+        JobStatus.PROMOTING,
+        JobStatus.CLEANING,
+    }
+    now = datetime.now(UTC)
+    with db_session(database_url) as session:
+        store = job_view_store(session)
+        jobs = list_jobs(
+            store,
+            statuses=active_statuses,
+            stages=None,
+            profile=None,
+            limit=None,
+        )
+        rows: list[SchedulerProgressRow] = []
+        for job in jobs:
+            if job.id is None:
+                continue
+            view = job_progress_view(current_job_progress(store, job_id=job.id), now=now)
+            if view is not None:
+                rows.append(SchedulerProgressRow(label=job.file_name, view=view))
+        return rows
+
+
+def _scheduler_progress_renderable(rows: list[SchedulerProgressRow]) -> Group:
+    if not rows:
+        return Group(Text("Scheduler running", style="bold"), Text("Waiting for active jobs..."))
+    renderables: list[RenderableType] = [Text("Scheduler running", style="bold")]
+    for row in rows:
+        renderables.append(_rich_progress_renderable(row.view, label=row.label))
+    return Group(*renderables)
 
 
 @queue_app.command("retry")

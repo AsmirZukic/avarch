@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from avarch.application.progress_views import JobProgressView
+from avarch.cli import _scheduler_live_progress_enabled  # pyright: ignore[reportPrivateUsage]
 from avarch.cli_rendering import (
     job_progress_compact_label,
     job_progress_eta_label,
@@ -77,6 +78,12 @@ def test_watch_render_mode_disables_color_when_requested() -> None:
 
     assert mode.live is True
     assert mode.color is False
+
+
+def test_scheduler_live_progress_is_default_only_for_foreground_tty() -> None:
+    assert _scheduler_live_progress_enabled(mode="foreground", stdout_is_tty=True) is True
+    assert _scheduler_live_progress_enabled(mode="foreground", stdout_is_tty=False) is False
+    assert _scheduler_live_progress_enabled(mode="detached", stdout_is_tty=True) is False
 
 
 def test_plain_watch_line_includes_progress_without_ansi() -> None:
