@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from avarch.adapters.execution import (
+    ProcessOutputRecord,
+    _process_heartbeat_callback,  # pyright: ignore[reportPrivateUsage]
     _validate_mux_temporary_path,  # pyright: ignore[reportPrivateUsage]
     build_av1an_command,
     build_ffmpeg_mux_command,
@@ -20,7 +22,7 @@ from avarch.adapters.execution import (
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.application.progress import NoopProgressSink, RecordingProgressSink
-from avarch.domain.progress import ProgressPhase
+from avarch.domain.progress import ProgressPhase, ProgressSource
 from avarch.models.execution import (
     ExecutionInterruptedError,
     ProcessCancellationToken,
@@ -303,6 +305,21 @@ def test_execute_plan_reports_encoding_before_av1an_execution(
         ProgressPhase.ENCODING,
         ProgressPhase.MUXING,
     ]
+
+
+def test_process_output_callback_publishes_heartbeat_without_advancement() -> None:
+    sink = RecordingProgressSink()
+    callback = _process_heartbeat_callback(sink, ProgressPhase.ENCODING)
+
+    callback(ProcessOutputRecord(stream="stderr", data=b"frame\n", text="frame\n"))
+
+    assert len(sink.snapshots) == 1
+    snapshot = sink.snapshots[0]
+    assert snapshot.phase == ProgressPhase.ENCODING
+    assert snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+    assert snapshot.current is None
+    assert snapshot.advanced_at is None
+    assert snapshot.heartbeat_at == snapshot.observed_at
 
 
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
