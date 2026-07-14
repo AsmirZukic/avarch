@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobOutcomeReason, JobStage, JobStatus
+from avarch.domain.progress import ProgressSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,15 @@ class JobAttemptView:
     runner_id: str
     stdout_log: str | None
     stderr_log: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentJobProgressView:
+    job_id: int
+    job_status: JobStatus
+    job_stage: JobStage
+    attempt: JobAttemptView | None
+    progress: ProgressSnapshot | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +126,8 @@ class JobViewStore(Protocol):
         attempt_number: int | None,
     ) -> JobAttemptView | None: ...
 
+    def current_job_progress(self, *, job_id: int) -> CurrentJobProgressView | None: ...
+
 
 def list_jobs(
     store: JobViewStore,
@@ -151,3 +163,11 @@ def latest_attempt(
     attempt_number: int | None,
 ) -> JobAttemptView | None:
     return store.latest_attempt(job_id=job_id, attempt_number=attempt_number)
+
+
+def current_job_progress(
+    store: JobViewStore,
+    *,
+    job_id: int,
+) -> CurrentJobProgressView | None:
+    return store.current_job_progress(job_id=job_id)
