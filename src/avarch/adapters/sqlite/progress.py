@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from sqlmodel import Session
@@ -86,10 +87,35 @@ class SqliteProgressStore:
             raise ProgressPersistenceError(
                 f"Cannot finalize non-terminal progress phase: {snapshot.phase}"
             )
+        snapshot = self._terminal_snapshot_with_last_numeric_values(
+            attempt_id=attempt_id,
+            snapshot=snapshot,
+        )
         return self.save_snapshot(
             attempt_id=attempt_id,
             snapshot=snapshot,
             persisted_at=persisted_at,
+        )
+
+    def _terminal_snapshot_with_last_numeric_values(
+        self,
+        *,
+        attempt_id: int,
+        snapshot: ProgressSnapshot,
+    ) -> ProgressSnapshot:
+        if snapshot.current is not None or snapshot.total is not None:
+            return snapshot
+        existing = self._session.get(JobAttemptProgress, attempt_id)
+        if existing is None or existing.current_value is None:
+            return snapshot
+        return replace(
+            snapshot,
+            current=existing.current_value,
+            total=existing.total_value,
+            unit=ProgressUnit(existing.unit) if existing.unit is not None else None,
+            rate_per_second=existing.rate_per_second,
+            speed_ratio=existing.speed_ratio,
+            advanced_at=_terminal_advanced_at(existing.advanced_at, snapshot=snapshot),
         )
 
 
@@ -162,3 +188,16 @@ def _sqlite_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _snapshot_datetime(value: datetime | None, *, reference: datetime) -> datetime | None:
+    if value is None or value.tzinfo is not None or reference.tzinfo is None:
+        return value
+    return value.replace(tzinfo=reference.tzinfo)
+
+
+def _terminal_advanced_at(value: datetime | None, *, snapshot: ProgressSnapshot) -> datetime:
+    advanced_at = _snapshot_datetime(value, reference=snapshot.observed_at)
+    if advanced_at is None or advanced_at < snapshot.phase_started_at:
+        return snapshot.observed_at
+    return advanced_at

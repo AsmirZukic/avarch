@@ -26,7 +26,7 @@ from avarch.application.promotion import (
 )
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import JobStage, JobStatus
-from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
 from avarch.models.validation import (
@@ -342,6 +342,39 @@ def test_encode_worker_persists_preparing_then_encoding_progress(
     assert plan.plan_hash
 
 
+def test_encode_worker_persists_numeric_av1an_progress(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, _plan = _stored_encode_job(tmp_path)
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token
+        assert progress_sink is not None
+        progress_sink.publish(_numeric_encoding_snapshot(current=12, total=120))
+        progress_sink.publish(_numeric_encoding_snapshot(current=48, total=120))
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        progress = session.get(JobAttemptProgress, 1)
+
+    assert progress is not None
+    assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
+    assert progress.current_value == 48.0
+    assert progress.total_value == 120.0
+    assert progress.advanced_at is not None
+
+
 def test_encode_worker_ignores_external_progress_sink_failure(
     monkeypatch: Any,
     tmp_path: Path,
@@ -625,6 +658,24 @@ def _phase_snapshot(phase: ProgressPhase) -> ProgressSnapshot:
         observed_at=now,
         heartbeat_at=now,
         advanced_at=None,
+    )
+
+
+def _numeric_encoding_snapshot(*, current: int, total: int) -> ProgressSnapshot:
+    now = datetime.now(UTC)
+    return ProgressSnapshot(
+        phase=ProgressPhase.ENCODING,
+        current=current,
+        total=total,
+        unit=ProgressUnit.FRAMES,
+        rate_per_second=60.0,
+        speed_ratio=None,
+        source=ProgressSource.AV1AN_OUTPUT,
+        message="0/1 chunks",
+        phase_started_at=now,
+        observed_at=now,
+        heartbeat_at=now,
+        advanced_at=now,
     )
 
 
