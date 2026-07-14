@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import BinaryIO, Literal, cast
 from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser, Av1anTtyProgressSample
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
 from avarch.application.progress import ProgressSink, publish_progress_safely
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
@@ -224,6 +226,12 @@ def execute_plan(
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
         command = build_av1an_command(plan.av1an)
         _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
+        av1an_parser = Av1anTtyProgressParser()
+        av1an_progress_callback = (
+            _av1an_progress_callback(progress_sink, av1an_parser)
+            if progress_sink is not None
+            else None
+        )
         exit_code = _run_process(
             command,
             cwd=plan.av1an.working_directory,
@@ -234,6 +242,7 @@ def execute_plan(
             cancellation_token=cancellation_token,
             progress_sink=progress_sink,
             progress_phase=ProgressPhase.ENCODING,
+            output_callback=av1an_progress_callback,
         )
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
@@ -530,12 +539,14 @@ def _run_process(
     cancellation_token: ProcessCancellationToken | None = None,
     progress_sink: ProgressSink | None = None,
     progress_phase: ProgressPhase | None = None,
+    output_callback: ProcessOutputCallback | None = None,
 ) -> int:
     heartbeat_callback = (
         _process_heartbeat_callback(progress_sink, progress_phase)
         if progress_sink is not None and progress_phase is not None
         else None
     )
+    callback = _combined_process_output_callback(heartbeat_callback, output_callback)
     result = run_managed_process(
         command,
         cwd=cwd,
@@ -543,13 +554,64 @@ def _run_process(
         stderr_log=stderr_log,
         plan_hash=plan_hash,
         command_hash=command_hash,
-        stdout_callback=heartbeat_callback,
-        stderr_callback=heartbeat_callback,
+        stdout_callback=callback,
+        stderr_callback=callback,
         cancellation_token=cancellation_token,
     )
     if result.termination_reason is not ProcessTerminationReason.EXITED:
         raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
     return result.return_code
+
+
+def _combined_process_output_callback(
+    first: ProcessOutputCallback | None,
+    second: ProcessOutputCallback | None,
+) -> ProcessOutputCallback | None:
+    callbacks = tuple(callback for callback in (first, second) if callback is not None)
+    if not callbacks:
+        return None
+
+    def callback(record: ProcessOutputRecord) -> None:
+        for process_callback in callbacks:
+            with suppress(Exception):
+                process_callback(record)
+
+    return callback
+
+
+def _av1an_progress_callback(
+    progress_sink: ProgressSink,
+    parser: Av1anTtyProgressParser,
+) -> ProcessOutputCallback:
+    def callback(record: ProcessOutputRecord) -> None:
+        for sample in parser.feed(record.data):
+            _publish_av1an_sample(progress_sink, sample)
+
+    return callback
+
+
+def _publish_av1an_sample(
+    progress_sink: ProgressSink,
+    sample: Av1anTtyProgressSample,
+) -> None:
+    now = _utc_now()
+    publish_progress_safely(
+        progress_sink,
+        ProgressSnapshot(
+            phase=sample.phase,
+            current=float(sample.current),
+            total=float(sample.total),
+            unit=sample.unit,
+            rate_per_second=sample.rate_per_second,
+            speed_ratio=sample.speed_ratio,
+            source=ProgressSource.AV1AN_OUTPUT,
+            message=sample.message,
+            phase_started_at=now,
+            observed_at=now,
+            heartbeat_at=now,
+            advanced_at=now,
+        ),
+    )
 
 
 def _process_heartbeat_callback(
