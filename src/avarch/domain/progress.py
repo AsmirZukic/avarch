@@ -90,3 +90,12 @@ def _validate_optional_positive_float(label: str, value: float | None) -> None:
         return
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"{label} must be finite and non-negative")
+
+
+def phase_progress_percent(snapshot: ProgressSnapshot) -> float | None:
+    if snapshot.current is None or snapshot.total is None:
+        return None
+    if snapshot.total <= 0:
+        return None
+    percent = (snapshot.current / snapshot.total) * 100.0
+    return min(100.0, max(0.0, percent))
