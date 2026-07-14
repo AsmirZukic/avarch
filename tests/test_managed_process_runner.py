@@ -1,3 +1,5 @@
+import os
+import signal
 import sys
 import threading
 import time
@@ -176,6 +178,111 @@ sys.exit(7)
     assert b"interrupted=false" in stdout_log.read_bytes()
 
 
+def test_managed_process_cancellation_terminates_descendant_process(
+    tmp_path: Path,
+) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    token = ProcessCancellationToken()
+    ready = threading.Event()
+    child_pid_file = tmp_path / "child.pid"
+
+    def on_stdout(record: ProcessOutputRecord) -> None:
+        if record.text == "ready\n":
+            ready.set()
+
+    child_code = f"""
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+Path({str(child_pid_file)!r}).write_text(str(child.pid), encoding="utf-8")
+
+def term(_signum, _frame):
+    print("parent-term", flush=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, term)
+print("ready", flush=True)
+while True:
+    time.sleep(0.05)
+"""
+    result_holder = _run_process_in_thread(
+        [sys.executable, "-c", child_code],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="cancel-tree",
+        stdout_callback=on_stdout,
+        cancellation_token=token,
+        termination_grace_seconds=1.0,
+    )
+
+    assert ready.wait(timeout=1.0)
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    token.request("cancel process tree")
+    result_holder.thread.join(timeout=3.0)
+
+    descendant_alive = _process_exists(child_pid)
+    if descendant_alive:
+        os.kill(child_pid, signal.SIGKILL)
+        result_holder.thread.join(timeout=3.0)
+
+    assert not result_holder.thread.is_alive()
+    assert descendant_alive is False
+    result = result_holder.result
+    assert result is not None
+    assert result.termination_reason is ProcessTerminationReason.CANCELLED
+
+
+def test_managed_process_force_kills_process_group_after_grace_timeout(
+    tmp_path: Path,
+) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+    token = ProcessCancellationToken()
+    ready = threading.Event()
+
+    def on_stdout(record: ProcessOutputRecord) -> None:
+        if record.text == "ready\n":
+            ready.set()
+
+    child_code = """
+import signal
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print("ready", flush=True)
+while True:
+    time.sleep(0.05)
+"""
+    result_holder = _run_process_in_thread(
+        [sys.executable, "-c", child_code],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="force-kill",
+        stdout_callback=on_stdout,
+        cancellation_token=token,
+        termination_grace_seconds=0.1,
+    )
+
+    assert ready.wait(timeout=1.0)
+    token.request("cancel uncooperative process")
+    result_holder.thread.join(timeout=3.0)
+
+    assert not result_holder.thread.is_alive()
+    result = result_holder.result
+    assert result is not None
+    assert result.termination_reason is ProcessTerminationReason.FORCED_KILL
+    assert result.succeeded is False
+
+
 class _ThreadedProcessResult:
     def __init__(self, thread: threading.Thread) -> None:
         self.thread = thread
@@ -212,6 +319,19 @@ def _run_process_in_thread(
     holder.thread = threading.Thread(target=target)
     holder.thread.start()
     return holder
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        parts = proc_stat.read_text(encoding="utf-8").split()
+        if len(parts) > 2 and parts[2] == "Z":
+            return False
+    return True
 
 
 def test_managed_process_streams_stdout_and_stderr_to_separate_logs(tmp_path: Path) -> None:
