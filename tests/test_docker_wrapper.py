@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pty
 import subprocess
 from pathlib import Path
 
@@ -209,6 +210,67 @@ def test_wrapper_volume_options_env_can_request_relabel(tmp_path: Path) -> None:
     assert f"-v {workspace}:/workspace:z" in command
 
 
+def test_wrapper_allocates_tty_for_interactive_workflow_run(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "workflow", "run", "."],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-t" in args
+    assert args.index("-t") < args.index("avarch:test")
+
+
+def test_wrapper_keeps_redirected_workflow_run_non_tty(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = subprocess.run(
+        [str(WRAPPER), "workflow", "run", "."],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-t" not in args
+
+
+def test_wrapper_does_not_allocate_tty_for_detached_scheduler(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "scheduler", "run", "-d"],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-t" not in args
+
+
 def test_wrapper_rejects_running_scheduler_container(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
@@ -343,6 +405,28 @@ exit 1
     )
     ls.chmod(0o755)
     return fake_bin
+
+
+def _run_wrapper_with_stdout_pty(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    master_fd, slave_fd = pty.openpty()
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            env=env,
+            stdout=slave_fd,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(slave_fd)
+        os.close(master_fd)
 
 
 def _wrapper_env(

@@ -739,8 +739,10 @@ output is plain complete lines with no cursor-control sequences. `NO_COLOR=1`
 disables color.
 
 Foreground `scheduler run` shows the same live progress view by default on an
-interactive terminal. Detached scheduler runs do not render live progress; use
-`jobs watch JOB_ID` from another shell when the scheduler is running detached.
+interactive terminal. The Docker wrapper preserves the terminal for foreground
+`workflow run` and `scheduler run` commands. Detached scheduler runs do not
+render live progress; use `jobs watch JOB_ID` from another shell when the
+scheduler is running detached.
 
 Progress percentages are phase-specific, not whole-workflow percentages. Unknown
 totals show the current value when available and `eta=unknown`; Avarch does not
