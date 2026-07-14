@@ -7,10 +7,11 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -22,6 +23,7 @@ from avarch.models.execution import (
     ExecutionInterruptedError,
     InvalidExecutionPlanError,
     MuxStageError,
+    ProcessResult,
     StaleExecutionPlanError,
     ToolUnavailableError,
     UnsupportedToolVersionError,
@@ -40,6 +42,16 @@ from avarch.models.plan import (
 from avarch.serialization import canonical_json
 
 MAX_PROCESS_TAIL_BYTES = 16_384
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessOutputRecord:
+    stream: Literal["stdout", "stderr"]
+    data: bytes
+    text: str
+
+
+ProcessOutputCallback = Callable[[ProcessOutputRecord], None]
 
 
 def serialize_encoder_arguments(arguments: Sequence[str]) -> str:
@@ -473,12 +485,32 @@ def _run_process(
     plan_hash: str,
     command_hash: str,
 ) -> int:
+    return run_managed_process(
+        command,
+        cwd=cwd,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash=plan_hash,
+        command_hash=command_hash,
+    ).return_code
+
+
+def run_managed_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    stdout_log: Path,
+    stderr_log: Path,
+    plan_hash: str,
+    command_hash: str,
+    stdout_callback: ProcessOutputCallback | None = None,
+) -> ProcessResult:
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
-    started_at = _utc_now().isoformat()
+    started_at = _utc_now()
     start_separator = (
         "=== avarch process start ===\n"
-        f"started_at={started_at}\n"
+        f"started_at={started_at.isoformat()}\n"
         f"plan_hash={plan_hash}\n"
         f"command_hash={command_hash}\n"
         f"executable={command[0]}\n"
@@ -494,11 +526,18 @@ def _run_process(
         process = subprocess.Popen(
             list(command),
             cwd=cwd,
-            stdout=stdout_file,
+            stdout=subprocess.PIPE,
             stderr=stderr_file,
             stdin=subprocess.DEVNULL,
         )
         try:
+            if process.stdout is not None:
+                _stream_process_output(
+                    cast(BinaryIO, process.stdout),
+                    stdout_file,
+                    stream="stdout",
+                    callback=stdout_callback,
+                )
             exit_code = process.wait()
         except KeyboardInterrupt as exc:
             interrupted = True
@@ -511,7 +550,51 @@ def _run_process(
             _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=True)
             raise ExecutionInterruptedError(f"Interrupted while running {command[0]}") from exc
         _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=interrupted)
-    return exit_code
+    return ProcessResult.exited(
+        command=tuple(command),
+        return_code=exit_code,
+        started_at=started_at,
+        finished_at=_utc_now(),
+    )
+
+
+def _stream_process_output(
+    pipe: BinaryIO,
+    log_file: BinaryIO,
+    *,
+    stream: Literal["stdout", "stderr"],
+    callback: ProcessOutputCallback | None,
+) -> None:
+    pending = bytearray()
+    while True:
+        chunk = pipe.read(1)
+        if not chunk:
+            break
+        log_file.write(chunk)
+        log_file.flush()
+        pending.extend(chunk)
+        if chunk in {b"\n", b"\r"}:
+            _publish_process_output(stream=stream, data=bytes(pending), callback=callback)
+            pending.clear()
+    if pending:
+        _publish_process_output(stream=stream, data=bytes(pending), callback=callback)
+
+
+def _publish_process_output(
+    *,
+    stream: Literal["stdout", "stderr"],
+    data: bytes,
+    callback: ProcessOutputCallback | None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        ProcessOutputRecord(
+            stream=stream,
+            data=data,
+            text=data.decode("utf-8", errors="replace"),
+        )
+    )
 
 
 def _write_process_end(
