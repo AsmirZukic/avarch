@@ -1,13 +1,13 @@
 # Job Progress Observability Validation
 
-Validated commit: `c23b7cc4c93738db4bd76336dab86e2a46278762`
+Validated commit: `bfa263bfe7133f25976837dc85db9c8a7840b575`
 Date: 2026-07-14
 Environment: Linux workspace, Python 3.12.8, Docker runtime available
 
 ## Runtime
 
-- Docker image: `avarch:progress-validation`
-- Docker image id: `sha256:97aec3415bc394944484484884a3a84987e9579099f25d5727f960b9195de1a9`
+- Docker image: `avarch:latest`
+- Docker image id: `sha256:9ecac335ce4e7cc52d47c1c86ff719a9e8d287526a6b41e28e48fdd4eec6877b`
 - Avarch version: `0.1.0`
 - Container Av1an version: `av1an 0.5.2-unstable`
 - Host FFmpeg: `ffmpeg version N-121908-g7018ce14df`
@@ -20,16 +20,16 @@ uv run pytest
 uv run ruff check .
 uv run pyright
 uv build
-docker build -t avarch:progress-validation .
-docker run --rm avarch:progress-validation --version
-docker run --rm --entrypoint av1an avarch:progress-validation --version
-docker run --rm --entrypoint ffmpeg avarch:progress-validation -version
-scripts/test-container.sh avarch:progress-validation
+docker build -t avarch:latest .
+docker run --rm avarch:latest --version
+docker run --rm --entrypoint av1an avarch:latest --version
+docker run --rm --entrypoint ffmpeg avarch:latest -version
+scripts/test-container.sh avarch:latest
 ```
 
 ## Results
 
-- Automated suite: `884 passed, 4 skipped, 21 warnings`
+- Automated suite: `885 passed, 4 skipped, 21 warnings`
 - Lint: passed
 - Type check: passed
 - Package build: passed
