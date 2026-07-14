@@ -37,8 +37,17 @@ class ProfileAv1anSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     encoder: Literal["svt-av1"]
-    workers: int = Field(gt=0)
+    workers: int | Literal["auto"] = "auto"
     video_args: str
+
+    @field_validator("workers")
+    @classmethod
+    def validate_workers(cls, value: int | Literal["auto"]) -> int | Literal["auto"]:
+        if value == "auto":
+            return value
+        if value <= 0:
+            raise ValueError("workers must be positive or 'auto'")
+        return value
 
 
 class ProfileAudioSettings(BaseModel):
