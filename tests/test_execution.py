@@ -19,6 +19,7 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.application.progress import NoopProgressSink
 from avarch.models.execution import (
     ExecutionInterruptedError,
     ProcessCancellationToken,
@@ -274,6 +275,17 @@ def test_execute_plan_writes_markers_and_reuses_receipt(
     monkeypatch.setenv("PATH", str(tmp_path / "missing-tools"))
 
     assert execute_plan(plan) == "already_complete"
+
+
+def test_execute_plan_accepts_progress_sink_without_requiring_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    assert execute_plan(plan) == "completed"
+
+    assert execute_plan(plan, progress_sink=NoopProgressSink()) == "already_complete"
 
 
 def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(

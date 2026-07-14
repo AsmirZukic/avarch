@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
+from avarch.application.progress import ProgressSink
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
 from avarch.models.execution import (
     Av1anStageError,
@@ -194,7 +195,9 @@ def execute_plan(
     plan: TranscodePlan,
     *,
     cancellation_token: ProcessCancellationToken | None = None,
+    progress_sink: ProgressSink | None = None,
 ) -> EncodeExecutionStatus:
+    del progress_sink
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)
 

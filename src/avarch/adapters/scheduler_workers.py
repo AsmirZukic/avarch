@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -61,6 +60,7 @@ from avarch.adapters.vapoursynth import (
 )
 from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
 from avarch.application.planning import PlanningError, build_plan, match_profile
+from avarch.application.progress import ProgressSink
 from avarch.application.promotion import PromotionWorkflow, promote_job, recover_promotion
 from avarch.application.queue_identity import build_queue_key, planning_identity
 from avarch.application.validation_summary import failed_check_summary, failed_required_check_names
@@ -79,8 +79,6 @@ from avarch.models.execution import (
 from avarch.models.plan import TranscodePlan
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
-
-ProgressCallback = Callable[[int, float | None], None]
 
 
 async def execute_probe_job(
@@ -291,9 +289,8 @@ async def execute_encode_job(
     job_id: int,
     runner_id: str,
     config: AppConfig,
-    progress_callback: ProgressCallback | None = None,
+    progress_sink: ProgressSink | None = None,
 ) -> None:
-    del progress_callback
     engine = create_db_engine(config.database.url)
     now = _utc_now()
     with Session(engine) as session, session.begin():
@@ -335,7 +332,12 @@ async def execute_encode_job(
 
     process_cancellation = ProcessCancellationToken()
     execution_task = asyncio.create_task(
-        asyncio.to_thread(execute_plan, plan, cancellation_token=process_cancellation)
+        asyncio.to_thread(
+            execute_plan,
+            plan,
+            cancellation_token=process_cancellation,
+            progress_sink=progress_sink,
+        )
     )
     try:
         status = await asyncio.shield(execution_task)
