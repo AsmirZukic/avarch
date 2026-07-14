@@ -99,6 +99,37 @@ def test_jobs_show_prints_progress_details(tmp_path: Path) -> None:
     assert "source:           av1an" in result.output
 
 
+def test_jobs_watch_prints_plain_progress_for_redirected_output(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    job_id = _insert_job_with_progress(
+        config_path,
+        tmp_path / "movie-watch-progress.mkv",
+        status=JobStatus.PROMOTED,
+        phase=ProgressPhase.COMPLETED,
+    )
+
+    result = runner.invoke(app, ["jobs", "watch", str(job_id), "--poll-interval", "0.01"])
+
+    assert result.exit_code == 0
+    assert "movie-watch-progress.mkv completed 40.0%" in result.output
+    assert "\x1b" not in result.output
+
+
+def test_jobs_watch_exits_nonzero_for_failed_terminal_job(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    job_id = _insert_job_with_progress(
+        config_path,
+        tmp_path / "movie-watch-failed.mkv",
+        status=JobStatus.FAILED,
+        phase=ProgressPhase.FAILED,
+    )
+
+    result = runner.invoke(app, ["jobs", "watch", str(job_id), "--poll-interval", "0.01"])
+
+    assert result.exit_code == 1
+    assert "movie-watch-failed.mkv failed 40.0%" in result.output
+
+
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
@@ -366,7 +397,13 @@ def _insert_job(
         )
 
 
-def _insert_job_with_progress(config_path: Path, media_path: Path) -> int:
+def _insert_job_with_progress(
+    config_path: Path,
+    media_path: Path,
+    *,
+    status: JobStatus = JobStatus.ENCODING,
+    phase: ProgressPhase = ProgressPhase.ENCODING,
+) -> int:
     media_path.write_bytes(b"media")
     app_config = load_config(config_path)
     engine = create_db_engine(resolve_database_url(app_config, config_path))
@@ -392,7 +429,7 @@ def _insert_job_with_progress(config_path: Path, media_path: Path) -> int:
             profile_hash="profile",
             source_fs_fingerprint=media_file.fs_fingerprint,
             queue_key=f"queue:{media_path.name}",
-            status=JobStatus.ENCODING,
+            status=status,
             stage=JobStage.ENCODE,
             attempts=1,
             created_at=now,
@@ -406,7 +443,11 @@ def _insert_job_with_progress(config_path: Path, media_path: Path) -> int:
             attempt_number=1,
             stage=JobStage.ENCODE,
             resource_class=ResourceClass.HEAVY_AV1AN,
-            status=AttemptStatus.RUNNING,
+            status=(
+                AttemptStatus.COMPLETED
+                if status != JobStatus.ENCODING
+                else AttemptStatus.RUNNING
+            ),
             runner_id="runner",
             started_at=now,
         )
@@ -417,7 +458,7 @@ def _insert_job_with_progress(config_path: Path, media_path: Path) -> int:
         SqliteProgressStore(session).save_snapshot(
             attempt_id=attempt_id,
             snapshot=ProgressSnapshot(
-                phase=ProgressPhase.ENCODING,
+                phase=phase,
                 current=48,
                 total=120,
                 unit=ProgressUnit.FRAMES,

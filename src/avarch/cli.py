@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,6 +13,12 @@ from typing import Annotated, Literal
 
 import structlog
 import typer
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TextColumn
+from rich.table import Table
+from rich.text import Text
 
 from avarch import __version__
 from avarch.application.database_admin import (
@@ -37,6 +44,7 @@ from avarch.application.job_control import (
     update_job_priority,
 )
 from avarch.application.job_views import (
+    CurrentJobProgressView,
     WorkflowJobItem,
     current_job_progress,
     job_details,
@@ -69,6 +77,15 @@ from avarch.application.profile_management import (
     resolve_profile,
 )
 from avarch.application.progress_views import JobProgressView, job_progress_view
+from avarch.application.progress_watch import (
+    DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+    JobProgressReader,
+    JobProgressWatchInterrupted,
+    JobProgressWatchNotFound,
+    JobProgressWatchReadError,
+    JobProgressWatchUpdate,
+    watch_job_progress,
+)
 from avarch.application.promotion import (
     PromotionWorkflowError,
     execute_promotion,
@@ -194,6 +211,8 @@ from avarch.cli_rendering import (
     job_progress_updated_label,
     job_stage_value,
     job_status_value,
+    plain_job_progress_line,
+    select_progress_watch_render_mode,
     truncate_line,
 )
 from avarch.config import (
@@ -1091,6 +1110,124 @@ def jobs_show(
             f"  {event.id:<3} {display_optional_datetime(event.created_at)} "
             f"{event_type_value(event.event_type):<16} {event.actor}"
         )
+
+
+@jobs_app.command("watch")
+def jobs_watch(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    poll_interval: Annotated[
+        float,
+        typer.Option("--poll-interval", help="Seconds between progress reads."),
+    ] = DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+) -> None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+
+    with db_session(database_url) as session:
+        details = job_details(job_view_store(session), job_id=job_id)
+    if details is None:
+        typer.echo(f"Job not found: {job_id}")
+        raise typer.Exit(1)
+
+    label = Path(details.source_path).name
+
+    def read_current(current_job_id: int) -> CurrentJobProgressView | None:
+        with db_session(database_url) as session:
+            return current_job_progress(job_view_store(session), job_id=current_job_id)
+
+    mode = select_progress_watch_render_mode(
+        stdout_is_tty=sys.stdout.isatty(),
+        no_color=os.environ.get("NO_COLOR"),
+    )
+    updates: list[JobProgressWatchUpdate] = []
+
+    def collect(update: JobProgressWatchUpdate) -> None:
+        updates.append(update)
+        if not mode.live:
+            typer.echo(plain_job_progress_line(update.view, label=label))
+
+    try:
+        if mode.live:
+            final = _watch_job_progress_rich(
+                read_current=read_current,
+                job_id=job_id,
+                label=label,
+                poll_interval=poll_interval,
+                color=mode.color,
+            )
+        else:
+            final = watch_job_progress(
+                read_current=read_current,
+                job_id=job_id,
+                on_update=collect,
+                now=lambda: datetime.now(UTC),
+                sleep=time.sleep,
+                poll_interval=poll_interval,
+            )
+    except JobProgressWatchNotFound as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except JobProgressWatchReadError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except JobProgressWatchInterrupted as exc:
+        raise typer.Exit(130) from exc
+
+    raise typer.Exit(_watch_exit_code(final))
+
+
+def _watch_job_progress_rich(
+    *,
+    read_current: JobProgressReader,
+    job_id: int,
+    label: str,
+    poll_interval: float,
+    color: bool,
+) -> JobProgressView:
+    console = Console(file=sys.stdout, color_system="auto" if color else None)
+
+    def render(update: JobProgressWatchUpdate) -> None:
+        live.update(_rich_progress_renderable(update.view, label=label))
+
+    with Live(console=console, refresh_per_second=8, transient=False) as live:
+        return watch_job_progress(
+            read_current=read_current,
+            job_id=job_id,
+            on_update=render,
+            now=lambda: datetime.now(UTC),
+            sleep=time.sleep,
+            poll_interval=poll_interval,
+        )
+
+
+def _rich_progress_renderable(view: JobProgressView, *, label: str) -> Group:
+    title = Text(label, style="bold")
+    phase = job_progress_phase_label(view)
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>5.1f}%"),
+        expand=True,
+    )
+    if view.percent is None:
+        progress.add_task(phase, total=None)
+    else:
+        progress.add_task(phase, total=100, completed=int(view.percent))
+    details = Table.grid(padding=(0, 1))
+    details.add_row(
+        job_progress_compact_label(view),
+        f"ETA {job_progress_eta_label(view)}",
+        f"updated {job_progress_updated_label(view)}",
+    )
+    if view.speed_ratio is not None:
+        details.add_row(f"speed {view.speed_ratio:.2f}x")
+    return Group(title, Panel.fit(Group(progress, details), border_style="cyan"))
+
+
+def _watch_exit_code(view: JobProgressView) -> int:
+    if view.job_status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.VALIDATION_FAILED}:
+        return 1
+    return 0
 
 
 @jobs_app.command("logs")
