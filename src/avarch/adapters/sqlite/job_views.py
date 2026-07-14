@@ -5,7 +5,9 @@ from pathlib import Path
 from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.models import Job, JobAttempt, JobEvent, MediaFile
+from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.application.job_views import (
+    CurrentJobProgressView,
     JobAttemptView,
     JobDetails,
     JobEventView,
@@ -155,6 +157,23 @@ class SqliteJobViewStore:
         attempt = self._session.exec(statement).first()
         return _attempt_view(attempt) if attempt is not None else None
 
+    def current_job_progress(self, *, job_id: int) -> CurrentJobProgressView | None:
+        job = self._session.get(Job, job_id)
+        if job is None:
+            return None
+        attempt = self._latest_attempt_model(job_id=job_id)
+        progress = None
+        if attempt is not None and attempt.id is not None:
+            progress = SqliteProgressStore(self._session).get_snapshot(attempt_id=attempt.id)
+        return CurrentJobProgressView(
+            job_id=job_id,
+            job_status=JobStatus(job.status),
+            job_stage=JobStage(job.stage),
+            attempt_id=attempt.id if attempt is not None else None,
+            attempt=_attempt_view(attempt) if attempt is not None else None,
+            progress=progress,
+        )
+
     def _media_by_id(self) -> dict[int, MediaFile]:
         return {
             media_file.id: media_file
@@ -176,6 +195,13 @@ class SqliteJobViewStore:
         for attempt in attempts:
             attempts_by_job.setdefault(attempt.job_id, _attempt_view(attempt))
         return attempts_by_job
+
+    def _latest_attempt_model(self, *, job_id: int) -> JobAttempt | None:
+        return self._session.exec(
+            select(JobAttempt)
+            .where(JobAttempt.job_id == job_id)
+            .order_by(col(JobAttempt.attempt_number).desc())
+        ).first()
 
 
 def _list_item(job: Job, media_file: MediaFile | None) -> JobListItem:

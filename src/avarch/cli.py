@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +14,12 @@ from typing import Annotated, Literal
 
 import structlog
 import typer
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TextColumn
+from rich.table import Table
+from rich.text import Text
 
 from avarch import __version__
 from avarch.application.database_admin import (
@@ -37,7 +45,9 @@ from avarch.application.job_control import (
     update_job_priority,
 )
 from avarch.application.job_views import (
+    CurrentJobProgressView,
     WorkflowJobItem,
+    current_job_progress,
     job_details,
     latest_attempt,
     list_jobs,
@@ -66,6 +76,16 @@ from avarch.application.profile_management import (
     copy_builtin_profile,
     list_available_profiles,
     resolve_profile,
+)
+from avarch.application.progress_views import JobProgressView, job_progress_view
+from avarch.application.progress_watch import (
+    DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+    JobProgressReader,
+    JobProgressWatchInterrupted,
+    JobProgressWatchNotFound,
+    JobProgressWatchReadError,
+    JobProgressWatchUpdate,
+    watch_job_progress,
 )
 from avarch.application.promotion import (
     PromotionWorkflowError,
@@ -100,6 +120,7 @@ from avarch.application.scheduler_run import (
     MAX_CLI_LOG_TAIL_BYTES,
     SchedulerAlreadyRunningError,
     SchedulerControlError,
+    SchedulerRunSummary,
     cli_actor,
     new_runner_id,
     run_scheduler,
@@ -179,14 +200,22 @@ from avarch.cli_rendering import (
     display_optional_datetime,
     echo_attempt_log_status,
     echo_error_block,
+    echo_job_progress_details,
     echo_promotion_complete,
     echo_promotion_preview,
     event_type_value,
     format_size,
     job_control_label,
     job_outcome_summary,
+    job_progress_compact_label,
+    job_progress_detail_label,
+    job_progress_eta_label,
+    job_progress_phase_label,
+    job_progress_updated_label,
     job_stage_value,
     job_status_value,
+    plain_job_progress_line,
+    select_progress_watch_render_mode,
     truncate_line,
 )
 from avarch.config import (
@@ -216,6 +245,13 @@ class CliWorkspace:
     runtime_config: AppConfig
     workspace: WorkspaceContext
     workspace_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerProgressRow:
+    label: str
+    view: JobProgressView
+
 
 app = typer.Typer(
     name="avarch",
@@ -681,21 +717,13 @@ def run_queue(
         write_current_metadata(process_controller, workspace=workspace, mode=mode)
         signal.signal(signal.SIGTERM, request_stop)
         summary = asyncio.run(
-            run_scheduler(
-                scheduler_runner(
-                    claimable_stages=None
-                    if promote
-                    else {
-                        JobStage.PROBE,
-                        JobStage.PLAN,
-                        JobStage.ENCODE,
-                        JobStage.VALIDATE,
-                        JobStage.CLEANUP,
-                    }
-                ),
-                config=runtime_config,
+            _run_scheduler_with_optional_live_progress(
+                database_url=database_url,
+                runtime_config=runtime_config,
                 runner_id=runner_id,
                 resume=resume,
+                promote=promote,
+                mode=mode,
             )
         )
     except SchedulerLifecycleError as exc:
@@ -718,6 +746,99 @@ def run_queue(
     )
     if summary.failed:
         _echo_recent_failed_jobs(database_url)
+
+
+async def _run_scheduler_with_optional_live_progress(
+    *,
+    database_url: str,
+    runtime_config: AppConfig,
+    runner_id: str,
+    resume: bool,
+    promote: bool,
+    mode: Literal["foreground", "detached"],
+) -> SchedulerRunSummary:
+    runtime = scheduler_runner(
+        claimable_stages=None
+        if promote
+        else {
+            JobStage.PROBE,
+            JobStage.PLAN,
+            JobStage.ENCODE,
+            JobStage.VALIDATE,
+            JobStage.CLEANUP,
+        }
+    )
+    scheduler_task = asyncio.create_task(
+        run_scheduler(
+            runtime,
+            config=runtime_config,
+            runner_id=runner_id,
+            resume=resume,
+        )
+    )
+    if not _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty()):
+        return await scheduler_task
+
+    monitor_task = asyncio.create_task(_render_scheduler_live_progress(database_url))
+    try:
+        return await scheduler_task
+    finally:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+
+
+def _scheduler_live_progress_enabled(
+    *,
+    mode: Literal["foreground", "detached"],
+    stdout_is_tty: bool,
+) -> bool:
+    return mode == "foreground" and stdout_is_tty
+
+
+async def _render_scheduler_live_progress(database_url: str) -> None:
+    color = os.environ.get("NO_COLOR") is None
+    console = Console(file=sys.stdout, color_system="auto" if color else None)
+    with Live(console=console, refresh_per_second=4, transient=False) as live:
+        while True:
+            live.update(_scheduler_progress_renderable(_active_scheduler_progress_rows(database_url)))
+            await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
+
+
+def _active_scheduler_progress_rows(database_url: str) -> list[SchedulerProgressRow]:
+    active_statuses = {
+        JobStatus.ENCODING,
+        JobStatus.VALIDATING,
+        JobStatus.PROMOTING,
+        JobStatus.CLEANING,
+    }
+    now = datetime.now(UTC)
+    with db_session(database_url) as session:
+        store = job_view_store(session)
+        jobs = list_jobs(
+            store,
+            statuses=active_statuses,
+            stages=None,
+            profile=None,
+            limit=None,
+        )
+        rows: list[SchedulerProgressRow] = []
+        for job in jobs:
+            if job.id is None:
+                continue
+            view = job_progress_view(current_job_progress(store, job_id=job.id), now=now)
+            if view is not None:
+                rows.append(SchedulerProgressRow(label=job.file_name, view=view))
+        return rows
+
+
+def _scheduler_progress_renderable(rows: list[SchedulerProgressRow]) -> Group:
+    if not rows:
+        return Group(Text("Scheduler running", style="bold"), Text("Waiting for active jobs..."))
+    renderables: list[RenderableType] = [Text("Scheduler running", style="bold")]
+    for row in rows:
+        renderables.append(_rich_progress_renderable(row.view, label=row.label))
+    return Group(*renderables)
 
 
 @queue_app.command("retry")
@@ -975,22 +1096,40 @@ def jobs_list(
         raise typer.Exit(1) from exc
 
     with db_session(database_url) as session:
+        store = job_view_store(session)
         rows = list_jobs(
-            job_view_store(session),
+            store,
             statuses=status_filters,
             stages=stage_filters,
             profile=profile,
             limit=limit,
         )
+        now = datetime.now(UTC)
+        progress_by_job_id: dict[int, JobProgressView | None] = {}
+        for job in rows:
+            if job.id is not None:
+                progress_by_job_id[job.id] = job_progress_view(
+                    current_job_progress(store, job_id=job.id),
+                    now=now,
+                )
 
-    typer.echo("ID  STATUS     STAGE     PRI  TRY  CONTROL  PROFILE          FILE")
+    typer.echo(
+        "ID  STATUS     PHASE            PROGRESS      ETA       UPDATED   PROFILE          FILE"
+    )
     for job in rows:
         path = job.file_name
-        control = job_control_label(job)
+        progress = progress_by_job_id.get(job.id) if job.id is not None else None
         typer.echo(
-            f"{job.id:<3} {job_status_value(job.status):<10} {job_stage_value(job.stage):<9} "
-            f"{job.priority:>3}  {job.attempts:>3}  {control:<7}  {job.profile_name:<15}  {path}"
+            f"{job.id:<3} {job_status_value(job.status):<10} "
+            f"{job_progress_phase_label(progress):<16} "
+            f"{job_progress_compact_label(progress):<13} "
+            f"{job_progress_eta_label(progress):<9} "
+            f"{job_progress_updated_label(progress):<9} "
+            f"{job.profile_name:<15}  {path}"
         )
+        control = job_control_label(job)
+        if control != "—":
+            typer.echo(f"    control: {control}")
         outcome = job_outcome_summary(job, path=path)
         if outcome is not None:
             typer.echo(f"    {outcome}")
@@ -1006,10 +1145,15 @@ def jobs_show(
     database_url = cli_workspace.database_url
 
     with db_session(database_url) as session:
-        job = job_details(job_view_store(session), job_id=job_id)
+        store = job_view_store(session)
+        job = job_details(store, job_id=job_id)
         if job is None:
             typer.echo(f"Job not found: {job_id}")
             raise typer.Exit(1)
+        progress = job_progress_view(
+            current_job_progress(store, job_id=job_id),
+            now=datetime.now(UTC),
+        )
 
     typer.echo(f"Job {job_id}")
     typer.echo("")
@@ -1037,6 +1181,12 @@ def jobs_show(
     typer.echo(f"  output:     {job.output_path or '-'}")
     typer.echo(f"  validation: {job.latest_validation_id or '-'}")
     typer.echo(f"  promotion:  {job.latest_promotion_id or '-'}")
+    typer.echo("")
+    if progress is not None:
+        echo_job_progress_details(progress)
+    else:
+        typer.echo("Progress:")
+        typer.echo("  —")
     if job.last_error_message:
         typer.echo("")
         typer.echo("Last error:")
@@ -1055,6 +1205,155 @@ def jobs_show(
             f"  {event.id:<3} {display_optional_datetime(event.created_at)} "
             f"{event_type_value(event.event_type):<16} {event.actor}"
         )
+
+
+@jobs_app.command("watch")
+def jobs_watch(
+    job_id: Annotated[int, typer.Argument(help="Job id.")],
+    poll_interval: Annotated[
+        float,
+        typer.Option("--poll-interval", help="Seconds between progress reads."),
+    ] = DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+) -> None:
+    cli_workspace = _load_cli_workspace()
+    database_url = cli_workspace.database_url
+
+    with db_session(database_url) as session:
+        details = job_details(job_view_store(session), job_id=job_id)
+    if details is None:
+        typer.echo(f"Job not found: {job_id}")
+        raise typer.Exit(1)
+
+    label = Path(details.source_path).name
+
+    def read_current(current_job_id: int) -> CurrentJobProgressView | None:
+        with db_session(database_url) as session:
+            return current_job_progress(job_view_store(session), job_id=current_job_id)
+
+    mode = select_progress_watch_render_mode(
+        stdout_is_tty=sys.stdout.isatty(),
+        no_color=os.environ.get("NO_COLOR"),
+    )
+    updates: list[JobProgressWatchUpdate] = []
+
+    def collect(update: JobProgressWatchUpdate) -> None:
+        updates.append(update)
+        if not mode.live:
+            typer.echo(plain_job_progress_line(update.view, label=label))
+
+    try:
+        if mode.live:
+            final = _watch_job_progress_rich(
+                read_current=read_current,
+                job_id=job_id,
+                label=label,
+                poll_interval=poll_interval,
+                color=mode.color,
+            )
+        else:
+            final = watch_job_progress(
+                read_current=read_current,
+                job_id=job_id,
+                on_update=collect,
+                now=lambda: datetime.now(UTC),
+                sleep=time.sleep,
+                poll_interval=poll_interval,
+            )
+    except JobProgressWatchNotFound as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except JobProgressWatchReadError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
+    except JobProgressWatchInterrupted as exc:
+        raise typer.Exit(130) from exc
+
+    raise typer.Exit(_watch_exit_code(final))
+
+
+def _watch_job_progress_rich(
+    *,
+    read_current: JobProgressReader,
+    job_id: int,
+    label: str,
+    poll_interval: float,
+    color: bool,
+) -> JobProgressView:
+    console = Console(file=sys.stdout, color_system="auto" if color else None)
+
+    def render(update: JobProgressWatchUpdate) -> None:
+        live.update(_rich_progress_renderable(update.view, label=label))
+
+    with Live(console=console, refresh_per_second=8, transient=False) as live:
+        return watch_job_progress(
+            read_current=read_current,
+            job_id=job_id,
+            on_update=render,
+            now=lambda: datetime.now(UTC),
+            sleep=time.sleep,
+            poll_interval=poll_interval,
+        )
+
+
+def _rich_progress_renderable(view: JobProgressView, *, label: str) -> Group:
+    title = Text(label, style="bold")
+    phase = _rich_progress_phase_label(view)
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>5.1f}%"),
+        expand=True,
+    )
+    if view.percent is None:
+        progress.add_task(phase, total=None)
+    else:
+        progress.add_task(phase, total=1000, completed=int(view.percent * 10))
+    details = Table.grid(padding=(0, 1))
+    details.add_row(*_rich_progress_detail_parts(view))
+    if view.message:
+        details.add_row(f"stage {truncate_line(view.message, max_length=90)}")
+    return Group(title, Panel.fit(Group(progress, details), border_style="cyan"))
+
+
+def _rich_progress_phase_label(view: JobProgressView) -> str:
+    stage = job_stage_value(view.job_stage)
+    phase = job_progress_phase_label(view)
+    return phase if stage == phase else f"{stage}: {phase}"
+
+
+def _rich_progress_detail_parts(view: JobProgressView) -> tuple[str, ...]:
+    parts = [
+        job_progress_detail_label(view),
+        _rich_eta_label(view),
+        _rich_rate_label(view),
+        _rich_speed_label(view),
+        f"updated {job_progress_updated_label(view)}",
+    ]
+    return tuple(part for part in parts if part)
+
+
+def _rich_eta_label(view: JobProgressView) -> str:
+    eta = job_progress_eta_label(view)
+    return "eta unknown" if eta == "—" else f"eta {eta}"
+
+
+def _rich_rate_label(view: JobProgressView) -> str | None:
+    if view.rate_per_second is None:
+        return None
+    unit = f" {view.unit.value}" if view.unit is not None else ""
+    return f"rate {view.rate_per_second:.2f}{unit}/s"
+
+
+def _rich_speed_label(view: JobProgressView) -> str | None:
+    if view.speed_ratio is None:
+        return None
+    return f"speed {view.speed_ratio:.2f}x"
+
+
+def _watch_exit_code(view: JobProgressView) -> int:
+    if view.job_status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.VALIDATION_FAILED}:
+        return 1
+    return 0
 
 
 @jobs_app.command("logs")
@@ -1928,6 +2227,9 @@ def _echo_plan_summary(
             f"{typed_plan.audio.target_channels}ch"
         )
     typer.echo(f"Subtitles: {subtitles}")
+    typer.echo("")
+    typer.echo("Av1an:")
+    typer.echo(f"  workers:   {typed_plan.av1an.workers}")
     typer.echo("")
     typer.echo("VapourSynth:")
     typer.echo(f"  mode:       {typed_plan.vapoursynth.mode}")

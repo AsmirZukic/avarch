@@ -114,7 +114,7 @@ def render_profile_document(document: ProfileDocument) -> str:
         "",
         "[av1an]",
         f"encoder = {_toml_escape(document.av1an.encoder)}",
-        f"workers = {document.av1an.workers}",
+        f"workers = {_toml_scalar(document.av1an.workers)}",
         f"video_args = {_toml_escape(document.av1an.video_args)}",
         "",
         "[audio]",
@@ -173,3 +173,9 @@ def _toml_escape(value: str) -> str:
 
 def _toml_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _toml_scalar(value: int | str) -> str:
+    if isinstance(value, int):
+        return str(value)
+    return _toml_escape(value)

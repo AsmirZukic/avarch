@@ -120,6 +120,7 @@ async def run_scheduler(
 ) -> SchedulerRunSummary:
     store = runtime.store(config=config)
     store.acquire_lease(runner_id=runner_id, now=utc_now(), resume=resume)
+    initial_terminal_counts = store.terminal_counts()
     store.recover_abandoned_jobs(now=utc_now())
 
     workers = runtime.workers()
@@ -198,9 +199,9 @@ async def run_scheduler(
 
     terminal_counts = store.terminal_counts()
     return SchedulerRunSummary(
-        completed=terminal_counts.completed,
-        failed=terminal_counts.failed,
-        skipped=terminal_counts.skipped,
+        completed=max(0, terminal_counts.completed - initial_terminal_counts.completed),
+        failed=max(0, terminal_counts.failed - initial_terminal_counts.failed),
+        skipped=max(0, terminal_counts.skipped - initial_terminal_counts.skipped),
         idle=True,
     )
 

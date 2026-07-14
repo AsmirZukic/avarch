@@ -69,6 +69,7 @@ class SqlitePlanningStore:
         *,
         media_file_id: int | None,
         probe_hash: str,
+        source_fs_fingerprint: str,
         profile_hash: str,
         execution_identity_hash: str,
     ) -> bool:
@@ -76,6 +77,7 @@ class SqlitePlanningStore:
             self._session,
             media_file_id=media_file_id,
             probe_hash=probe_hash,
+            source_fs_fingerprint=source_fs_fingerprint,
             profile_hash=profile_hash,
             execution_identity_hash=execution_identity_hash,
         )
@@ -181,6 +183,7 @@ def equivalent_current_plan_exists(
     *,
     media_file_id: int | None,
     probe_hash: str,
+    source_fs_fingerprint: str,
     profile_hash: str,
     execution_identity_hash: str,
 ) -> bool:
@@ -191,6 +194,7 @@ def equivalent_current_plan_exists(
             select(MediaPlan).where(
                 MediaPlan.media_file_id == media_file_id,
                 MediaPlan.probe_hash == probe_hash,
+                MediaPlan.source_fs_fingerprint == source_fs_fingerprint,
                 MediaPlan.profile_hash == profile_hash,
                 MediaPlan.execution_identity_hash == execution_identity_hash,
                 MediaPlan.is_current == True,  # noqa: E712

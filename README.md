@@ -262,7 +262,8 @@ implemented fields:
 - `video.hdr_to_sdr`: opt into generated HDR-to-SDR handling.
 - `video.source`: currently `vapoursynth`.
 - `av1an.encoder`: currently `svt-av1`.
-- `av1an.workers`: Av1an worker count for the job.
+- `av1an.workers`: Av1an worker count for the job. Use an integer, or `"auto"`
+  for a conservative SVT-AV1 worker count capped by CPU and memory.
 - `av1an.video_args`: encoder argument string.
 - `audio.codec`, `audio.bitrate`, `audio.channels`, `audio.languages`.
 - `subtitles.languages` and `subtitles.keep_forced`.
@@ -709,6 +710,7 @@ Job commands:
 avarch jobs list
 avarch jobs list --status failed --stage validate --limit 10
 avarch jobs show JOB_ID
+avarch jobs watch JOB_ID
 avarch jobs logs JOB_ID --tail-bytes 16384
 avarch jobs cancel JOB_ID --reason "wrong profile" --wait
 avarch jobs cancel --running --reason "shutdown"
@@ -727,6 +729,35 @@ validation if the encoded output still exists, missing encoded outputs fail the
 job without touching the original, `ready_to_promote` jobs remain promotable,
 and `promoting` jobs are resumed through promotion recovery. Startup recovery
 never blindly deletes files.
+
+Job progress is persisted per attempt so detached scheduler work can be
+inspected from another shell. `jobs list` shows compact phase, phase progress,
+ETA, and last-update fields. `jobs show` adds the current attempt id, phase
+progress, elapsed time, ETA, speed/rate when known, source, heartbeat age, last
+measurable advancement, and a bounded status message. `jobs watch JOB_ID` polls
+SQLite and renders a live Rich display on an interactive terminal; redirected
+output is plain complete lines with no cursor-control sequences. `NO_COLOR=1`
+disables color.
+
+Foreground `scheduler run` shows the same live progress view by default on an
+interactive terminal. The Docker wrapper preserves the terminal for foreground
+`workflow run` and `scheduler run` commands. Detached scheduler runs do not
+render live progress; use `jobs watch JOB_ID` from another shell when the
+scheduler is running detached.
+
+Progress percentages are phase-specific, not whole-workflow percentages. Unknown
+totals show the current value when available and `eta=unknown`; Avarch does not
+fabricate `0%` or an ETA. Heartbeat means the owned process or scheduler path was
+recently observed; last advancement means numeric progress moved. A job can have
+a recent heartbeat while not advancing, and stale heartbeat reporting does not
+mark the job failed by itself.
+
+Numeric Av1an progress is enabled for the supported 0.5.x TTY progress format.
+Unsupported versions, unparsable output, legacy jobs without progress rows, or
+jobs without a numeric total fall back to phase/heartbeat visibility while the
+raw stdout/stderr logs remain complete. Ctrl+C while running `jobs watch` stops
+only the watcher; use `jobs cancel` to request job cancellation through the
+scheduler control path.
 
 Cancellation requests for active non-promotion jobs cancel the scheduler task.
 `scheduler stop` sends SIGTERM to the scheduler process group and escalates to
@@ -1075,7 +1106,11 @@ avarch scheduler stop --wait
 
 `avarch jobs list [--status STATUS] [--stage STAGE] [--profile NAME] [--limit N]`
 
-List queued and historical jobs.
+List queued and historical jobs with compact progress columns:
+
+```text
+ID  STATUS  PHASE  PROGRESS  ETA  UPDATED  PROFILE  FILE
+```
 
 ```sh
 avarch jobs list --status failed
@@ -1083,10 +1118,31 @@ avarch jobs list --status failed
 
 `avarch jobs show JOB_ID`
 
-Show job details, artifacts, attempts, and events.
+Show job details, current progress, artifacts, attempts, and events.
 
 ```sh
 avarch jobs show 1
+```
+
+`avarch jobs watch JOB_ID [--poll-interval SECONDS]`
+
+Watch persisted progress until the job reaches a terminal or handoff state.
+Interactive terminals use a live Rich display. Non-TTY output is line-oriented,
+for example:
+
+```text
+episode-01.mkv encoding 67.1% elapsed=42m 18s eta=20m 51s speed=1.32x
+```
+
+Completed, promoted, skipped, ready-to-promote, and size-rejected terminal or
+handoff states exit successfully. Failed, validation-failed, and cancelled jobs
+show their final state and exit non-zero. Ctrl+C exits with status 130 and does
+not cancel the job.
+
+```sh
+avarch jobs watch 1
+avarch jobs watch 1 > progress.log
+NO_COLOR=1 avarch jobs watch 1
 ```
 
 `avarch jobs logs JOB_ID [--attempt N] [--tail-bytes N]`
@@ -1324,6 +1380,31 @@ rerun:
 
 ```sh
 avarch doctor
+```
+
+### Encoder Killed During Encoding
+
+What you see: Av1an fails with `encoder crashed: signal: 9 (SIGKILL)`, often on
+several chunks near the start of encoding.
+
+Likely cause: the OS or container killed SVT-AV1 under memory pressure. Each
+Av1an worker can run a separate SVT-AV1 encoder process, and SVT-AV1 also uses
+internal parallelism.
+
+Recovery: reduce Av1an workers and run from a newly planned artifact. The
+built-in `"auto"` worker mode is conservative, but existing queued or failed
+jobs keep the worker count recorded in their plan artifact.
+
+```sh
+# After updating the same profile or Avarch version, retrying can reset the job
+# to planning when the old plan identity no longer matches.
+avarch jobs retry JOB_ID
+
+# Or create a separate lower-memory profile and enqueue a new job for it.
+avarch profiles copy av1_1080p_sdr --name low_mem
+# edit .avarch/profiles/low_mem.toml and set: workers = 2
+avarch plan --profile low_mem --file movie.mkv --force
+avarch enqueue --file movie.mkv
 ```
 
 ### Scheduler Already Running

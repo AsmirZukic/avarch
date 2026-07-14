@@ -1,0 +1,7 @@
+ INFO Generating VapourSynth cache file
+ INFO encode_file: Input: 160x90 @ 24.000 fps, 8 BPC, SDR
+Scene detection
+ INFO encode_file: scenecut: found 1 scene(s) [with extra_splits (240 frames): 1 scene(s)]
+ INFO encode_file: 
+Queue 1 Workers 1 Encoder svt-av1 Passes 1
+Params: --preset 10 --crf 55

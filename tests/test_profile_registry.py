@@ -128,6 +128,12 @@ def test_profile_document_rejects_nonpositive_workers() -> None:
         _profile_document(av1an={"workers": 0})
 
 
+def test_profile_document_accepts_auto_workers() -> None:
+    profile = _profile_document(av1an={"workers": "auto"})
+
+    assert profile.av1an.workers == "auto"
+
+
 def test_profile_document_rejects_nonpositive_max_width() -> None:
     with pytest.raises(ValidationError):
         _profile_document(video={"max_width": 0})

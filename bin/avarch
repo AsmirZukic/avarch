@@ -87,6 +87,29 @@ exec_docker_run() {
   exec docker run --rm --user "$uid:$gid" "$@"
 }
 
+foreground_live_command() {
+  if [ ! -t 1 ]; then
+    return 1
+  fi
+
+  if [ "${1:-}" = "workflow" ] && [ "${2:-}" = "run" ]; then
+    return 0
+  fi
+
+  if [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
+    for arg do
+      case "$arg" in
+        -d | --detached)
+          return 1
+          ;;
+      esac
+    done
+    return 0
+  fi
+
+  return 1
+}
+
 workspace_volume() {
   options=$(volume_options "$1")
   if [ -n "$options" ]; then
@@ -144,6 +167,11 @@ if [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
   scheduler_container=1
 fi
 
+allocate_tty=0
+if foreground_live_command "$@"; then
+  allocate_tty=1
+fi
+
 set -- "$IMAGE" "$@"
 
 if [ "$scheduler_container" = "1" ]; then
@@ -156,6 +184,10 @@ fi
 
 if [ "$mount_workspace" = "1" ]; then
   set -- -v "$(workspace_volume "$workspace")" -w "$CONTAINER_WORKSPACE" "$@"
+fi
+
+if [ "$allocate_tty" = "1" ]; then
+  set -- -t "$@"
 fi
 
 exec_docker_run "$@"

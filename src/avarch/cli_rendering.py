@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import typer
 
 from avarch.application.job_views import JobAttemptView, JobListItem
+from avarch.application.progress_views import JobProgressView
 from avarch.application.promotion import PromotionPreflightView, PromotionRecordView
 from avarch.domain.jobs import JobOutcomeReason, JobStatus
+from avarch.domain.progress import ProgressSource
 from avarch.models.promotion import PromotionMode
+
+UNAVAILABLE = "—"
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressWatchRenderMode:
+    live: bool
+    color: bool
 
 
 def format_size(size_bytes: int) -> str:
@@ -29,7 +40,7 @@ def display_optional(value: str | None) -> str:
 
 def display_optional_datetime(value: datetime | None) -> str:
     if value is None:
-        return "-"
+        return UNAVAILABLE
     return value.isoformat(sep=" ", timespec="seconds")
 
 
@@ -40,7 +51,141 @@ def job_control_label(job: JobListItem) -> str:
         return "hold"
     if job_status_value(job.status) == JobStatus.HELD.value:
         return "held"
-    return "-"
+    return UNAVAILABLE
+
+
+def job_progress_phase_label(view: JobProgressView | None) -> str:
+    if view is None or view.phase is None:
+        return UNAVAILABLE
+    return view.phase.value
+
+
+def job_progress_compact_label(view: JobProgressView | None) -> str:
+    if view is None or view.phase is None:
+        return UNAVAILABLE
+    if view.percent is not None:
+        return f"{view.percent:.1f}%"
+    if view.current is not None and view.unit is not None:
+        return f"{_format_number(view.current)} {view.unit.value}"
+    return UNAVAILABLE
+
+
+def job_progress_eta_label(view: JobProgressView | None) -> str:
+    if view is None or view.eta is None:
+        return UNAVAILABLE
+    return format_compact_duration(view.eta)
+
+
+def job_progress_updated_label(view: JobProgressView | None) -> str:
+    if view is None or view.heartbeat_age is None:
+        return UNAVAILABLE
+    if view.heartbeat_stale:
+        return "stale"
+    return f"{format_compact_duration(view.heartbeat_age)} ago"
+
+
+def select_progress_watch_render_mode(
+    *,
+    stdout_is_tty: bool,
+    no_color: str | None,
+) -> ProgressWatchRenderMode:
+    return ProgressWatchRenderMode(live=stdout_is_tty, color=stdout_is_tty and no_color is None)
+
+
+def plain_job_progress_line(view: JobProgressView, *, label: str) -> str:
+    parts = [
+        label,
+        job_progress_phase_label(view),
+        job_progress_compact_label(view),
+        f"elapsed={format_compact_duration(view.elapsed)}" if view.elapsed is not None else None,
+        f"eta={format_compact_duration(view.eta)}" if view.eta is not None else "eta=unknown",
+        f"speed={view.speed_ratio:.2f}x" if view.speed_ratio is not None else None,
+        "heartbeat=stale" if view.heartbeat_stale else None,
+        "not_advancing" if view.not_advancing else None,
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def echo_job_progress_details(view: JobProgressView) -> None:
+    typer.echo("Progress:")
+    typer.echo(f"  attempt:          {_attempt_identity(view)}")
+    typer.echo(f"  phase:            {job_progress_phase_label(view)}")
+    typer.echo(f"  phase progress:   {job_progress_detail_label(view)}")
+    if view.elapsed is not None:
+        typer.echo(f"  elapsed:          {format_compact_duration(view.elapsed)}")
+    if view.eta is not None:
+        typer.echo(f"  estimated left:   {format_compact_duration(view.eta)}")
+    if view.speed_ratio is not None:
+        typer.echo(f"  speed:            {view.speed_ratio:.2f}x")
+    if view.rate_per_second is not None:
+        unit = f" {view.unit.value}" if view.unit is not None else ""
+        typer.echo(f"  rate:             {_format_number(view.rate_per_second)}{unit}/s")
+    if view.source is not None:
+        typer.echo(f"  source:           {_source_label(view.source)}")
+    if view.heartbeat_age is not None:
+        suffix = " (stale)" if view.heartbeat_stale else ""
+        typer.echo(
+            f"  last heartbeat:   {format_compact_duration(view.heartbeat_age)} ago{suffix}"
+        )
+    if view.advance_age is not None:
+        suffix = " (not advancing)" if view.not_advancing else ""
+        typer.echo(f"  last advance:     {format_compact_duration(view.advance_age)} ago{suffix}")
+    if view.message:
+        typer.echo(f"  message:          {truncate_line(view.message)}")
+
+
+def format_compact_duration(duration: timedelta) -> str:
+    seconds = max(0, int(duration.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours:02d}h"
+
+
+def _attempt_identity(view: JobProgressView) -> str:
+    if view.attempt_number is None:
+        return UNAVAILABLE
+    if view.attempt_id is None:
+        return str(view.attempt_number)
+    return f"{view.attempt_number} (id {view.attempt_id})"
+
+
+def job_progress_detail_label(view: JobProgressView) -> str:
+    if view.current is None:
+        return job_progress_compact_label(view)
+    unit = f" {view.unit.value}" if view.unit is not None else ""
+    if view.total is None:
+        return f"{_format_number(view.current)}{unit}"
+    label = f"{_format_number(view.current)} / {_format_number(view.total)}{unit}"
+    if view.percent is not None:
+        label = f"{label} ({view.percent:.1f}%)"
+    return label
+
+
+def _format_number(value: int | float) -> str:
+    if isinstance(value, float) and not value.is_integer():
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(int(value))
+
+
+def _source_label(source: ProgressSource) -> str:
+    if source in {
+        ProgressSource.AV1AN_OUTPUT,
+        ProgressSource.AV1AN_STATE,
+        ProgressSource.AV1AN_STRUCTURED,
+    }:
+        return "av1an"
+    if source == ProgressSource.FFMPEG_PROGRESS:
+        return "ffmpeg"
+    if source == ProgressSource.PROCESS_HEARTBEAT:
+        return "process"
+    return source.value
 
 
 def job_outcome_summary(job: JobListItem, *, path: str) -> str | None:
