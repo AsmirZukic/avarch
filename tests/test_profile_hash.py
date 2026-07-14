@@ -106,9 +106,14 @@ def test_profile_hash_changes_when_encoder_args_change() -> None:
 def test_profile_hash_resolves_auto_workers_from_cpu_budget() -> None:
     profile = _profile({"av1an": {"workers": "auto"}})
 
-    assert build_profile_hash(profile, available_cpu_count=8) != build_profile_hash(
+    assert build_profile_hash(
+        profile,
+        available_cpu_count=8,
+        available_memory_bytes=64 * 1024**3,
+    ) != build_profile_hash(
         profile,
         available_cpu_count=16,
+        available_memory_bytes=64 * 1024**3,
     )
 
 

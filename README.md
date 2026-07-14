@@ -262,7 +262,8 @@ implemented fields:
 - `video.hdr_to_sdr`: opt into generated HDR-to-SDR handling.
 - `video.source`: currently `vapoursynth`.
 - `av1an.encoder`: currently `svt-av1`.
-- `av1an.workers`: Av1an worker count for the job.
+- `av1an.workers`: Av1an worker count for the job. Use an integer, or `"auto"`
+  for a conservative SVT-AV1 worker count capped by CPU and memory.
 - `av1an.video_args`: encoder argument string.
 - `audio.codec`, `audio.bitrate`, `audio.channels`, `audio.languages`.
 - `subtitles.languages` and `subtitles.keep_forced`.
@@ -1379,6 +1380,31 @@ rerun:
 
 ```sh
 avarch doctor
+```
+
+### Encoder Killed During Encoding
+
+What you see: Av1an fails with `encoder crashed: signal: 9 (SIGKILL)`, often on
+several chunks near the start of encoding.
+
+Likely cause: the OS or container killed SVT-AV1 under memory pressure. Each
+Av1an worker can run a separate SVT-AV1 encoder process, and SVT-AV1 also uses
+internal parallelism.
+
+Recovery: reduce Av1an workers and run from a newly planned artifact. The
+built-in `"auto"` worker mode is conservative, but existing queued or failed
+jobs keep the worker count recorded in their plan artifact.
+
+```sh
+# After updating the same profile or Avarch version, retrying can reset the job
+# to planning when the old plan identity no longer matches.
+avarch jobs retry JOB_ID
+
+# Or create a separate lower-memory profile and enqueue a new job for it.
+avarch profiles copy av1_1080p_sdr --name low_mem
+# edit .avarch/profiles/low_mem.toml and set: workers = 2
+avarch plan --profile low_mem --file movie.mkv --force
+avarch enqueue --file movie.mkv
 ```
 
 ### Scheduler Already Running
