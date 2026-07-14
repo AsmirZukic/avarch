@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from avarch.adapters.execution import ProcessOutputRecord, run_managed_process
-from avarch.models.execution import ProcessTerminationReason
+from avarch.models.execution import ProcessCancellationToken, ProcessTerminationReason
 
 
 def test_managed_process_streams_stdout_before_child_exits(tmp_path: Path) -> None:
@@ -97,6 +97,23 @@ def test_managed_process_handles_empty_and_non_utf8_stdout(tmp_path: Path) -> No
     assert non_utf8.succeeded is True
     assert records[-1].data == b"bad: \xff"
     assert records[-1].text == "bad: \ufffd"
+
+
+def test_managed_process_accepts_unset_cancellation_token(tmp_path: Path) -> None:
+    stdout_log = tmp_path / "stdout.log"
+    stderr_log = tmp_path / "stderr.log"
+
+    result = run_managed_process(
+        [sys.executable, "-c", "print('ok')"],
+        cwd=tmp_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        plan_hash="plan",
+        command_hash="token",
+        cancellation_token=ProcessCancellationToken(),
+    )
+
+    assert result.succeeded is True
 
 
 def test_managed_process_streams_stdout_and_stderr_to_separate_logs(tmp_path: Path) -> None:

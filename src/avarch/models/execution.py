@@ -3,6 +3,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from threading import Event, Lock
+
+
+class ProcessCancellationToken:
+    def __init__(self) -> None:
+        self._event = Event()
+        self._lock = Lock()
+        self._reason: str | None = None
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def reason(self) -> str | None:
+        with self._lock:
+            return self._reason
+
+    def request(self, reason: str | None = None) -> bool:
+        with self._lock:
+            if self._event.is_set():
+                return False
+            self._reason = reason
+            self._event.set()
+            return True
+
+    def wait(self, *, timeout_seconds: float | None = None) -> bool:
+        return self._event.wait(timeout_seconds)
 
 
 class ProcessTerminationReason(StrEnum):
