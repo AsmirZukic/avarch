@@ -1,0 +1,6 @@
+ INFO Generating VapourSynth cache file
+ INFO encode_file: Input: 160x90 @ 24.000 fps, 8 BPC, SDR
+ INFO encode_file: encoding resumed with 1/1 chunks completed (0 remaining)
+ INFO encode_file: 
+Queue 0 Workers 0 Encoder svt-av1 Passes 1
+Params: --preset 10 --crf 55
