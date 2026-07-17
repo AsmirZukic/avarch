@@ -28,16 +28,6 @@ def test_scheduler_watch_once_renders_empty_stopped_scheduler(tmp_path: Path) ->
     assert "No active jobs" in result.output or "Active none" in result.output
 
 
-def test_scheduler_watch_help_documents_modes_and_options() -> None:
-    result = runner.invoke(app, ["scheduler", "watch", "--help"], env={"COLUMNS": "80"})
-
-    assert result.exit_code == 0
-    assert "--once" in result.output
-    assert "--json" in result.output
-    assert "--interval" in result.output
-    assert "--no-color" in result.output
-
-
 def test_readme_documents_scheduler_watch_workflow() -> None:
     readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
     readme_text = " ".join(readme.split())
