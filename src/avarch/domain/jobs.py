@@ -69,6 +69,10 @@ class AttemptStatus(StrEnum):
 
 
 class JobEventType(StrEnum):
+    STAGE_STARTED = "stage_started"
+    STAGE_COMPLETED = "stage_completed"
+    STAGE_FAILED = "stage_failed"
+    STAGE_CANCELLED = "stage_cancelled"
     HOLD_REQUESTED = "hold_requested"
     HELD = "held"
     HOLD_RELEASED = "hold_released"
