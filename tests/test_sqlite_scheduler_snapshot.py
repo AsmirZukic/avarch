@@ -150,7 +150,141 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.frames_total == 100
     assert snapshot.active_jobs[0].attempt.eta_seconds == 30
     assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
-    assert query_count <= 6
+    assert query_count <= 9
+
+
+def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligible(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        _job(
+            session,
+            path="/media/third.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=10,
+            created_at=now - timedelta(minutes=3),
+            profile_name="slow-av1",
+        )
+        _job(
+            session,
+            path="/media/first.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.PLAN,
+            priority=20,
+            created_at=now - timedelta(minutes=1),
+            profile_name="fast-av1",
+        )
+        _job(
+            session,
+            path="/media/second.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.PROBE,
+            priority=20,
+            created_at=now,
+            profile_name="fast-av1",
+        )
+        _job(
+            session,
+            path="/media/fourth.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=1,
+            created_at=now - timedelta(minutes=4),
+        )
+        _job(
+            session,
+            path="/media/held.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=100,
+            hold_requested_at=now,
+        )
+        _job(
+            session,
+            path="/media/cancel-requested.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=100,
+            cancel_requested_at=now,
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    assert [job.source_path for job in snapshot.upcoming_jobs] == [
+        "/media/first.mkv",
+        "/media/second.mkv",
+        "/media/third.mkv",
+    ]
+    assert [job.selection_position for job in snapshot.upcoming_jobs] == [1, 2, 3]
+    assert snapshot.upcoming_jobs[0].profile_name == "fast-av1"
+    assert snapshot.upcoming_jobs[0].selection_confidence == "current_snapshot"
+    assert all("held" not in job.source_path for job in snapshot.upcoming_jobs)
+    assert all("cancel-requested" not in job.source_path for job in snapshot.upcoming_jobs)
+
+
+def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        session.add(
+            SchedulerState(
+                id=1,
+                mode=SchedulerMode.RUNNING,
+                runner_id="scheduler-1",
+                heartbeat_at=(now - timedelta(minutes=5)).replace(tzinfo=None),
+                lease_expires_at=(now - timedelta(minutes=4)).replace(tzinfo=None),
+                updated_at=(now - timedelta(minutes=5)).replace(tzinfo=None),
+            )
+        )
+        session.commit()
+
+        stale = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+        state = session.get(SchedulerState, 1)
+        assert state is not None
+        state.runner_id = None
+        state.mode = SchedulerMode.PAUSED
+        session.add(state)
+        session.commit()
+
+        paused = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+        state.mode = SchedulerMode.DRAINING
+        session.add(state)
+        session.commit()
+
+        draining = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    assert stale.scheduler.state.value == "stale"
+    assert [alert.code for alert in stale.alerts] == ["stale_scheduler_lease"]
+    assert paused.scheduler.state.value == "paused"
+    assert [alert.code for alert in paused.alerts] == ["scheduler_paused"]
+    assert draining.scheduler.state.value == "draining"
+    assert [alert.code for alert in draining.alerts] == ["scheduler_draining"]
+    assert stale.resources is None
+    assert stale.forecast is None
+    assert stale.recent_events == ()
 
 
 def test_scheduler_snapshot_reports_stopped_when_no_scheduler_process(tmp_path: Path) -> None:
@@ -182,8 +316,12 @@ def _job(
     stage: JobStage,
     priority: int = 0,
     started_at: datetime | None = None,
+    created_at: datetime | None = None,
+    profile_name: str = "default",
+    hold_requested_at: datetime | None = None,
+    cancel_requested_at: datetime | None = None,
 ) -> Job:
-    now = datetime(2026, 7, 17, 11, 0, tzinfo=UTC)
+    now = created_at or datetime(2026, 7, 17, 11, 0, tzinfo=UTC)
     media = MediaFile(
         path=path,
         size_bytes=100,
@@ -199,7 +337,7 @@ def _job(
     session.flush()
     job = Job(
         media_file_id=media.id or 0,
-        profile_name="default",
+        profile_name=profile_name,
         profile_hash="profile",
         source_fs_fingerprint=media.fs_fingerprint,
         queue_key=f"queue-{path}",
@@ -209,6 +347,10 @@ def _job(
         created_at=now.replace(tzinfo=None),
         updated_at=now.replace(tzinfo=None),
         started_at=started_at.replace(tzinfo=None) if started_at else None,
+        hold_requested_at=hold_requested_at.replace(tzinfo=None) if hold_requested_at else None,
+        cancel_requested_at=cancel_requested_at.replace(tzinfo=None)
+        if cancel_requested_at
+        else None,
     )
     session.add(job)
     session.flush()
