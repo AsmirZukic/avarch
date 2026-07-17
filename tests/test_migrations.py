@@ -25,6 +25,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0005_job_state_version.py",
         "0006_job_attempt_progress.py",
         "0007_structured_attempt_progress.py",
+        "0008_scheduler_sessions_and_lifecycle_events.py",
     ]
 
 
@@ -87,10 +88,18 @@ def test_job_attempt_progress_revision_depends_on_job_state_version() -> None:
 
 def test_structured_attempt_progress_revision_depends_on_attempt_progress() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0007_structured_attempt_progress")
 
     assert revision is not None
     assert revision.down_revision == "0006_job_attempt_progress"
+
+
+def test_scheduler_sessions_revision_depends_on_structured_attempt_progress() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0007_structured_attempt_progress"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -107,6 +116,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
         "proberesult",
         "job",
         "jobattempt",
+        "scheduler_session",
         "job_attempt_progress",
         "mediaplan",
         "promotionrecord",
@@ -203,6 +213,24 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
         columns=["attempt_id"],
         referred_table="jobattempt",
     )
+    assert _has_foreign_key(
+        inspector,
+        table="jobattempt",
+        columns=["scheduler_session_id"],
+        referred_table="scheduler_session",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="jobevent",
+        columns=["attempt_id"],
+        referred_table="jobattempt",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="jobevent",
+        columns=["scheduler_session_id"],
+        referred_table="scheduler_session",
+    )
 
 
 def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
@@ -238,6 +266,51 @@ def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
     assert columns["advanced_at"]["nullable"] is True
     assert columns["created_at"]["nullable"] is False
     assert columns["updated_at"]["nullable"] is False
+
+
+def test_scheduler_session_columns_match_contract(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    columns = {
+        column["name"]: column
+        for column in inspector.get_columns("scheduler_session")
+    }
+    primary_key = inspector.get_pk_constraint("scheduler_session")
+
+    assert primary_key["constrained_columns"] == ["id"]
+    assert columns["owner_id"]["nullable"] is False
+    assert columns["workspace_id"]["nullable"] is False
+    assert columns["pid"]["nullable"] is True
+    assert columns["host"]["nullable"] is False
+    assert columns["started_at"]["nullable"] is False
+    assert columns["ended_at"]["nullable"] is True
+    assert columns["end_reason"]["nullable"] is True
+
+
+def test_lifecycle_metadata_columns_are_nullable_for_historical_rows(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    attempt_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("jobattempt")
+    }
+    event_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("jobevent")
+    }
+
+    assert attempt_columns["scheduler_session_id"]["nullable"] is True
+    assert event_columns["attempt_id"]["nullable"] is True
+    assert event_columns["scheduler_session_id"]["nullable"] is True
+    assert event_columns["stage"]["nullable"] is True
+    assert event_columns["details_json"]["nullable"] is True
+    assert event_columns["dedupe_key"]["nullable"] is True
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
@@ -444,6 +517,68 @@ def test_upgrade_from_attempt_progress_adds_nullable_structured_metrics(
 
     assert columns["chunks_current"]["nullable"] is True
     assert row == (12.0, None, None, None, None, None)
+
+
+def test_upgrade_from_structured_progress_preserves_attempts_and_job_events(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+    config = _alembic_config(database_url)
+    now = datetime(2026, 7, 1, tzinfo=UTC)
+
+    command.upgrade(config, "0007_structured_attempt_progress")
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        media_id = _insert(connection, "mediafile", _media_values(now))
+        probe_id = _insert(connection, "proberesult", _probe_values(media_id, now))
+        job_id = _insert(connection, "job", _job_values(media_id, probe_id, now))
+        attempt_id = _insert(connection, "jobattempt", _attempt_values(job_id, now))
+        event_id = _insert(
+            connection,
+            "jobevent",
+            {
+                "job_id": job_id,
+                "event_type": "hold_requested",
+                "actor": "operator",
+                "reason": "pause",
+                "details_json": '{"kind":"control","count":1}',
+                "created_at": now,
+            },
+        )
+
+    upgrade_database(database_url)
+
+    with create_db_engine(database_url).connect() as connection:
+        attempt = connection.execute(
+            sa.text(
+                """
+                SELECT id, scheduler_session_id
+                FROM jobattempt
+                WHERE id = :attempt_id
+                """
+            ),
+            {"attempt_id": attempt_id},
+        ).one()
+        event = connection.execute(
+            sa.text(
+                """
+                SELECT id, attempt_id, scheduler_session_id, stage, details_json, dedupe_key
+                FROM jobevent
+                WHERE id = :event_id
+                """
+            ),
+            {"event_id": event_id},
+        ).one()
+
+    assert attempt == (attempt_id, None)
+    assert event == (
+        event_id,
+        None,
+        None,
+        None,
+        '{"kind":"control","count":1}',
+        None,
+    )
 
 
 def test_alembic_has_one_head() -> None:
