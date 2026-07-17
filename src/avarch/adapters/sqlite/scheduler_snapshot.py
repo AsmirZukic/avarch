@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+from sqlalchemy import func
+from sqlmodel import Session, col, select
+
+from avarch.adapters.sqlite.models import (
+    Job,
+    JobAttempt,
+    JobAttemptProgress,
+    MediaFile,
+    SchedulerState,
+)
+from avarch.adapters.sqlite.scheduler_state import lease_active
+from avarch.application.scheduler_snapshot import (
+    ActiveJobSummary,
+    AttemptProgressSummary,
+    CapacitySummary,
+    PipelineSummary,
+    SchedulerRuntimeState,
+    SchedulerRuntimeSummary,
+    SchedulerSnapshot,
+    WorkspaceSummary,
+    project_workflow_steps,
+)
+from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
+from avarch.domain.progress import ProgressUnit
+from avarch.domain.scheduler import SchedulerMode
+
+
+_ACTIVE_STATUSES = {
+    JobStatus.ENCODING,
+    JobStatus.VALIDATING,
+    JobStatus.PROMOTING,
+    JobStatus.CLEANING,
+}
+
+
+class SqliteSchedulerSnapshotQuery:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        workspace_root: str,
+        database_url: str | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._session = session
+        self._workspace_root = workspace_root
+        self._database_url = database_url
+        self._now = now or (lambda: datetime.now(UTC))
+
+    def snapshot(self) -> SchedulerSnapshot:
+        captured_at = self._now()
+        return SchedulerSnapshot(
+            captured_at=captured_at,
+            workspace=WorkspaceSummary(
+                root_path=self._workspace_root,
+                database_url=self._database_url,
+            ),
+            scheduler=self._scheduler_summary(now=captured_at),
+            pipeline=self._pipeline_summary(),
+            active_jobs=self._active_jobs(captured_at=captured_at),
+            capacity=CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0),
+        )
+
+    def _scheduler_summary(self, *, now: datetime) -> SchedulerRuntimeSummary:
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.runner_id is None:
+            return SchedulerRuntimeSummary(state=SchedulerRuntimeState.STOPPED)
+
+        mode = SchedulerMode(state.mode)
+        stale = not lease_active(state, now=now)
+        runtime_state = SchedulerRuntimeState.STALE if stale else SchedulerRuntimeState(mode.value)
+        return SchedulerRuntimeSummary(
+            state=runtime_state,
+            mode=mode,
+            owner_id=state.runner_id,
+            heartbeat_at=state.heartbeat_at,
+            stale=stale,
+        )
+
+    def _pipeline_summary(self) -> PipelineSummary:
+        counts = {status: 0 for status in JobStatus}
+        rows = self._session.exec(select(Job.status, func.count()).group_by(Job.status)).all()
+        for status, count in rows:
+            counts[JobStatus(status)] = int(count)
+
+        return PipelineSummary(
+            queued=counts[JobStatus.QUEUED],
+            active=sum(counts[status] for status in _ACTIVE_STATUSES),
+            encoded=counts[JobStatus.ENCODED],
+            validating=counts[JobStatus.VALIDATING],
+            ready_to_promote=counts[JobStatus.READY_TO_PROMOTE],
+            promoting=counts[JobStatus.PROMOTING],
+            cleaning=counts[JobStatus.CLEANING],
+            completed=counts[JobStatus.PROMOTED],
+            failed=counts[JobStatus.FAILED],
+            validation_failed=counts[JobStatus.VALIDATION_FAILED],
+            size_rejected=counts[JobStatus.SIZE_REJECTED],
+            cancelled=counts[JobStatus.CANCELLED],
+            held=counts[JobStatus.HELD],
+        )
+
+    def _active_jobs(self, *, captured_at: datetime) -> tuple[ActiveJobSummary, ...]:
+        rows = list(
+            self._session.exec(
+                select(Job, MediaFile)
+                .join(MediaFile, MediaFile.id == Job.media_file_id)
+                .where(col(Job.status).in_(_ACTIVE_STATUSES))
+                .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
+            ).all()
+        )
+        job_ids = tuple(job.id for job, _media in rows if job.id is not None)
+        attempts_by_job = self._latest_attempts_by_job(job_ids)
+        progress_by_attempt = self._progress_by_attempt(
+            tuple(
+                attempt.id
+                for attempt in attempts_by_job.values()
+                if attempt.id is not None
+            )
+        )
+        return tuple(
+            _active_job_summary(
+                job=job,
+                media_file=media_file,
+                attempt=attempts_by_job.get(job.id),
+                progress=progress_by_attempt.get(attempts_by_job[job.id].id)
+                if job.id in attempts_by_job and attempts_by_job[job.id].id is not None
+                else None,
+                captured_at=captured_at,
+            )
+            for job, media_file in rows
+            if job.id is not None
+        )
+
+    def _latest_attempts_by_job(self, job_ids: tuple[int, ...]) -> dict[int, JobAttempt]:
+        if not job_ids:
+            return {}
+        attempts = list(
+            self._session.exec(
+                select(JobAttempt)
+                .where(col(JobAttempt.job_id).in_(job_ids))
+                .order_by(
+                    col(JobAttempt.job_id).asc(),
+                    col(JobAttempt.attempt_number).desc(),
+                    col(JobAttempt.id).desc(),
+                )
+            ).all()
+        )
+        latest: dict[int, JobAttempt] = {}
+        for attempt in attempts:
+            latest.setdefault(attempt.job_id, attempt)
+        return latest
+
+    def _progress_by_attempt(
+        self,
+        attempt_ids: tuple[int, ...],
+    ) -> dict[int, JobAttemptProgress]:
+        if not attempt_ids:
+            return {}
+        return {
+            progress.attempt_id: progress
+            for progress in self._session.exec(
+                select(JobAttemptProgress).where(col(JobAttemptProgress.attempt_id).in_(attempt_ids))
+            ).all()
+        }
+
+
+def _active_job_summary(
+    *,
+    job: Job,
+    media_file: MediaFile,
+    attempt: JobAttempt | None,
+    progress: JobAttemptProgress | None,
+    captured_at: datetime,
+) -> ActiveJobSummary:
+    attempt_status = AttemptStatus(attempt.status) if attempt is not None else None
+    return ActiveJobSummary(
+        job_id=_required_id(job.id),
+        source_path=media_file.path,
+        profile_name=job.profile_name,
+        status=JobStatus(job.status),
+        stage=JobStage(job.stage),
+        priority=job.priority,
+        queued_at=job.created_at,
+        started_at=job.started_at,
+        attempt=_attempt_progress_summary(
+            attempt=attempt,
+            progress=progress,
+            captured_at=captured_at,
+        )
+        if attempt is not None
+        else None,
+        workflow_steps=project_workflow_steps(
+            job_status=JobStatus(job.status),
+            job_stage=JobStage(job.stage),
+            attempt_status=attempt_status,
+        ),
+    )
+
+
+def _attempt_progress_summary(
+    *,
+    attempt: JobAttempt,
+    progress: JobAttemptProgress | None,
+    captured_at: datetime,
+) -> AttemptProgressSummary:
+    frames_current: int | None = None
+    frames_total: int | None = None
+    rate_per_second: float | None = None
+    speed_ratio: float | None = None
+    observed_at: datetime | None = None
+    eta_seconds: int | None = None
+    if progress is not None:
+        if progress.unit == ProgressUnit.FRAMES:
+            frames_current = _int_or_none(progress.current_value)
+            frames_total = _int_or_none(progress.total_value)
+        rate_per_second = progress.rate_per_second
+        speed_ratio = progress.speed_ratio
+        observed_at = progress.observed_at
+        eta_seconds = _eta_seconds(
+            current=progress.current_value,
+            total=progress.total_value,
+            rate_per_second=progress.rate_per_second,
+        )
+    return AttemptProgressSummary(
+        attempt_id=_required_id(attempt.id),
+        attempt_number=attempt.attempt_number,
+        status=AttemptStatus(attempt.status),
+        frames_current=frames_current,
+        frames_total=frames_total,
+        rate_per_second=rate_per_second,
+        speed_ratio=speed_ratio,
+        eta_seconds=eta_seconds,
+        elapsed_seconds=_elapsed_seconds(started_at=attempt.started_at, now=captured_at),
+        observed_at=observed_at,
+    )
+
+
+def _eta_seconds(
+    *,
+    current: float | None,
+    total: float | None,
+    rate_per_second: float | None,
+) -> int | None:
+    if current is None or total is None or rate_per_second is None or rate_per_second <= 0:
+        return None
+    remaining = max(0.0, total - current)
+    return int(remaining / rate_per_second)
+
+
+def _elapsed_seconds(*, started_at: datetime, now: datetime) -> int:
+    delta = now.replace(tzinfo=None) - started_at.replace(tzinfo=None)
+    return max(0, int(delta.total_seconds()))
+
+
+def _int_or_none(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _required_id(value: int | None) -> int:
+    if value is None:
+        raise ValueError("Expected persisted row id")
+    return value
