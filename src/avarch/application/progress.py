@@ -152,39 +152,43 @@ class ProgressPersistenceThrottle:
         self._last_published_at: float | None = None
         self._last_phase: ProgressPhase | None = None
         self._closed = False
+        self._lock = Lock()
 
     def publish(self, snapshot: ProgressSnapshot) -> None:
-        if self._closed:
-            return
-        if self._should_publish_immediately(snapshot):
-            snapshot_to_publish = _coalesce_ordinary_snapshot(
+        with self._lock:
+            if self._closed:
+                return
+            if self._should_publish_immediately(snapshot):
+                snapshot_to_publish = _coalesce_ordinary_snapshot(
+                    self._pending_ordinary,
+                    snapshot,
+                )
+                self._pending_ordinary = None
+                self._publish_now(snapshot_to_publish)
+                return
+            self._pending_ordinary = _coalesce_ordinary_snapshot(
                 self._pending_ordinary,
                 snapshot,
             )
-            self._pending_ordinary = None
-            self._publish_now(snapshot_to_publish)
-            return
-        self._pending_ordinary = _coalesce_ordinary_snapshot(
-            self._pending_ordinary,
-            snapshot,
-        )
 
     def flush_due(self) -> bool:
-        if self._pending_ordinary is None or self._last_published_at is None:
-            return False
-        if self._clock() - self._last_published_at < self._interval_seconds:
-            return False
-        snapshot = self._pending_ordinary
-        self._pending_ordinary = None
-        return self._publish_now(snapshot)
+        with self._lock:
+            if self._pending_ordinary is None or self._last_published_at is None:
+                return False
+            if self._clock() - self._last_published_at < self._interval_seconds:
+                return False
+            snapshot = self._pending_ordinary
+            self._pending_ordinary = None
+            return self._publish_now(snapshot)
 
     def close(self) -> bool:
-        self._closed = True
-        if self._pending_ordinary is None:
-            return False
-        snapshot = self._pending_ordinary
-        self._pending_ordinary = None
-        return self._publish_now(snapshot)
+        with self._lock:
+            self._closed = True
+            if self._pending_ordinary is None:
+                return False
+            snapshot = self._pending_ordinary
+            self._pending_ordinary = None
+            return self._publish_now(snapshot)
 
     def _should_publish_immediately(self, snapshot: ProgressSnapshot) -> bool:
         if self._last_phase is None:

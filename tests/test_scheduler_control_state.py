@@ -13,11 +13,13 @@ from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, Sched
 from avarch.adapters.sqlite.scheduler_state import (
     SCHEDULER_LEASE_SECONDS,
     SchedulerAlreadyRunningError,
+    SchedulerCapacityUsage,
     SchedulerControlError,
     acquire_scheduler_lease,
     drain_scheduler,
     pause_scheduler,
     release_scheduler_lease,
+    renew_scheduler_lease,
     resume_scheduler,
     stop_scheduler,
 )
@@ -347,6 +349,110 @@ def test_acquired_lease_sets_expected_expiry(tmp_path: Path) -> None:
     assert state.lease_expires_at == (now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)).replace(
         tzinfo=None
     )
+
+
+def test_scheduler_heartbeat_persists_capacity_usage(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        acquire_scheduler_lease(
+            session,
+            runner_id="runner",
+            now=now,
+            capacity=SchedulerCapacityUsage(
+                cheap_workers=2,
+                cheap_active=0,
+                av1an_jobs=1,
+                av1an_active=0,
+                file_ops=1,
+                file_ops_active=0,
+            ),
+        )
+    with Session(engine) as session, session.begin():
+        renew_scheduler_lease(
+            session,
+            runner_id="runner",
+            now=now + timedelta(seconds=1),
+            capacity=SchedulerCapacityUsage(
+                cheap_workers=2,
+                cheap_active=1,
+                av1an_jobs=1,
+                av1an_active=1,
+                file_ops=1,
+                file_ops_active=0,
+            ),
+        )
+
+    with Session(engine) as session:
+        state = session.get(SchedulerState, 1)
+
+    assert state is not None
+    assert state.capacity_cheap_workers == 2
+    assert state.capacity_cheap_active == 1
+    assert state.capacity_av1an_jobs == 1
+    assert state.capacity_av1an_active == 1
+    assert state.capacity_file_ops == 1
+    assert state.capacity_file_ops_active == 0
+    assert state.capacity_observed_at == (now + timedelta(seconds=1)).replace(tzinfo=None)
+
+
+def test_release_clears_live_capacity_usage(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        acquire_scheduler_lease(
+            session,
+            runner_id="runner",
+            now=now,
+            capacity=SchedulerCapacityUsage(
+                cheap_workers=2,
+                cheap_active=1,
+                av1an_jobs=1,
+                av1an_active=1,
+                file_ops=1,
+                file_ops_active=1,
+            ),
+        )
+        release_scheduler_lease(session, runner_id="runner", now=now + timedelta(seconds=2))
+
+    with Session(engine) as session:
+        state = session.get(SchedulerState, 1)
+
+    assert state is not None
+    assert state.runner_id is None
+    assert state.capacity_cheap_active == 0
+    assert state.capacity_av1an_active == 0
+    assert state.capacity_file_ops_active == 0
+
+
+def test_stale_capacity_usage_remains_persisted_for_watchers(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        acquire_scheduler_lease(
+            session,
+            runner_id="runner",
+            now=now - timedelta(minutes=2),
+            capacity=SchedulerCapacityUsage(
+                cheap_workers=2,
+                cheap_active=1,
+                av1an_jobs=1,
+                av1an_active=1,
+                file_ops=1,
+                file_ops_active=0,
+            ),
+        )
+
+    with Session(engine) as session:
+        state = session.get(SchedulerState, 1)
+
+    assert state is not None
+    assert state.lease_expires_at < now.replace(tzinfo=None)
+    assert state.capacity_cheap_active == 1
+    assert state.capacity_av1an_active == 1
 
 
 def _engine(tmp_path: Path) -> Engine:

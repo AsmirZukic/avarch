@@ -100,6 +100,11 @@ from avarch.application.queue_control import (
     retry_job,
     retry_queue,
 )
+from avarch.application.resource_telemetry import (
+    ResourceSampler,
+    apply_resource_health,
+    safe_sample_resources,
+)
 from avarch.application.scheduler_control import (
     SchedulerControlWorkflowError,
     drain_scheduler,
@@ -125,7 +130,14 @@ from avarch.application.scheduler_run import (
     new_runner_id,
     run_scheduler,
 )
+from avarch.application.scheduler_snapshot import SchedulerSnapshot, resource_telemetry_summary
 from avarch.application.scheduler_status import scheduler_status
+from avarch.application.scheduler_watch import (
+    SchedulerWatchLoop,
+    validate_live_watch_terminal,
+)
+from avarch.application.scheduler_watch_controller import SchedulerWatchController, WatchLogPaths
+from avarch.application.scheduler_watch_keys import PosixKeySource
 from avarch.application.validation_summary import format_validation_report_summary
 from avarch.application.vapoursynth_environment import (
     VapourSynthEnvironmentWorkflowError,
@@ -187,7 +199,9 @@ from avarch.bootstrap import (
     queue_retry_store,
     scheduler_control_store,
     scheduler_process_controller,
+    scheduler_resource_sampler,
     scheduler_runner,
+    scheduler_snapshot_query,
     scheduler_status_store,
     upgrade_database_schema,
     vapoursynth_environment_adapters,
@@ -223,15 +237,15 @@ from avarch.config import (
     load_config,
     resolve_data_dir,
 )
-from avarch.domain.jobs import (
-    JobStage,
-    JobStatus,
-    ManualValidationAction,
-)
+from avarch.domain.jobs import JobStage, JobStatus, ManualValidationAction
 from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
+from avarch.presentation.scheduler_dashboard import (
+    DashboardMode,
+    render_scheduler_dashboard,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -669,6 +683,36 @@ def run_queue(
     runtime_config = cli_workspace.runtime_config
     workspace = cli_workspace.workspace
 
+    if (
+        not detached
+        and not managed_child
+        and _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty())
+    ):
+        child_argv = ["scheduler", "run"]
+        if resume:
+            child_argv.append("--resume")
+        if not promote:
+            child_argv.append("--no-promote")
+        try:
+            launch_detached(
+                scheduler_process_controller(),
+                workspace=workspace,
+                argv=child_argv,
+            )
+        except SchedulerLifecycleError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        asyncio.run(
+            _run_scheduler_watch_live(
+                database_url=database_url,
+                workspace_root=cli_workspace.workspace_root,
+                interval_seconds=DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+                no_color=os.environ.get("NO_COLOR") is not None,
+                owner=True,
+            )
+        )
+        return
+
     if detached and not managed_child:
         child_argv = ["scheduler", "run"]
         if resume:
@@ -719,6 +763,7 @@ def run_queue(
         summary = asyncio.run(
             _run_scheduler_with_optional_live_progress(
                 database_url=database_url,
+                workspace_root=cli_workspace.workspace_root,
                 runtime_config=runtime_config,
                 runner_id=runner_id,
                 resume=resume,
@@ -751,6 +796,7 @@ def run_queue(
 async def _run_scheduler_with_optional_live_progress(
     *,
     database_url: str,
+    workspace_root: Path,
     runtime_config: AppConfig,
     runner_id: str,
     resume: bool,
@@ -763,6 +809,7 @@ async def _run_scheduler_with_optional_live_progress(
         else {
             JobStage.PROBE,
             JobStage.PLAN,
+            JobStage.SCENE_DETECT,
             JobStage.ENCODE,
             JobStage.VALIDATE,
             JobStage.CLEANUP,
@@ -779,7 +826,9 @@ async def _run_scheduler_with_optional_live_progress(
     if not _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty()):
         return await scheduler_task
 
-    monitor_task = asyncio.create_task(_render_scheduler_live_progress(database_url))
+    monitor_task = asyncio.create_task(
+        _render_scheduler_live_progress(database_url, workspace_root=workspace_root)
+    )
     try:
         return await scheduler_task
     finally:
@@ -796,12 +845,32 @@ def _scheduler_live_progress_enabled(
     return mode == "foreground" and stdout_is_tty
 
 
-async def _render_scheduler_live_progress(database_url: str) -> None:
+async def _render_scheduler_live_progress(database_url: str, *, workspace_root: Path) -> None:
     color = os.environ.get("NO_COLOR") is None
     console = Console(file=sys.stdout, color_system="auto" if color else None)
-    with Live(console=console, refresh_per_second=4, transient=False) as live:
+    query = _LiveSchedulerSnapshotQuery(database_url=database_url, workspace_root=workspace_root)
+    resource_sampler = scheduler_resource_sampler(database_url=database_url, clock=_utc_now)
+    with Live(
+        console=console,
+        auto_refresh=False,
+        transient=False,
+        screen=True,
+    ) as live:
         while True:
-            live.update(_scheduler_progress_renderable(_active_scheduler_progress_rows(database_url)))
+            snapshot = _snapshot_with_resource_telemetry(
+                query.snapshot(),
+                sampler=resource_sampler,
+            )
+            live.update(
+                render_scheduler_dashboard(
+                    snapshot,
+                    width=console.width,
+                    mode=DashboardMode.OWNER,
+                    height=console.height,
+                    shortcuts_available=False,
+                ),
+                refresh=True,
+            )
             await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
 
 
@@ -886,6 +955,7 @@ def queue_retry_command(
     typer.echo(f"Requires requeue:  {summary.requires_requeue}")
     typer.echo(f"Resume probe:      {summary.reset_to_probe}")
     typer.echo(f"Resume plan:       {summary.reset_to_plan}")
+    typer.echo(f"Resume scenes:     {summary.reset_to_scene_detect}")
     typer.echo(f"Resume encode:     {summary.reset_to_encode}")
     typer.echo(f"Resume validate:   {summary.reset_to_validate}")
     typer.echo(f"Return to promote: {summary.return_to_promote}")
@@ -1000,6 +1070,209 @@ def stop_scheduler_command(
     ):
         typer.echo("Timed out waiting for scheduler stop.")
         raise typer.Exit(1)
+
+
+@scheduler_app.command("watch")
+def scheduler_watch_command(
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Print one scheduler snapshot and exit."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print one machine-readable scheduler snapshot."),
+    ] = False,
+    interval: Annotated[
+        float,
+        typer.Option("--interval", help="Polling interval for live watch mode."),
+    ] = DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable terminal colours."),
+    ] = False,
+    owner: Annotated[
+        bool,
+        typer.Option("--owner", help="Internal owner dashboard mode.", hidden=True),
+    ] = False,
+) -> None:
+    if json_output:
+        once = True
+    if not once:
+        try:
+            validate_live_watch_terminal(stdout_is_tty=sys.stdout.isatty())
+        except RuntimeError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        cli_workspace = _load_cli_workspace()
+        asyncio.run(
+            _run_scheduler_watch_live(
+                database_url=cli_workspace.database_url,
+                workspace_root=cli_workspace.workspace_root,
+                interval_seconds=interval,
+                no_color=no_color,
+                owner=owner,
+            )
+        )
+        return
+
+    cli_workspace = _load_cli_workspace()
+    with db_session(cli_workspace.database_url) as session:
+        snapshot = scheduler_snapshot_query(
+            session,
+            workspace_root=cli_workspace.workspace_root,
+            database_url=cli_workspace.database_url,
+            now=_utc_now,
+        ).snapshot()
+
+    if json_output:
+        typer.echo(snapshot.to_canonical_json())
+        return
+
+    snapshot = _snapshot_with_resource_telemetry(
+        snapshot,
+        sampler=scheduler_resource_sampler(database_url=cli_workspace.database_url, clock=_utc_now),
+    )
+
+    console = Console(
+        file=sys.stdout,
+        color_system=None if no_color else "auto",
+        force_terminal=False,
+    )
+    console.print(
+        render_scheduler_dashboard(
+            snapshot,
+            width=console.width,
+            mode=DashboardMode.OBSERVER,
+        )
+    )
+
+
+async def _run_scheduler_watch_live(
+    *,
+    database_url: str,
+    workspace_root: Path,
+    interval_seconds: float,
+    no_color: bool,
+    owner: bool = False,
+) -> None:
+    console = Console(file=sys.stdout, color_system=None if no_color else "auto")
+    query = _LiveSchedulerSnapshotQuery(
+        database_url=database_url,
+        workspace_root=workspace_root,
+    )
+    with PosixKeySource() as key_source, Live(
+        console=console,
+        auto_refresh=False,
+        transient=False,
+        screen=True,
+    ) as live:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, width: render_scheduler_dashboard(
+                snapshot,
+                width=width,
+                mode=DashboardMode.OWNER if owner else DashboardMode.OBSERVER,
+                height=console.height,
+                shortcuts_available=key_source.supported,
+            ),
+            sink=_LiveSchedulerWatchSink(live),
+            interval_seconds=interval_seconds,
+            terminal_width=lambda: console.width,
+            resource_sampler=scheduler_resource_sampler(
+                database_url=database_url,
+                clock=_utc_now,
+            ),
+            key_source=key_source,
+            watch_controller=_LiveSchedulerWatchController(database_url=database_url),
+            ctrl_c_stops_scheduler=owner,
+            stop_when_scheduler_stops=owner,
+        )
+        await loop.run()
+
+
+class _LiveSchedulerSnapshotQuery:
+    def __init__(self, *, database_url: str, workspace_root: Path) -> None:
+        self._database_url = database_url
+        self._workspace_root = workspace_root
+
+    def snapshot(self):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return scheduler_snapshot_query(
+                session,
+                workspace_root=self._workspace_root,
+                database_url=self._database_url,
+                now=_utc_now,
+            ).snapshot()
+
+
+class _LiveSchedulerWatchSink:
+    def __init__(self, live: Live) -> None:
+        self._live = live
+
+    def render(self, renderable: RenderableType) -> None:
+        self._live.update(renderable, refresh=True)
+
+
+class _LiveSchedulerWatchController:
+    def __init__(self, *, database_url: str) -> None:
+        self._database_url = database_url
+        self._actor = cli_actor()
+
+    def pause(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).pause(reason=reason)
+
+    def resume(self):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).resume()
+
+    def cancel(self, *, job_id: int, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).cancel(job_id=job_id, reason=reason)
+
+    def details(self, *, job_id: int):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return self._controller(session).details(job_id=job_id)
+
+    def log_paths(self, *, job_id: int, attempt_number: int | None = None) -> WatchLogPaths:
+        with db_session(self._database_url) as session:
+            return self._controller(session).log_paths(
+                job_id=job_id,
+                attempt_number=attempt_number,
+            )
+
+    def detach(self):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return self._controller(session).detach()
+
+    def stop(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).stop(reason=reason)
+
+    def _controller(self, session):  # type: ignore[no-untyped-def]
+        return SchedulerWatchController(
+            scheduler_store=scheduler_control_store(session),
+            job_store=job_control_store(session),
+            job_view_store=job_view_store(session),
+            actor=self._actor,
+            clock=_utc_now,
+        )
+
+
+def _snapshot_with_resource_telemetry(
+    snapshot: SchedulerSnapshot, *, sampler: ResourceSampler
+) -> SchedulerSnapshot:
+    sample = safe_sample_resources(sampler, clock=lambda: snapshot.captured_at)
+    sample = apply_resource_health(sample)
+    return snapshot.model_copy(
+        update={
+            "resources": resource_telemetry_summary(
+                sample,
+                captured_at=snapshot.captured_at,
+                stale_after_seconds=10,
+            )
+        }
+    )
 
 
 @scheduler_app.command("status")

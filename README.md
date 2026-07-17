@@ -38,7 +38,7 @@ Jump to [Profiles and VapourSynth Templates](#profiles-and-vapoursynth-templates
 
 ## Alpha Safety Callout
 
-**Avarch is currently in v0.1-alpha.** The core encoding workflow is available,
+**Avarch is currently in v0.2-alpha.** The core encoding workflow is available,
 and your source media remains safe: Avarch builds and validates new output
 separately instead of encoding over the original. Some commands, configuration
 fields, and workspace formats may still change before the first stable release.
@@ -78,7 +78,7 @@ Install a semver-tagged image by setting `AVARCH_VERSION`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | \
-	AVARCH_VERSION=0.1.0 sh
+	AVARCH_VERSION=0.2.0 sh
 ```
 
 Use a full custom image by setting `AVARCH_IMAGE` for the install command:
@@ -99,7 +99,7 @@ avarch --version
 `avarch --version` should print:
 
 ```text
-0.1.0
+0.2.0
 ```
 
 ### What Gets Installed
@@ -123,7 +123,7 @@ installer to refresh the wrapper and pull the configured image again.
 Implemented version selection uses `AVARCH_IMAGE`:
 
 ```sh
-AVARCH_IMAGE=docker.io/asmir100/avarch:0.1.0 avarch --version
+AVARCH_IMAGE=docker.io/asmir100/avarch:0.2.0 avarch --version
 ```
 
 To stop using the wrapper, remove the installed `avarch` command from your
@@ -182,10 +182,9 @@ avarch enqueue
 avarch scheduler run
 ```
 
-Leave `avarch scheduler run` running while it works. With the current one-shot
-wrapper, foreground scheduler mode is the reliable normal path. Native execution
-can use `avarch scheduler run -d`; detached container usage is documented in
-[Advanced: Running Avarch Directly With Docker](#advanced-running-avarch-directly-with-docker).
+`avarch scheduler run` opens the interactive owner dashboard. Press `d` or `q`
+to detach while the scheduler keeps encoding; run `avarch scheduler watch` to
+reattach later. Native execution can also use `avarch scheduler run -d`.
 
 In another terminal in the same workspace, confirm that work is running:
 
@@ -653,8 +652,8 @@ reported as already queued or already completed.
 
 ## Scheduler and Job Management
 
-The scheduler runs queued jobs through `probe`, `plan`, `encode`, `validate`,
-size policy, cleanup, and `promote`. Completed encodes do not wait for the full
+The scheduler runs queued jobs through `probe`, `plan`, `scene_detect`, `encode`,
+`validate`, size policy, cleanup, and `promote`. Completed encodes do not wait for the full
 queue: one job can be validating or promoting while another job is still
 encoding, subject to the configured resource limits.
 
@@ -664,6 +663,9 @@ Scheduler commands:
 avarch scheduler run
 avarch scheduler run -d
 avarch scheduler status
+avarch scheduler watch
+avarch scheduler watch --once
+avarch scheduler watch --json
 avarch scheduler pause --reason "maintenance"
 avarch scheduler resume
 avarch scheduler drain --wait
@@ -672,9 +674,52 @@ avarch scheduler stop --force
 avarch scheduler restart
 ```
 
-`scheduler run -d` is implemented for native host execution. With the current
-one-shot wrapper, use foreground `avarch scheduler run` for normal use or run the
-container itself detached as shown in the advanced Docker section.
+`scheduler run -d` is implemented for native host execution. The Docker wrapper
+starts interactive `scheduler run` work in its named encoder container and opens
+the owner dashboard as a separate control surface, so detaching leaves the
+encoder container running.
+
+`scheduler run` owns scheduler execution. It claims jobs, starts workers,
+persists heartbeats, and responds to control requests. `scheduler watch` is an
+observer and control surface for an already-initialized workspace; it polls
+short read-only snapshots, renders scheduler state, and sends pause/resume or
+job-cancel requests through the same scheduler/job control stores used by the
+normal CLI commands.
+
+Interactive `avarch scheduler watch` requires a TTY. In a terminal it shows the
+scheduler dashboard with pipeline counts, active jobs, upcoming work, capacity,
+recent lifecycle events, resource telemetry, and honest queue forecasts when
+enough comparable encode history exists. Keyboard shortcuts are Linux/POSIX
+first: `p` pauses or resumes, `c` opens a bounded cancellation confirmation for
+the selected active job, `l` toggles a bounded log tail, Enter toggles details,
+and `d` or `q` detaches. Ctrl+C detaches from watch mode; it does not stop the
+scheduler. In the owner dashboard opened by `scheduler run`, Ctrl+C requests a
+scheduler stop.
+
+For scripts and non-interactive shells, use:
+
+```sh
+avarch scheduler watch --once
+avarch scheduler watch --json
+avarch scheduler watch --once --no-color
+```
+
+Live watch also accepts `--interval SECONDS`. Non-TTY live mode exits with
+guidance to use `--once` or `--json`; it does not emit cursor-control output.
+The Docker wrapper preserves TTY flags for foreground interactive commands, so
+`avarch scheduler watch` works normally from an interactive shell. Direct Docker
+usage must pass `-it` for live watch, for example:
+
+```sh
+docker run --rm -it -v "$PWD:/workspace" -w /workspace avarch:latest scheduler watch
+```
+
+On platforms without supported nonblocking keyboard input, the dashboard remains
+usable as a live observer and reports that interactive shortcuts are unavailable.
+Resource telemetry is Linux-first: CPU and memory use Linux `/proc` and cgroup
+data when available, and active output write rate measures growth of known
+attempt output/temp files. It is informational and is not reported as physical
+disk throughput.
 
 Job states:
 
@@ -744,11 +789,11 @@ SQLite and renders a live Rich display on an interactive terminal; redirected
 output is plain complete lines with no cursor-control sequences. `NO_COLOR=1`
 disables color.
 
-Foreground `scheduler run` shows the same live progress view by default on an
-interactive terminal. The Docker wrapper preserves the terminal for foreground
-`workflow run` and `scheduler run` commands. Detached scheduler runs do not
-render live progress; use `jobs watch JOB_ID` from another shell when the
-scheduler is running detached.
+Interactive `scheduler run` starts the scheduler independently and opens the
+same live progress view in owner mode. Its footer exposes pause/resume,
+confirmed cancellation, logs, details, detach, and stop controls. Detached
+scheduler runs do not render live progress; use `scheduler watch` or
+`jobs watch JOB_ID` from another shell.
 
 Progress percentages are phase-specific, not whole-workflow percentages. Unknown
 totals show the current value when available and `eta=unknown`; Avarch does not
@@ -1537,7 +1582,7 @@ Avarch is not:
 
 ## Project Status and Alpha Limitations
 
-Current version: `0.1.0` in code, documented here as `v0.1-alpha` product state.
+Current version: `0.2.0` in code, documented here as `v0.2-alpha` product state.
 
 Supported operating system status:
 
@@ -1576,8 +1621,8 @@ Practical alpha limitations:
 - No single casual `encode` command combines scan, probe, plan, enqueue, and
 	scheduler startup.
 - `avarch init` does not scan automatically.
-- The one-shot wrapper should run the scheduler in foreground; native detached
-	mode and detached container mode are separate paths.
+- Native detached mode and the Docker wrapper's named encoder container remain
+	separate process-management paths.
 - Promotion is explicit and not automatically run by the scheduler.
 - Cross-filesystem replacement-style promotion is limited by hard-link and
 	destination-local staging requirements.
@@ -1621,10 +1666,10 @@ image push is rejected. Pull request builds are validation-only and load the
 built image into the runner instead of pushing it.
 
 Docker image tags are generated from the major/minor version in `pyproject.toml`
-and the GitHub Actions run number. For version `0.1.0` on run `123`, CI
-publishes the build tag `0.1.123-ALPHA`. It also updates the moving `alpha` tag
+and the GitHub Actions run number. For version `0.2.0` on run `123`, CI
+publishes the build tag `0.2.123-ALPHA`. It also updates the moving `alpha` tag
 for installers and publishes `latest` on the default branch. Release tag pushes
-must match the project version, such as `v0.1.0` or `v0.1.0-ALPHA`.
+must match the project version, such as `v0.2.0` or `v0.2.0-ALPHA`.
 
 Configure these repository settings to enable Docker Hub publishing on
 default-branch and tag builds:

@@ -61,7 +61,7 @@ class RetryFacts:
 def resource_for_stage(stage: JobStage) -> ResourceClass:
     if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}:
         return ResourceClass.CHEAP
-    if stage == JobStage.ENCODE:
+    if stage in {JobStage.SCENE_DETECT, JobStage.ENCODE}:
         return ResourceClass.HEAVY_AV1AN
     if stage in {JobStage.PROMOTE, JobStage.CLEANUP}:
         return ResourceClass.FILE_OP
@@ -148,4 +148,4 @@ def select_retry_stage(facts: RetryFacts) -> JobStage | None:
                 return None
             return JobStage.PROMOTE
         return JobStage.VALIDATE
-    return JobStage.ENCODE
+    return JobStage.SCENE_DETECT

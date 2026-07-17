@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session
+from sqlmodel import Session, col, select
 
 from avarch.adapters.filesystem.plans import (
     PlanArtifactConflictError as PlanArtifactConflictError,
@@ -42,13 +43,16 @@ from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.job_views import SqliteJobViewStore
 from avarch.adapters.sqlite.manual_validation import SqliteManualValidationPreparationStore
 from avarch.adapters.sqlite.migrations import upgrade_database
+from avarch.adapters.sqlite.models import JobAttempt
 from avarch.adapters.sqlite.plan_views import SqlitePlanViewStore
 from avarch.adapters.sqlite.planning import SqlitePlanningUnitOfWork
 from avarch.adapters.sqlite.probing import SqliteProbeStore
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
+from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
 from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
 from avarch.adapters.sqlite.urls import resolve_database_url
+from avarch.adapters.system.resource_telemetry import LinuxResourceSampler, OutputGrowthSampler
 from avarch.adapters.vapoursynth import (
     VapourSynthGenerationError as VapourSynthGenerationError,
 )
@@ -115,8 +119,13 @@ from avarch.application.plan_artifacts import (
     VapourSynthScriptGenerator,
 )
 from avarch.application.planning import PlanningRuntimeIdentity
+from avarch.application.resource_telemetry import (
+    CompositeResourceSampler,
+    NullResourceSampler,
+    ResourceSampler,
+)
 from avarch.config import AppConfig
-from avarch.domain.jobs import JobStage
+from avarch.domain.jobs import AttemptStatus, JobStage
 
 __all__ = [
     "DatabaseSchemaUpgradeError",
@@ -149,6 +158,8 @@ __all__ = [
     "queue_retry_store",
     "scheduler_control_store",
     "scheduler_process_controller",
+    "scheduler_resource_sampler",
+    "scheduler_snapshot_query",
     "scheduler_runner",
     "scheduler_status_store",
     "upgrade_database_schema",
@@ -344,6 +355,40 @@ def scheduler_status_store(session: Session) -> SqliteSchedulerStatusStore:
     return SqliteSchedulerStatusStore(session)
 
 
+def scheduler_snapshot_query(
+    session: Session,
+    *,
+    workspace_root: Path,
+    database_url: str | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> SqliteSchedulerSnapshotQuery:
+    return SqliteSchedulerSnapshotQuery(
+        session,
+        workspace_root=str(workspace_root),
+        database_url=database_url,
+        now=now,
+    )
+
+
+def scheduler_resource_sampler(
+    *,
+    database_url: str,
+    clock: Callable[[], datetime],
+) -> ResourceSampler:
+    if not _linux_platform():
+        return NullResourceSampler(reason="unsupported_platform", clock=clock)
+    return CompositeResourceSampler(
+        (
+            LinuxResourceSampler(clock=clock),
+            OutputGrowthSampler(
+                paths=lambda: _active_attempt_output_paths(database_url=database_url),
+                clock=clock,
+            ),
+        ),
+        clock=clock,
+    )
+
+
 def manual_validation_worker() -> SchedulerManualValidationWorker:
     return SchedulerManualValidationWorker()
 
@@ -368,3 +413,32 @@ def scheduler_runner(
         workers=SchedulerWorkerAdapter(promotion_workflow_factory=promotion_workflow),
         claimable_stages=claimable_stages,
     )
+
+
+def _linux_platform() -> bool:
+    import sys
+
+    return sys.platform.startswith("linux")
+
+
+def _active_attempt_output_paths(*, database_url: str) -> tuple[Path, ...]:
+    with db_session(database_url) as session:
+        attempts = tuple(
+            session.exec(
+                select(JobAttempt).where(col(JobAttempt.status) == AttemptStatus.RUNNING)
+            ).all()
+        )
+    paths: list[Path] = []
+    for attempt in attempts:
+        if attempt.output_path is not None:
+            paths.append(Path(attempt.output_path))
+        if attempt.temp_dir is not None:
+            paths.extend(_regular_files_under(Path(attempt.temp_dir)))
+    return tuple(dict.fromkeys(paths))
+
+
+def _regular_files_under(path: Path) -> tuple[Path, ...]:
+    try:
+        return tuple(child for child in path.rglob("*") if child.is_file())
+    except OSError:
+        return ()

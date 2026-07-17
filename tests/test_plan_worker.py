@@ -78,7 +78,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
 
     assert stored is not None
     assert stored.status == JobStatus.QUEUED
-    assert stored.stage == JobStage.ENCODE
+    assert stored.stage == JobStage.SCENE_DETECT
     assert stored.plan_hash == plan.plan_hash
 
 

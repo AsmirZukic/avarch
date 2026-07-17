@@ -30,6 +30,13 @@ from avarch.domain.jobs import (
     JobStatus,
 )
 
+_STAGE_EVENT_TYPES = {
+    JobEventType.STAGE_STARTED,
+    JobEventType.STAGE_COMPLETED,
+    JobEventType.STAGE_FAILED,
+    JobEventType.STAGE_CANCELLED,
+}
+
 
 @pytest.mark.parametrize(
     "status,stage",
@@ -594,7 +601,12 @@ def _job_and_events(engine: Engine, job_id: int) -> tuple[Job, list[JobEvent]]:
         assert job is not None
         events = list(
             session.exec(
-                select(JobEvent).where(JobEvent.job_id == job_id).order_by(col(JobEvent.id))
+                select(JobEvent)
+                .where(
+                    JobEvent.job_id == job_id,
+                    col(JobEvent.event_type).not_in(_STAGE_EVENT_TYPES),
+                )
+                .order_by(col(JobEvent.id))
             )
         )
         return job, events

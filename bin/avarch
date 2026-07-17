@@ -87,6 +87,16 @@ exec_docker_run() {
   exec docker run --rm --user "$uid:$gid" "$@"
 }
 
+docker_run() {
+  security_opt=$(security_option)
+  if [ -n "$security_opt" ]; then
+    docker run --rm --user "$uid:$gid" --security-opt "$security_opt" "$@"
+    return
+  fi
+
+  docker run --rm --user "$uid:$gid" "$@"
+}
+
 foreground_live_command() {
   if [ ! -t 1 ]; then
     return 1
@@ -100,6 +110,17 @@ foreground_live_command() {
     for arg do
       case "$arg" in
         -d | --detached)
+          return 1
+          ;;
+      esac
+    done
+    return 0
+  fi
+
+  if [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "watch" ]; then
+    for arg do
+      case "$arg" in
+        --once | --json)
           return 1
           ;;
       esac
@@ -172,6 +193,31 @@ if foreground_live_command "$@"; then
   allocate_tty=1
 fi
 
+owner_dashboard=0
+if [ "$allocate_tty" = "1" ] && [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
+  owner_dashboard=1
+fi
+
+if [ "$owner_dashboard" = "1" ]; then
+  volume=$(workspace_volume "$workspace")
+  docker_run \
+    -d \
+    --name "$ENCODER_CONTAINER_NAME" \
+    --label "$AVARCH_LABEL=encoder" \
+    --label "$WORKSPACE_LABEL=$workspace" \
+    -v "$volume" \
+    -w "$CONTAINER_WORKSPACE" \
+    "$IMAGE" \
+    "$@" \
+    --mode detached
+  exec_docker_run \
+    -i -t \
+    -v "$volume" \
+    -w "$CONTAINER_WORKSPACE" \
+    "$IMAGE" \
+    scheduler watch --owner
+fi
+
 set -- "$IMAGE" "$@"
 
 if [ "$scheduler_container" = "1" ]; then
@@ -187,7 +233,7 @@ if [ "$mount_workspace" = "1" ]; then
 fi
 
 if [ "$allocate_tty" = "1" ]; then
-  set -- -t "$@"
+  set -- -i -t "$@"
 fi
 
 exec_docker_run "$@"

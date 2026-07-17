@@ -59,6 +59,57 @@ MAX_PROCESS_TAIL_BYTES = 16_384
 PROCESS_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 
+class _ManagedProcessRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._processes: dict[int, subprocess.Popen[bytes]] = {}
+        self._paused = False
+
+    def register(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            self._processes[process.pid] = process
+            paused = self._paused
+        if paused:
+            _signal_process_group(process, signal.SIGSTOP)
+
+    def unregister(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            self._processes.pop(process.pid, None)
+
+    def pause(self) -> None:
+        with self._lock:
+            self._paused = True
+            processes = self._live_processes_locked()
+        for process in processes:
+            _signal_process_group(process, signal.SIGSTOP)
+
+    def resume(self) -> None:
+        with self._lock:
+            self._paused = False
+            processes = self._live_processes_locked()
+        for process in processes:
+            _signal_process_group(process, signal.SIGCONT)
+
+    def _live_processes_locked(self) -> tuple[subprocess.Popen[bytes], ...]:
+        finished = [pid for pid, process in self._processes.items() if process.poll() is not None]
+        for pid in finished:
+            self._processes.pop(pid, None)
+        return tuple(self._processes.values())
+
+
+_MANAGED_PROCESSES = _ManagedProcessRegistry()
+
+
+def pause_managed_processes() -> None:
+    if os.name == "posix":
+        _MANAGED_PROCESSES.pause()
+
+
+def resume_managed_processes() -> None:
+    if os.name == "posix":
+        _MANAGED_PROCESSES.resume()
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessOutputRecord:
     stream: Literal["stdout", "stderr"]
@@ -81,20 +132,11 @@ def should_resume_av1an(spec: Av1anCommandSpec) -> bool:
     if not spec.temp_dir.is_dir():
         raise WorkDirectoryConflictError(f"Av1an temp path is not a directory: {spec.temp_dir}")
     try:
-        next(spec.temp_dir.iterdir())
-    except StopIteration:
-        return False
-    except FileNotFoundError:
-        return False
-    except NotADirectoryError as exc:
-        raise WorkDirectoryConflictError(
-            f"Av1an temp path is not a directory: {spec.temp_dir}"
-        ) from exc
+        return all((spec.temp_dir / name).is_file() for name in ("chunks.json", "done.json"))
     except PermissionError as exc:
         raise WorkDirectoryConflictError(
             f"Unable to inspect Av1an temp directory: {spec.temp_dir}"
         ) from exc
-    return True
 
 
 def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -> list[str]:
@@ -232,8 +274,8 @@ def execute_plan(
             )
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
         command = build_av1an_command(plan.av1an)
-        _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
-        av1an_progress_callback = _make_av1an_progress_callback(plan, progress_sink)
+        _publish_execution_phase(progress_sink, ProgressPhase.SCENE_DETECTION)
+        av1an_progress = _make_av1an_progress_collector(plan, progress_sink)
         exit_code = _run_process(
             command,
             cwd=plan.av1an.working_directory,
@@ -243,10 +285,16 @@ def execute_plan(
             command_hash=_command_hash(command),
             cancellation_token=cancellation_token,
             progress_sink=progress_sink,
-            progress_phase=ProgressPhase.ENCODING,
-            output_callback=av1an_progress_callback,
-            stderr_tty=av1an_progress_callback is not None,
+            progress_phase=(
+                av1an_progress.current_phase
+                if av1an_progress is not None
+                else ProgressPhase.SCENE_DETECTION
+            ),
+            output_callback=av1an_progress.callback if av1an_progress is not None else None,
+            stderr_tty=av1an_progress is not None,
         )
+        if av1an_progress is not None:
+            av1an_progress.flush()
         if exit_code != 0:
             tail = _read_tail(plan.runtime.av1an_stderr_log)
             raise Av1anStageError(f"Av1an failed with exit code {exit_code}.\n{tail}")
@@ -322,10 +370,10 @@ def _publish_execution_phase(
     )
 
 
-def _make_av1an_progress_callback(
+def _make_av1an_progress_collector(
     plan: TranscodePlan,
     progress_sink: ProgressSink | None,
-) -> ProcessOutputCallback | None:
+) -> _Av1anProgressCollector | None:
     if progress_sink is None:
         return None
     if not av1an_tty_progress_supported(
@@ -333,7 +381,7 @@ def _make_av1an_progress_callback(
         enabled=os.environ.get("AVARCH_AV1AN_TTY_PROGRESS", "1") != "0",
     ):
         return None
-    return _av1an_progress_callback(progress_sink, Av1anTtyProgressParser())
+    return _Av1anProgressCollector(progress_sink, Av1anTtyProgressParser())
 
 
 def preflight_execution(plan: TranscodePlan) -> None:
@@ -555,7 +603,7 @@ def _run_process(
     command_hash: str,
     cancellation_token: ProcessCancellationToken | None = None,
     progress_sink: ProgressSink | None = None,
-    progress_phase: ProgressPhase | None = None,
+    progress_phase: ProgressPhase | Callable[[], ProgressPhase] | None = None,
     output_callback: ProcessOutputCallback | None = None,
     stderr_tty: bool = False,
 ) -> int:
@@ -613,15 +661,42 @@ def _combined_process_output_callback(
     return callback
 
 
-def _av1an_progress_callback(
-    progress_sink: ProgressSink,
-    parser: Av1anTtyProgressParser,
-) -> ProcessOutputCallback:
-    def callback(record: ProcessOutputRecord) -> None:
-        for sample in parser.feed(record.data):
-            _publish_av1an_sample(progress_sink, sample)
+class _Av1anProgressCollector:
+    def __init__(
+        self,
+        progress_sink: ProgressSink,
+        parser: Av1anTtyProgressParser,
+    ) -> None:
+        self._progress_sink = progress_sink
+        self._parser = parser
+        self._phase = ProgressPhase.SCENE_DETECTION
+        self._lock = threading.Lock()
 
-    return callback
+    def callback(self, record: ProcessOutputRecord) -> None:
+        if record.stream != "stderr":
+            return
+        with self._lock:
+            for sample in self._parser.feed(record.data):
+                self._publish_if_accepted(sample)
+
+    def flush(self) -> None:
+        with self._lock:
+            for sample in self._parser.flush():
+                self._publish_if_accepted(sample)
+
+    def current_phase(self) -> ProgressPhase:
+        with self._lock:
+            return self._phase
+
+    def _publish_if_accepted(self, sample: Av1anTtyProgressSample) -> None:
+        if (
+            self._phase == ProgressPhase.ENCODING
+            and sample.phase == ProgressPhase.SCENE_DETECTION
+        ):
+            return
+        if sample.phase == ProgressPhase.ENCODING:
+            self._phase = ProgressPhase.ENCODING
+        _publish_av1an_sample(self._progress_sink, sample)
 
 
 def _publish_av1an_sample(
@@ -633,8 +708,8 @@ def _publish_av1an_sample(
         progress_sink,
         ProgressSnapshot(
             phase=sample.phase,
-            current=float(sample.current),
-            total=float(sample.total),
+            current=float(sample.current) if sample.current is not None else None,
+            total=float(sample.total) if sample.total is not None else None,
             unit=sample.unit,
             rate_per_second=sample.rate_per_second,
             speed_ratio=sample.speed_ratio,
@@ -644,13 +719,17 @@ def _publish_av1an_sample(
             observed_at=now,
             heartbeat_at=now,
             advanced_at=now,
+            chunks_current=sample.chunks_current,
+            chunks_total=sample.chunks_total,
+            bitrate_kbps=sample.bitrate_kbps,
+            estimated_output_bytes=sample.estimated_output_bytes,
         ),
     )
 
 
 def _process_heartbeat_callback(
     progress_sink: ProgressSink,
-    phase: ProgressPhase,
+    phase: ProgressPhase | Callable[[], ProgressPhase],
 ) -> ProcessOutputCallback:
     def callback(record: ProcessOutputRecord) -> None:
         del record
@@ -661,7 +740,7 @@ def _process_heartbeat_callback(
 
 def _start_periodic_process_heartbeat(
     progress_sink: ProgressSink,
-    phase: ProgressPhase,
+    phase: ProgressPhase | Callable[[], ProgressPhase],
     *,
     stop_event: threading.Event,
 ) -> threading.Thread:
@@ -681,19 +760,23 @@ def _start_periodic_process_heartbeat(
 def _publish_periodic_process_heartbeat(
     *,
     progress_sink: ProgressSink,
-    phase: ProgressPhase,
+    phase: ProgressPhase | Callable[[], ProgressPhase],
     stop_event: threading.Event,
 ) -> None:
     while not stop_event.wait(PROCESS_HEARTBEAT_INTERVAL_SECONDS):
         _publish_process_heartbeat(progress_sink, phase)
 
 
-def _publish_process_heartbeat(progress_sink: ProgressSink, phase: ProgressPhase) -> None:
+def _publish_process_heartbeat(
+    progress_sink: ProgressSink,
+    phase: ProgressPhase | Callable[[], ProgressPhase],
+) -> None:
     now = _utc_now()
+    resolved_phase = phase() if callable(phase) else phase
     publish_progress_safely(
         progress_sink,
         ProgressSnapshot(
-            phase=phase,
+            phase=resolved_phase,
             current=None,
             total=None,
             unit=None,
@@ -756,6 +839,7 @@ def run_managed_process(
                 stdin=subprocess.DEVNULL,
                 start_new_session=(os.name == "posix"),
             )
+            _MANAGED_PROCESSES.register(process)
         finally:
             if stderr_slave_fd is not None:
                 os.close(stderr_slave_fd)
@@ -807,6 +891,7 @@ def run_managed_process(
             reader.start()
         cancelled = False
         forced_kill = False
+        termination_requested_at: datetime | None = None
         try:
             while True:
                 exit_code = process.poll()
@@ -814,6 +899,7 @@ def run_managed_process(
                     break
                 if cancellation_token is not None and cancellation_token.cancel_requested:
                     cancelled = True
+                    termination_requested_at = _utc_now()
                     _terminate_process(process)
                     try:
                         exit_code = process.wait(timeout=termination_grace_seconds)
@@ -829,6 +915,7 @@ def run_managed_process(
             for reader in readers:
                 reader.join()
             if reader_errors:
+                _MANAGED_PROCESSES.unregister(process)
                 raise reader_errors[0]
         except KeyboardInterrupt as exc:
             interrupted = True
@@ -841,8 +928,10 @@ def run_managed_process(
             for reader in readers:
                 reader.join()
             _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=True)
+            _MANAGED_PROCESSES.unregister(process)
             raise ExecutionInterruptedError(f"Interrupted while running {command[0]}") from exc
         _write_process_end(stdout_file, stderr_file, exit_code=exit_code, interrupted=interrupted)
+        _MANAGED_PROCESSES.unregister(process)
     result_command = tuple(command)
     finished_at = _utc_now()
     if forced_kill:
@@ -851,6 +940,7 @@ def run_managed_process(
             return_code=exit_code,
             started_at=started_at,
             finished_at=finished_at,
+            termination_requested_at=termination_requested_at,
         )
     if cancelled:
         return ProcessResult.cancelled(
@@ -858,6 +948,7 @@ def run_managed_process(
             return_code=exit_code,
             started_at=started_at,
             finished_at=finished_at,
+            termination_requested_at=termination_requested_at,
         )
     return ProcessResult.exited(
         command=result_command,
@@ -875,6 +966,15 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
         except ProcessLookupError:
             return
     process.terminate()
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], signum: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        return
 
 
 def _kill_process(process: subprocess.Popen[bytes]) -> None:

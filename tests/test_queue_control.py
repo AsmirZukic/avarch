@@ -228,7 +228,7 @@ def test_queue_retry_preview_does_not_mutate_retryable_job(tmp_path: Path) -> No
     [
         ("missing_probe", JobStage.PROBE, "reset_to_probe"),
         ("plan", JobStage.PLAN, "reset_to_plan"),
-        ("encode", JobStage.ENCODE, "reset_to_encode"),
+        ("encode", JobStage.SCENE_DETECT, "reset_to_scene_detect"),
         ("validate", JobStage.VALIDATE, "reset_to_validate"),
         ("promote", JobStage.PROMOTE, "return_to_promote"),
     ],

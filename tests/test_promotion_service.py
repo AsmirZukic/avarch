@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.promotion_service import (
     claim_promotion,
     mark_promotion_failed_or_validated,
     promote_job,
+    recover_promotion,
 )
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import JobTransitionError, transition_job
@@ -18,6 +20,7 @@ from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     JobAttemptProgress,
+    JobEvent,
     MediaFile,
     MediaFileStatus,
     PromotionRecord,
@@ -26,6 +29,7 @@ from avarch.adapters.sqlite.models import (
 from avarch.config import AppConfig, DatabaseSettings
 from avarch.domain.jobs import (
     AttemptStatus,
+    JobEventType,
     JobOutcomeReason,
     JobStage,
     JobStatus,
@@ -68,6 +72,33 @@ def test_promotion_claim_records_promoting_progress(tmp_path: Path) -> None:
     assert progress_phase == ProgressPhase.PROMOTING
 
 
+def test_promotion_claim_records_start_lifecycle_event(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        record = claim_promotion(
+            session,
+            job_id=job_id,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            owner_token="owner",
+            now=now,
+        )
+        event = session.exec(select(JobEvent)).one()
+        event_type = JobEventType(event.event_type)
+        event_attempt_id = event.attempt_id
+        event_stage = JobStage(event.stage)
+        event_details = json.loads(event.details_json or "{}")
+        record_attempt_id = record.attempt_id
+        record_id = record.id
+
+    assert event_type == JobEventType.STAGE_STARTED
+    assert event_attempt_id == record_attempt_id
+    assert event_stage == JobStage.PROMOTE
+    assert event_details["promotion_id"] == record_id
+
+
 def test_completed_promotion_records_completed_progress(tmp_path: Path) -> None:
     config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
 
@@ -81,6 +112,68 @@ def test_completed_promotion_records_completed_progress(tmp_path: Path) -> None:
 
     assert progress is not None
     assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
+
+
+def test_completed_promotion_records_actual_savings_and_source_safety(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"enc")
+
+    result = asyncio.run(promote_job(job_id, config=config, mode=PromotionMode.REPLACE_ATOMIC))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        events = session.exec(
+            select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+        ).all()
+
+    promotion_completion = [
+        event
+        for event in events
+        if JobStage(event.stage) == JobStage.PROMOTE
+        and JobEventType(event.event_type) == JobEventType.STAGE_COMPLETED
+    ][0]
+    details = json.loads(promotion_completion.details_json or "{}")
+    assert result.promoted is True
+    assert details["source_size_bytes"] == len(b"original")
+    assert details["output_size_bytes"] == len(b"enc")
+    assert details["saved_bytes"] == len(b"original") - len(b"enc")
+    assert details["source_safety_outcome"] == "source_replaced_after_verified_backup"
+
+
+def test_recovered_promotion_records_savings_once(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"enc")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        record = claim_promotion(
+            session,
+            job_id=job_id,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            owner_token="first-owner",
+            now=now,
+        )
+        record.owner_token = None
+        record.lease_expires_at = None
+        session.add(record)
+
+    recovered = asyncio.run(
+        recover_promotion(job_id=job_id, config=config, owner_token="second-owner")
+    )
+
+    with Session(engine) as session:
+        completion_events = session.exec(
+            select(JobEvent).where(
+                JobEvent.job_id == job_id,
+                JobEvent.stage == JobStage.PROMOTE,
+                JobEvent.event_type == JobEventType.STAGE_COMPLETED,
+            )
+        ).all()
+
+    assert recovered.status == PromotionStatus.COMPLETED
+    assert len(completion_events) == 1
+    assert json.loads(completion_events[0].details_json or "{}")["saved_bytes"] == (
+        len(b"original") - len(b"enc")
+    )
 
 
 def test_promotion_never_deletes_original_first(tmp_path: Path) -> None:
@@ -172,11 +265,20 @@ def test_failed_promotion_releases_lock(tmp_path: Path) -> None:
 
     with Session(engine) as session:
         record = session.get(PromotionRecord, promotion_id)
+        event = session.exec(
+            select(JobEvent).where(
+                JobEvent.job_id == job_id,
+                JobEvent.event_type == JobEventType.STAGE_FAILED,
+            )
+        ).one()
 
     assert record is not None
     assert record.owner_token is None
     assert record.lease_expires_at is None
     assert record.status == PromotionStatus.FAILED
+    failure_details = json.loads(event.details_json or "{}")
+    assert failure_details["promotion_id"] == promotion_id
+    assert failure_details["error_type"] == "RuntimeError"
 
 
 def test_promoted_job_keeps_terminal_state(tmp_path: Path) -> None:

@@ -57,7 +57,41 @@ def test_attempt_progress_round_trips_nullable_snapshot_fields(tmp_path: Path) -
     assert stored.speed_ratio is None
     assert stored.source == ProgressSource.SCHEDULER
     assert stored.message is None
+    assert stored.chunks_current is None
+    assert stored.chunks_total is None
+    assert stored.bitrate_kbps is None
+    assert stored.estimated_output_bytes is None
+    assert stored.written_output_bytes is None
     assert stored.advanced_at is None
+
+
+def test_attempt_progress_round_trips_structured_metrics(tmp_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    create_db_schema(engine)
+    now = datetime(2026, 7, 1, tzinfo=UTC)
+
+    with Session(engine) as session:
+        attempt_id = _insert_attempt(session, now=now)
+        session.add(
+            _progress(
+                attempt_id=attempt_id,
+                now=now,
+                chunks_current=3,
+                chunks_total=10,
+                bitrate_kbps=1420,
+                estimated_output_bytes=1_000_000,
+                written_output_bytes=500_000,
+            )
+        )
+        session.commit()
+
+        stored = session.exec(select(JobAttemptProgress)).one()
+
+    assert stored.chunks_current == 3
+    assert stored.chunks_total == 10
+    assert stored.bitrate_kbps == 1420
+    assert stored.estimated_output_bytes == 1_000_000
+    assert stored.written_output_bytes == 500_000
 
 
 def test_attempt_progress_requires_existing_attempt(tmp_path: Path) -> None:
@@ -181,6 +215,11 @@ def _progress(
     attempt_id: int,
     now: datetime,
     message: str | None = "encoding",
+    chunks_current: int | None = None,
+    chunks_total: int | None = None,
+    bitrate_kbps: int | None = None,
+    estimated_output_bytes: int | None = None,
+    written_output_bytes: int | None = None,
 ) -> JobAttemptProgress:
     return JobAttemptProgress(
         attempt_id=attempt_id,
@@ -192,6 +231,11 @@ def _progress(
         speed_ratio=1.2,
         source=ProgressSource.AV1AN_OUTPUT,
         message=message,
+        chunks_current=chunks_current,
+        chunks_total=chunks_total,
+        bitrate_kbps=bitrate_kbps,
+        estimated_output_bytes=estimated_output_bytes,
+        written_output_bytes=written_output_bytes,
         phase_started_at=now,
         observed_at=now,
         heartbeat_at=now,
