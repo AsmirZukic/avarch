@@ -664,6 +664,9 @@ Scheduler commands:
 avarch scheduler run
 avarch scheduler run -d
 avarch scheduler status
+avarch scheduler watch
+avarch scheduler watch --once
+avarch scheduler watch --json
 avarch scheduler pause --reason "maintenance"
 avarch scheduler resume
 avarch scheduler drain --wait
@@ -675,6 +678,48 @@ avarch scheduler restart
 `scheduler run -d` is implemented for native host execution. With the current
 one-shot wrapper, use foreground `avarch scheduler run` for normal use or run the
 container itself detached as shown in the advanced Docker section.
+
+`scheduler run` owns scheduler execution. It claims jobs, starts workers,
+persists heartbeats, and responds to control requests. `scheduler watch` is an
+observer and control surface for an already-initialized workspace; it polls
+short read-only snapshots, renders scheduler state, and sends pause/resume or
+job-cancel requests through the same scheduler/job control stores used by the
+normal CLI commands.
+
+Interactive `avarch scheduler watch` requires a TTY. In a terminal it shows the
+scheduler dashboard with pipeline counts, active jobs, upcoming work, capacity,
+recent lifecycle events, resource telemetry, and honest queue forecasts when
+enough comparable encode history exists. Keyboard shortcuts are Linux/POSIX
+first: `p` pauses or resumes, `c` opens a bounded cancellation confirmation for
+the selected active job, `l` toggles a bounded log tail, Enter toggles details,
+and `q` detaches. Ctrl+C detaches from watch mode; it does not stop the
+scheduler. Owner-mode scheduler execution still uses Ctrl+C to stop the
+scheduler process.
+
+For scripts and non-interactive shells, use:
+
+```sh
+avarch scheduler watch --once
+avarch scheduler watch --json
+avarch scheduler watch --once --no-color
+```
+
+Live watch also accepts `--interval SECONDS`. Non-TTY live mode exits with
+guidance to use `--once` or `--json`; it does not emit cursor-control output.
+The Docker wrapper preserves TTY flags for foreground interactive commands, so
+`avarch scheduler watch` works normally from an interactive shell. Direct Docker
+usage must pass `-it` for live watch, for example:
+
+```sh
+docker run --rm -it -v "$PWD:/workspace" -w /workspace avarch:latest scheduler watch
+```
+
+On platforms without supported nonblocking keyboard input, the dashboard remains
+usable as a live observer and reports that interactive shortcuts are unavailable.
+Resource telemetry is Linux-first: CPU and memory use Linux `/proc` and cgroup
+data when available, and active output write rate measures growth of known
+attempt output/temp files. It is informational and is not reported as physical
+disk throughput.
 
 Job states:
 

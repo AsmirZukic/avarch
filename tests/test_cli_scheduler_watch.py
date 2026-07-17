@@ -22,6 +22,28 @@ def test_scheduler_watch_once_renders_empty_stopped_scheduler(tmp_path: Path) ->
     assert "No active jobs" in result.output or "Active none" in result.output
 
 
+def test_scheduler_watch_help_documents_modes_and_options() -> None:
+    result = runner.invoke(app, ["scheduler", "watch", "--help"])
+
+    assert result.exit_code == 0
+    assert "--once" in result.output
+    assert "--json" in result.output
+    assert "--interval" in result.output
+    assert "--no-color" in result.output
+
+
+def test_readme_documents_scheduler_watch_workflow() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+    readme_text = " ".join(readme.split())
+
+    assert "avarch scheduler watch --once" in readme
+    assert "avarch scheduler watch --json" in readme
+    assert "Ctrl+C detaches from watch mode" in readme_text
+    assert "Direct Docker usage must pass `-it`" in readme_text
+    assert "Linux/POSIX first" in readme_text
+    assert "interactive shortcuts are unavailable" in readme_text
+
+
 def test_scheduler_watch_once_no_color_has_no_ansi(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
