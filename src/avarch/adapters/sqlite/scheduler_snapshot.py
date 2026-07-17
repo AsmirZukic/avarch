@@ -13,14 +13,17 @@ from avarch.adapters.sqlite.models import (
     JobAttemptProgress,
     JobEvent,
     MediaFile,
+    MediaFileStatus,
     SchedulerSession,
     SchedulerState,
 )
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.adapters.sqlite.queue import claimable_jobs, select_launchable_queue_jobs
 from avarch.adapters.sqlite.scheduler_state import lease_active
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
+    BlockedJobSummary,
     CapacitySummary,
     LifecycleEventSummary,
     PipelineSummary,
@@ -77,6 +80,7 @@ class SqliteSchedulerSnapshotQuery:
             active_jobs=self._active_jobs(captured_at=captured_at),
             capacity=self._capacity_summary(now=captured_at),
             upcoming_jobs=self._upcoming_jobs(),
+            blocked_jobs=self._blocked_jobs(),
             recent_events=self._recent_events(),
             alerts=self._alerts(now=captured_at),
             resources=None,
@@ -264,6 +268,36 @@ class SqliteSchedulerSnapshotQuery:
         ).all()
         return tuple(_lifecycle_event_summary(event) for event in events)
 
+    def _blocked_jobs(self) -> tuple[BlockedJobSummary, ...]:
+        rows = self._session.exec(
+            select(Job, MediaFile)
+            .join(MediaFile, MediaFile.id == Job.media_file_id)
+            .where(
+                col(Job.status).not_in(
+                    [JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED]
+                )
+            )
+            .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
+            .limit(20)
+        ).all()
+        blocked: list[BlockedJobSummary] = []
+        for job, media_file in rows:
+            reason = _blocked_reason(job, media_file)
+            if reason is None:
+                continue
+            blocked.append(
+                BlockedJobSummary(
+                    job_id=_required_id(job.id),
+                    source_path=media_file.path,
+                    profile_name=job.profile_name,
+                    stage=JobStage(job.stage),
+                    status=JobStatus(job.status),
+                    reason=reason,
+                    details=_blocked_details(job, media_file, reason),
+                )
+            )
+        return tuple(blocked[:8])
+
     def _alerts(self, *, now: datetime) -> tuple[SchedulerAlert, ...]:
         state = self._session.get(SchedulerState, 1)
         if state is None:
@@ -392,6 +426,35 @@ def _lifecycle_event_summary(event: JobEvent) -> LifecycleEventSummary:
         details=_event_details(event.details_json),
         created_at=event.created_at,
     )
+
+
+def _blocked_reason(job: Job, media_file: MediaFile) -> JobEligibilityReason | None:
+    if job.hold_requested_at is not None or JobStatus(job.status) == JobStatus.HELD:
+        return JobEligibilityReason.JOB_HELD
+    if job.cancel_requested_at is not None:
+        return JobEligibilityReason.CANCEL_REQUESTED
+    if MediaFileStatus(media_file.status) == MediaFileStatus.MISSING:
+        return JobEligibilityReason.SOURCE_MISSING
+    if JobStage(job.stage) in {JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE}:
+        if job.plan_path is None:
+            return JobEligibilityReason.PLAN_MISSING
+    return None
+
+
+def _blocked_details(
+    job: Job,
+    media_file: MediaFile,
+    reason: JobEligibilityReason,
+) -> dict[str, object]:
+    if reason == JobEligibilityReason.JOB_HELD:
+        return {"hold_reason": job.hold_reason} if job.hold_reason else {}
+    if reason == JobEligibilityReason.CANCEL_REQUESTED:
+        return {"cancel_reason": job.cancel_reason} if job.cancel_reason else {}
+    if reason == JobEligibilityReason.SOURCE_MISSING:
+        return {"media_status": MediaFileStatus(media_file.status).value}
+    if reason == JobEligibilityReason.PLAN_MISSING:
+        return {"stage": JobStage(job.stage).value}
+    return {}
 
 
 def _pad_active_jobs_from_capacity_state(

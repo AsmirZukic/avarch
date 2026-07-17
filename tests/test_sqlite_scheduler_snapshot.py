@@ -18,6 +18,7 @@ from avarch.adapters.sqlite.models import (
 )
 from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import SchedulerMode
@@ -168,7 +169,7 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.stale is True
     assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
     assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
-    assert query_count <= 12
+    assert query_count <= 13
 
 
 def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligible(
@@ -461,6 +462,66 @@ def test_scheduler_snapshot_includes_session_history_and_recent_events(tmp_path:
     assert snapshot.recent_events[0].stage == JobStage.ENCODE
     assert snapshot.recent_events[0].scheduler_session_id == snapshot.session.current.session_id
     assert snapshot.recent_events[0].details == {"frames": 100, "saved_bytes": 42}
+
+
+def test_scheduler_snapshot_projects_known_blockers(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        held = _job(
+            session,
+            path="/media/held.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=40,
+            hold_requested_at=now,
+        )
+        held.hold_reason = "inspect"
+        cancelled = _job(
+            session,
+            path="/media/cancel.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=30,
+            cancel_requested_at=now,
+        )
+        cancelled.cancel_reason = "operator"
+        missing = _job(
+            session,
+            path="/media/missing.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.PROBE,
+            priority=20,
+        )
+        media = session.get(MediaFile, missing.media_file_id)
+        assert media is not None
+        media.status = MediaFileStatus.MISSING
+        _job(
+            session,
+            path="/media/no-plan.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=10,
+        )
+        session.add_all([held, cancelled, media])
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    assert [(job.source_path, job.reason) for job in snapshot.blocked_jobs] == [
+        ("/media/held.mkv", JobEligibilityReason.JOB_HELD),
+        ("/media/cancel.mkv", JobEligibilityReason.CANCEL_REQUESTED),
+        ("/media/missing.mkv", JobEligibilityReason.SOURCE_MISSING),
+        ("/media/no-plan.mkv", JobEligibilityReason.PLAN_MISSING),
+    ]
+    assert snapshot.blocked_jobs[0].details == {"hold_reason": "inspect"}
+    assert snapshot.blocked_jobs[1].details == {"cancel_reason": "operator"}
 
 
 def test_scheduler_snapshot_reports_stopped_when_no_scheduler_process(tmp_path: Path) -> None:
