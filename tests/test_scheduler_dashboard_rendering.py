@@ -8,6 +8,7 @@ from rich.console import Console
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
+    BlockedJobSummary,
     CapacitySummary,
     LifecycleEventSummary,
     PipelineSummary,
@@ -21,6 +22,7 @@ from avarch.application.scheduler_snapshot import (
     WorkflowStepSummary,
     WorkspaceSummary,
 )
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.presentation.scheduler_dashboard import DashboardMode, render_scheduler_dashboard
 
@@ -135,6 +137,57 @@ def test_dashboard_renders_session_and_recent_activity() -> None:
     assert "job 42 promote stage_completed saved 2.0 KiB" in narrow
 
 
+def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
+    snapshot = _snapshot(
+        capacity=CapacitySummary(
+            cheap_workers=2,
+            cheap_active=1,
+            av1an_jobs=2,
+            av1an_active=1,
+            file_ops=1,
+            file_ops_active=0,
+            av1an_workers_configured=4,
+            stale=True,
+        ),
+        blocked_jobs=(
+            BlockedJobSummary(
+                job_id=10,
+                source_path="/media/held.mkv",
+                profile_name="default",
+                stage=JobStage.ENCODE,
+                status=JobStatus.QUEUED,
+                reason=JobEligibilityReason.JOB_HELD,
+            ),
+            BlockedJobSummary(
+                job_id=11,
+                source_path="/media/missing.mkv",
+                profile_name="default",
+                stage=JobStage.PROBE,
+                status=JobStatus.QUEUED,
+                reason=JobEligibilityReason.SOURCE_MISSING,
+            ),
+        ),
+    )
+
+    wide = _render(snapshot, width=150)
+    narrow = _render(snapshot, width=70)
+
+    assert "encode slots" in wide
+    assert "1/2" in wide
+    assert "file operations" in wide
+    assert "0/1" in wide
+    assert "Av1an workers" in wide
+    assert "4 configured" in wide
+    assert "freshness" in wide
+    assert "stale" in wide
+    assert "current_snapshot" in wide
+    assert "Blocked 2" in wide
+    assert "job held" in wide
+    assert "source missing" in wide
+    assert "Blocked 2" in narrow
+    assert "held.mkv job_held" in narrow
+
+
 def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
     observer = _render(_snapshot(), width=120, mode=DashboardMode.OBSERVER)
     owner = _render(_snapshot(), width=120, mode=DashboardMode.OWNER)
@@ -157,8 +210,10 @@ def _render(
 def _snapshot(
     *,
     active_jobs: tuple[ActiveJobSummary, ...] | None = None,
+    capacity: CapacitySummary | None = None,
     session: SessionSummary | None = None,
     recent_events: tuple[LifecycleEventSummary, ...] = (),
+    blocked_jobs: tuple[BlockedJobSummary, ...] = (),
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -175,7 +230,8 @@ def _snapshot(
             cancelled=0,
         ),
         active_jobs=active_jobs if active_jobs is not None else (_active_job(1, "/media/movie.mkv"),),
-        capacity=CapacitySummary(
+        capacity=capacity
+        or CapacitySummary(
             cheap_workers=2,
             cheap_active=1,
             av1an_jobs=1,
@@ -184,6 +240,7 @@ def _snapshot(
             file_ops_active=0,
             av1an_workers_configured=4,
         ),
+        blocked_jobs=blocked_jobs,
         upcoming_jobs=(
             UpcomingJobSummary(
                 job_id=2,
