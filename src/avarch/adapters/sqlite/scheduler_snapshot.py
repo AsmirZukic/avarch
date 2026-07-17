@@ -17,9 +17,9 @@ from avarch.adapters.sqlite.models import (
     SchedulerSession,
     SchedulerState,
 )
-from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.adapters.sqlite.queue import claimable_jobs, select_launchable_queue_jobs
 from avarch.adapters.sqlite.scheduler_state import lease_active
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
@@ -29,9 +29,9 @@ from avarch.application.scheduler_snapshot import (
     PipelineSummary,
     SchedulerAlert,
     SchedulerAlertSeverity,
-    SchedulerSessionRunSummary,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
+    SchedulerSessionRunSummary,
     SchedulerSnapshot,
     SessionSummary,
     UpcomingJobSummary,
@@ -41,7 +41,6 @@ from avarch.application.scheduler_snapshot import (
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressUnit
 from avarch.domain.scheduler import ActiveJob, ResourceCapacity, SchedulerMode, resource_for_stage
-
 
 _ACTIVE_STATUSES = {
     JobStatus.ENCODING,
@@ -435,9 +434,11 @@ def _blocked_reason(job: Job, media_file: MediaFile) -> JobEligibilityReason | N
         return JobEligibilityReason.CANCEL_REQUESTED
     if MediaFileStatus(media_file.status) == MediaFileStatus.MISSING:
         return JobEligibilityReason.SOURCE_MISSING
-    if JobStage(job.stage) in {JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE}:
-        if job.plan_path is None:
-            return JobEligibilityReason.PLAN_MISSING
+    if (
+        JobStage(job.stage) in {JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE}
+        and job.plan_path is None
+    ):
+        return JobEligibilityReason.PLAN_MISSING
     return None
 
 

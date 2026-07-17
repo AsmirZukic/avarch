@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
+from avarch.adapters.sqlite.stage_events import (
+    current_scheduler_session_id,
+    record_stage_event,
+)
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
@@ -29,10 +33,6 @@ from avarch.domain.jobs import (
 )
 from avarch.domain.scheduler import resource_for_stage
 from avarch.serialization import canonical_json
-from avarch.adapters.sqlite.stage_events import (
-    current_scheduler_session_id,
-    record_stage_event,
-)
 
 if TYPE_CHECKING:
     from avarch.adapters.sqlite.models import Job, JobAttempt
