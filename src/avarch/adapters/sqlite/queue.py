@@ -9,6 +9,7 @@ from avarch.adapters.sqlite.inventory import PathResolver, select_inventory_file
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, MediaPlan
 from avarch.adapters.sqlite.planning import current_plan_for_file, find_plan
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
+from avarch.domain.scheduler import ActiveJob, ClaimableJob, ResourceCapacity, select_launchable_jobs
 
 
 class QueueSelectionError(ValueError):
@@ -102,7 +103,9 @@ def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
                         JobStatus.READY_TO_PROMOTE,
                         JobStatus.PROMOTING,
                     ]
-                )
+                ),
+                col(Job.hold_requested_at).is_(None),
+                col(Job.cancel_requested_at).is_(None),
             )
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
         ).all()
@@ -126,6 +129,28 @@ def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
             )
         )
     ]
+
+
+def select_launchable_queue_jobs(
+    session: Session,
+    *,
+    active_jobs: list[ActiveJob],
+    capacity: ResourceCapacity,
+    limit: int,
+) -> list[Job]:
+    active_job_ids = {job.job_id for job in active_jobs}
+    candidates = claimable_jobs(session, active_job_ids=active_job_ids)
+    jobs_by_id = {job.id: job for job in candidates if job.id is not None}
+    selected = select_launchable_jobs(
+        (
+            ClaimableJob(job_id=job.id, stage=job.stage)
+            for job in candidates
+            if job.id is not None
+        ),
+        active_jobs=active_jobs,
+        capacity=capacity,
+    )
+    return [jobs_by_id[job.job_id] for job in selected[:limit] if job.job_id in jobs_by_id]
 
 
 def select_queue_jobs(
