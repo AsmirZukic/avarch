@@ -13,7 +13,9 @@ from rich.text import Text
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
+    LifecycleEventSummary,
     SchedulerSnapshot,
+    SchedulerSessionRunSummary,
     WorkflowStepState,
     WorkflowStepSummary,
 )
@@ -42,6 +44,7 @@ def render_scheduler_dashboard(
     )
     side = Group(
         _capacity_panel(snapshot),
+        _session_panel(snapshot),
         _resource_panel(snapshot),
         _activity_panel(snapshot),
         _alerts_panel(snapshot),
@@ -107,7 +110,19 @@ def _compact_dashboard(
         width,
     )
     _append_line(text, "Resource telemetry unavailable", width)
-    _append_line(text, "Recent activity unavailable", width)
+    if snapshot.session is not None and snapshot.session.current is not None:
+        session = snapshot.session.current
+        _append_line(
+            text,
+            f"Session {session.owner_id} on {session.host} pid {session.pid or UNAVAILABLE}",
+            width,
+        )
+    if snapshot.recent_events:
+        _append_line(text, "Recent", width)
+        for event in snapshot.recent_events[:3]:
+            _append_line(text, f"- {_event_line(event)}", width)
+    else:
+        _append_line(text, "Recent activity unavailable", width)
     _append_line(text, _footer_text(mode), width)
     return text
 
@@ -211,10 +226,73 @@ def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
     return Panel(str(snapshot.resources), title="Resources", border_style="green")
 
 
+def _session_panel(snapshot: SchedulerSnapshot) -> Panel:
+    if snapshot.session is None:
+        return Panel("No scheduler sessions", title="Session", border_style="grey50")
+    table = Table.grid(padding=(0, 2))
+    table.add_column()
+    table.add_column()
+    if snapshot.session.current is None:
+        table.add_row("current", UNAVAILABLE)
+    else:
+        current = snapshot.session.current
+        table.add_row("current", _session_line(current))
+        table.add_row("started", current.started_at.isoformat(sep=" ", timespec="seconds"))
+    previous = [
+        _session_line(run)
+        for run in snapshot.session.recent
+        if snapshot.session.current is None or run.session_id != snapshot.session.current.session_id
+    ]
+    if previous:
+        table.add_row("previous", "\n".join(previous[:3]))
+    return Panel(table, title="Session", border_style="blue")
+
+
 def _activity_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.recent_events:
         return Panel("Recent activity unavailable", title="Recent Activity", border_style="grey50")
-    return Panel("\n".join(str(event) for event in snapshot.recent_events), title="Recent Activity")
+    table = Table(expand=True)
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Job", justify="right", no_wrap=True)
+    table.add_column("Stage", no_wrap=True)
+    table.add_column("Event")
+    table.add_column("Details", overflow="fold")
+    for event in snapshot.recent_events:
+        table.add_row(
+            event.created_at.strftime("%H:%M:%S"),
+            str(event.job_id),
+            event.stage.value if event.stage is not None else UNAVAILABLE,
+            event.event_type.value,
+            _event_details(event),
+        )
+    return Panel(table, title="Recent Activity", border_style="magenta")
+
+
+def _session_line(session: SchedulerSessionRunSummary) -> str:
+    state = "active" if session.active else session.end_reason or "ended"
+    pid = str(session.pid) if session.pid is not None else UNAVAILABLE
+    return f"{session.owner_id} on {session.host} pid {pid} ({state})"
+
+
+def _event_line(event: LifecycleEventSummary) -> str:
+    stage = event.stage.value if event.stage is not None else UNAVAILABLE
+    return f"job {event.job_id} {stage} {event.event_type.value} {_event_details(event)}".rstrip()
+
+
+def _event_details(event: LifecycleEventSummary) -> str:
+    parts: list[str] = []
+    if event.reason:
+        parts.append(event.reason)
+    saved_bytes = event.details.get("saved_bytes")
+    if isinstance(saved_bytes, int):
+        parts.append(f"saved {format_size(saved_bytes)}")
+    error_type = event.details.get("error_type")
+    if isinstance(error_type, str):
+        parts.append(error_type)
+    size_decision = event.details.get("size_decision")
+    if isinstance(size_decision, str):
+        parts.append(size_decision.replace("_", " "))
+    return " · ".join(parts) if parts else UNAVAILABLE
 
 
 def _alerts_panel(snapshot: SchedulerSnapshot) -> Panel:
