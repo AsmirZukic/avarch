@@ -192,6 +192,7 @@ from avarch.bootstrap import (
     scheduler_control_store,
     scheduler_process_controller,
     scheduler_runner,
+    scheduler_snapshot_query,
     scheduler_status_store,
     upgrade_database_schema,
     vapoursynth_environment_adapters,
@@ -236,7 +237,6 @@ from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
-from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
 from avarch.presentation.scheduler_dashboard import (
     DashboardMode,
     render_scheduler_dashboard,
@@ -728,6 +728,7 @@ def run_queue(
         summary = asyncio.run(
             _run_scheduler_with_optional_live_progress(
                 database_url=database_url,
+                workspace_root=cli_workspace.workspace_root,
                 runtime_config=runtime_config,
                 runner_id=runner_id,
                 resume=resume,
@@ -760,6 +761,7 @@ def run_queue(
 async def _run_scheduler_with_optional_live_progress(
     *,
     database_url: str,
+    workspace_root: Path,
     runtime_config: AppConfig,
     runner_id: str,
     resume: bool,
@@ -788,7 +790,9 @@ async def _run_scheduler_with_optional_live_progress(
     if not _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty()):
         return await scheduler_task
 
-    monitor_task = asyncio.create_task(_render_scheduler_live_progress(database_url))
+    monitor_task = asyncio.create_task(
+        _render_scheduler_live_progress(database_url, workspace_root=workspace_root)
+    )
     try:
         return await scheduler_task
     finally:
@@ -805,12 +809,19 @@ def _scheduler_live_progress_enabled(
     return mode == "foreground" and stdout_is_tty
 
 
-async def _render_scheduler_live_progress(database_url: str) -> None:
+async def _render_scheduler_live_progress(database_url: str, *, workspace_root: Path) -> None:
     color = os.environ.get("NO_COLOR") is None
     console = Console(file=sys.stdout, color_system="auto" if color else None)
+    query = _LiveSchedulerSnapshotQuery(database_url=database_url, workspace_root=workspace_root)
     with Live(console=console, refresh_per_second=4, transient=False) as live:
         while True:
-            live.update(_scheduler_progress_renderable(_active_scheduler_progress_rows(database_url)))
+            live.update(
+                render_scheduler_dashboard(
+                    query.snapshot(),
+                    width=console.width,
+                    mode=DashboardMode.OWNER,
+                )
+            )
             await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
 
 
@@ -1052,9 +1063,9 @@ def scheduler_watch_command(
 
     cli_workspace = _load_cli_workspace()
     with db_session(cli_workspace.database_url) as session:
-        snapshot = SqliteSchedulerSnapshotQuery(
+        snapshot = scheduler_snapshot_query(
             session,
-            workspace_root=str(cli_workspace.workspace_root),
+            workspace_root=cli_workspace.workspace_root,
             database_url=cli_workspace.database_url,
             now=_utc_now,
         ).snapshot()
@@ -1111,9 +1122,9 @@ class _LiveSchedulerSnapshotQuery:
 
     def snapshot(self):  # type: ignore[no-untyped-def]
         with db_session(self._database_url) as session:
-            return SqliteSchedulerSnapshotQuery(
+            return scheduler_snapshot_query(
                 session,
-                workspace_root=str(self._workspace_root),
+                workspace_root=self._workspace_root,
                 database_url=self._database_url,
                 now=_utc_now,
             ).snapshot()

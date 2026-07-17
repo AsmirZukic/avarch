@@ -38,6 +38,7 @@ def render_scheduler_dashboard(
         _pipeline_panel(snapshot),
         _active_jobs_panel(snapshot),
         _upcoming_panel(snapshot),
+        _footer(mode),
     )
     side = Group(
         _capacity_panel(snapshot),
@@ -107,7 +108,18 @@ def _compact_dashboard(
     )
     _append_line(text, "Resource telemetry unavailable", width)
     _append_line(text, "Recent activity unavailable", width)
+    _append_line(text, _footer_text(mode), width)
     return text
+
+
+def _footer(mode: DashboardMode) -> Panel:
+    return Panel(_footer_text(mode), title="Controls", border_style="grey50")
+
+
+def _footer_text(mode: DashboardMode) -> str:
+    if mode == DashboardMode.OWNER:
+        return "Ctrl+C stops the scheduler"
+    return "Ctrl+C detaches; scheduler remains running"
 
 
 def _header(snapshot: SchedulerSnapshot, *, mode: DashboardMode) -> Panel:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ from avarch.adapters.sqlite.planning import SqlitePlanningUnitOfWork
 from avarch.adapters.sqlite.probing import SqliteProbeStore
 from avarch.adapters.sqlite.queue_control import SqliteQueueControlStore, SqliteQueueRetryStore
 from avarch.adapters.sqlite.scheduler_control import SqliteSchedulerControlStore
+from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
 from avarch.adapters.sqlite.scheduler_status import SqliteSchedulerStatusStore
 from avarch.adapters.sqlite.urls import resolve_database_url
 from avarch.adapters.vapoursynth import (
@@ -149,6 +151,7 @@ __all__ = [
     "queue_retry_store",
     "scheduler_control_store",
     "scheduler_process_controller",
+    "scheduler_snapshot_query",
     "scheduler_runner",
     "scheduler_status_store",
     "upgrade_database_schema",
@@ -342,6 +345,21 @@ def scheduler_control_store(session: Session) -> SqliteSchedulerControlStore:
 
 def scheduler_status_store(session: Session) -> SqliteSchedulerStatusStore:
     return SqliteSchedulerStatusStore(session)
+
+
+def scheduler_snapshot_query(
+    session: Session,
+    *,
+    workspace_root: Path,
+    database_url: str | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> SqliteSchedulerSnapshotQuery:
+    return SqliteSchedulerSnapshotQuery(
+        session,
+        workspace_root=str(workspace_root),
+        database_url=database_url,
+        now=now,
+    )
 
 
 def manual_validation_worker() -> SchedulerManualValidationWorker:
