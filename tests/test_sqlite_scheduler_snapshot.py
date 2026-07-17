@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -273,7 +274,7 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
                 updated_at=now.replace(tzinfo=None),
             )
         )
-        _job(
+        running_encode = _job(
             session,
             path="/media/running-encode.mkv",
             status=JobStatus.ENCODING,
@@ -281,6 +282,16 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
             priority=100,
             created_at=now - timedelta(minutes=5),
         )
+        running_attempt = _attempt(
+            running_encode,
+            attempt_number=1,
+            status=AttemptStatus.RUNNING,
+            started_at=now - timedelta(minutes=4),
+        )
+        running_attempt.command_json = json.dumps(
+            {"av1an_argv": ["av1an", "-i", "source.mkv", "--workers", "4"]}
+        )
+        session.add(running_attempt)
         _job(
             session,
             path="/media/would-encode-next.mkv",
@@ -322,6 +333,7 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
         "current_snapshot",
         "current_snapshot",
     ]
+    assert snapshot.capacity.av1an_workers_configured == 4
 
 
 def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path: Path) -> None:

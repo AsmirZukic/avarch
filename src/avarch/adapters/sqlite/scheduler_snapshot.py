@@ -145,9 +145,25 @@ class SqliteSchedulerSnapshotQuery:
             av1an_active=state.capacity_av1an_active or 0,
             file_ops=state.capacity_file_ops or 0,
             file_ops_active=state.capacity_file_ops_active or 0,
+            av1an_workers_configured=self._active_av1an_workers_configured(),
             observed_at=state.capacity_observed_at,
             stale=stale,
         )
+
+    def _active_av1an_workers_configured(self) -> int | None:
+        rows = self._session.exec(
+            select(JobAttempt.command_json)
+            .where(JobAttempt.stage == JobStage.ENCODE)
+            .where(JobAttempt.status == AttemptStatus.RUNNING)
+        ).all()
+        workers = tuple(
+            worker_count
+            for command_json in rows
+            if (worker_count := _av1an_workers_from_command(command_json)) is not None
+        )
+        if not workers:
+            return None
+        return sum(workers)
 
     def _active_jobs(self, *, captured_at: datetime) -> tuple[ActiveJobSummary, ...]:
         rows = list(
@@ -482,6 +498,33 @@ def _pad_active_jobs_from_capacity_state(
             synthetic_id -= 1
             active_by_resource[resource] += 1
     return padded
+
+
+def _av1an_workers_from_command(command_json: str | None) -> int | None:
+    if command_json is None:
+        return None
+    try:
+        value = json.loads(command_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    argv = value.get("av1an_argv")
+    if not isinstance(argv, list):
+        return None
+    args = [str(arg) for arg in argv]
+    try:
+        index = args.index("--workers")
+    except ValueError:
+        return None
+    next_index = index + 1
+    if next_index >= len(args):
+        return None
+    try:
+        workers = int(args[next_index])
+    except ValueError:
+        return None
+    return workers if workers > 0 else None
 
 
 def _attempt_progress_summary(

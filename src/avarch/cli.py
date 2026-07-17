@@ -100,7 +100,11 @@ from avarch.application.queue_control import (
     retry_job,
     retry_queue,
 )
-from avarch.application.resource_telemetry import apply_resource_health, safe_sample_resources
+from avarch.application.resource_telemetry import (
+    ResourceSampler,
+    apply_resource_health,
+    safe_sample_resources,
+)
 from avarch.application.scheduler_control import (
     SchedulerControlWorkflowError,
     drain_scheduler,
@@ -812,11 +816,16 @@ async def _render_scheduler_live_progress(database_url: str, *, workspace_root: 
     color = os.environ.get("NO_COLOR") is None
     console = Console(file=sys.stdout, color_system="auto" if color else None)
     query = _LiveSchedulerSnapshotQuery(database_url=database_url, workspace_root=workspace_root)
+    resource_sampler = scheduler_resource_sampler(database_url=database_url, clock=_utc_now)
     with Live(console=console, refresh_per_second=4, transient=False, screen=True) as live:
         while True:
+            snapshot = _snapshot_with_resource_telemetry(
+                query.snapshot(),
+                sampler=resource_sampler,
+            )
             live.update(
                 render_scheduler_dashboard(
-                    query.snapshot(),
+                    snapshot,
                     width=console.width,
                     mode=DashboardMode.OWNER,
                     height=console.height,
@@ -1075,7 +1084,7 @@ def scheduler_watch_command(
 
     snapshot = _snapshot_with_resource_telemetry(
         snapshot,
-        database_url=cli_workspace.database_url,
+        sampler=scheduler_resource_sampler(database_url=cli_workspace.database_url, clock=_utc_now),
     )
 
     console = Console(
@@ -1148,9 +1157,8 @@ class _LiveSchedulerWatchSink:
 
 
 def _snapshot_with_resource_telemetry(
-    snapshot: SchedulerSnapshot, *, database_url: str
+    snapshot: SchedulerSnapshot, *, sampler: ResourceSampler
 ) -> SchedulerSnapshot:
-    sampler = scheduler_resource_sampler(database_url=database_url, clock=_utc_now)
     sample = safe_sample_resources(sampler, clock=lambda: snapshot.captured_at)
     sample = apply_resource_health(sample)
     return snapshot.model_copy(

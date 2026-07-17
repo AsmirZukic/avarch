@@ -50,7 +50,8 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "✓ probe" in output
     assert "● encode" in output
     assert "○ validate" in output
-    assert "████" in output
+    assert "━" in output
+    assert "░" not in output
     assert "50%" in output
     assert "100/200 frames" in output
     assert "12.5 fps" in output
@@ -65,7 +66,7 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "18s ago" in output
     assert "next.mkv" in output
     assert "Capacity" in output
-    assert "encode slots" in output
+    assert "encode jobs" in output
     assert "Recent activity unavailable" in output
     assert "Resource telemetry unavailable" in output
 
@@ -186,14 +187,17 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
     wide = _render(snapshot, width=150)
     narrow = _render(snapshot, width=70)
 
-    assert "encode slots" in wide
+    assert "encode jobs" in wide
     assert "1/2" in wide
-    assert "light workers" in wide
+    assert "light stages" in wide
+    assert "light workers" not in wide
     assert "cheap workers" not in wide
     assert "file operations" in wide
     assert "0/1" in wide
+    assert "encode chunks" in wide
+    assert "2/5" in wide
     assert "Av1an workers" in wide
-    assert "4 configured" in wide
+    assert "4 active" in wide
     assert "freshness" in wide
     assert "stale" in wide
     assert "current_snapshot" in wide
@@ -214,9 +218,19 @@ def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
         shortcuts_available=False,
     )
 
-    assert "p pause   c cancel   l logs   Enter details   q detach" in observer
-    assert "Ctrl+C stop scheduler" in owner
+    assert "p pause/resume   c cancel   l logs   Enter details   q detach" in observer
+    assert "p pause/resume   c cancel   l logs   Enter details   q detach   Ctrl+C stop" in owner
     assert "Ctrl+C detach · interactive shortcuts unavailable" in unsupported
+
+
+def test_live_dashboard_uses_full_height_and_plain_footer() -> None:
+    output = _render(_snapshot(), width=150, height=40)
+    lines = output.splitlines()
+
+    assert len(lines) == 40
+    assert "Recent Activity" in output
+    assert "Controls" not in output
+    assert "p pause/resume   c cancel   l logs   Enter details   q detach" in lines[-2]
 
 
 def test_dashboard_renders_resource_telemetry() -> None:
@@ -286,7 +300,7 @@ def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
         width=150,
     )
 
-    assert "Resource telemetry unavailable" in unavailable
+    assert "unsupported_platform" in unavailable
     assert "freshness" in stale
     assert "stale" in stale
 
@@ -383,14 +397,22 @@ def _render(
     snapshot: SchedulerSnapshot,
     *,
     width: int,
+    height: int | None = None,
     mode: DashboardMode = DashboardMode.OBSERVER,
     shortcuts_available: bool = True,
 ) -> str:
-    console = Console(record=True, width=width, color_system=None, file=StringIO())
+    console = Console(
+        record=True,
+        width=width,
+        height=height,
+        color_system=None,
+        file=StringIO(),
+    )
     console.print(
         render_scheduler_dashboard(
             snapshot,
             width=width,
+            height=height,
             mode=mode,
             shortcuts_available=shortcuts_available,
         )
