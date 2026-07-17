@@ -5,6 +5,7 @@ from io import StringIO
 
 from rich.console import Console
 
+from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth
 from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
@@ -14,6 +15,7 @@ from avarch.application.scheduler_snapshot import (
     CapacitySummary,
     LifecycleEventSummary,
     PipelineSummary,
+    QueueForecastSummary,
     ResourceMetricSummary,
     ResourceTelemetrySummary,
     SchedulerRuntimeState,
@@ -323,6 +325,51 @@ def test_dashboard_renders_job_details_and_bounded_log_tail(monkeypatch) -> None
     assert "should-not-appear" not in output
 
 
+def test_dashboard_renders_forecast_and_estimated_starts() -> None:
+    unavailable = _render(
+        _snapshot(
+            forecast=QueueForecastSummary(
+                available=False,
+                reason="insufficient_history",
+                confidence=ForecastConfidence.UNAVAILABLE,
+                sample_count=4,
+            )
+        ),
+        width=150,
+    )
+    low_confidence = _render(
+        _snapshot(
+            upcoming_jobs=(
+                UpcomingJobSummary(
+                    job_id=2,
+                    source_path="/media/next.mkv",
+                    profile_name="default",
+                    stage=JobStage.ENCODE,
+                    status=JobStatus.QUEUED,
+                    priority=5,
+                    selection_position=1,
+                    selection_confidence="current_snapshot",
+                    estimated_start_lower_seconds=18 * 3600,
+                    estimated_start_upper_seconds=30 * 3600,
+                ),
+            ),
+            forecast=QueueForecastSummary(
+                available=True,
+                confidence=ForecastConfidence.LOW,
+                sample_count=7,
+                lower_seconds=(24 + 18) * 3600,
+                upper_seconds=(3 * 24 + 4) * 3600,
+            ),
+        ),
+        width=150,
+    )
+
+    assert "forecast unavailable · insufficient history" in unavailable
+    assert "forecast 1d 18h-3d 4h · low confidence · n=7" in low_confidence
+    assert "starts in 18h-1d 6h" in low_confidence
+    assert "42m 17s" not in low_confidence
+
+
 def _render(
     snapshot: SchedulerSnapshot,
     *,
@@ -349,9 +396,11 @@ def _snapshot(
     session: SessionSummary | None = None,
     recent_events: tuple[LifecycleEventSummary, ...] = (),
     blocked_jobs: tuple[BlockedJobSummary, ...] = (),
+    upcoming_jobs: tuple[UpcomingJobSummary, ...] | None = None,
     resources: ResourceTelemetrySummary | None = None,
     watch_details: WatchJobDetailsSummary | None = None,
     watch_log_tail: WatchLogTailSummary | None = None,
+    forecast: QueueForecastSummary | None = None,
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -381,7 +430,9 @@ def _snapshot(
             av1an_workers_configured=4,
         ),
         blocked_jobs=blocked_jobs,
-        upcoming_jobs=(
+        upcoming_jobs=upcoming_jobs
+        if upcoming_jobs is not None
+        else (
             UpcomingJobSummary(
                 job_id=2,
                 source_path="/media/next.mkv",
@@ -398,7 +449,7 @@ def _snapshot(
         resources=resources,
         watch_details=watch_details,
         watch_log_tail=watch_log_tail,
-        forecast=None,
+        forecast=forecast,
     )
 
 

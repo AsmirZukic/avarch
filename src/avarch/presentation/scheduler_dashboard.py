@@ -216,12 +216,16 @@ def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
     table.add_column("File", overflow="fold")
     table.add_column("Profile")
     table.add_column("Stage")
+    table.add_column("Estimate")
+    if snapshot.forecast is not None:
+        table.add_row("", _forecast_line(snapshot), "", "", "")
     for job in snapshot.upcoming_jobs:
         table.add_row(
             str(job.selection_position or ""),
             _display_path(job.source_path),
             job.profile_name or UNAVAILABLE,
             f"{job.stage.value} · {job.selection_confidence or UNAVAILABLE}",
+            _upcoming_start(job),
         )
     return Panel(table, title="Upcoming Jobs", border_style="blue")
 
@@ -323,6 +327,56 @@ def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
     if resources.stale:
         table.add_row("freshness", "stale", "")
     return Panel(table, title="Resources", border_style=_resource_border(resources.health))
+
+
+def _forecast_line(snapshot: SchedulerSnapshot) -> str:
+    forecast = snapshot.forecast
+    if forecast is None:
+        return UNAVAILABLE
+    if not forecast.available:
+        return f"forecast unavailable · {_forecast_reason(forecast.reason)}"
+    if forecast.lower_seconds is None or forecast.upper_seconds is None:
+        return "forecast unavailable · incomplete estimate"
+    return (
+        f"forecast {_forecast_range(forecast.lower_seconds, forecast.upper_seconds)} · "
+        f"{forecast.confidence.value} confidence · n={forecast.sample_count}"
+    )
+
+
+def _upcoming_start(job: object) -> str:
+    lower = getattr(job, "estimated_start_lower_seconds", None)
+    upper = getattr(job, "estimated_start_upper_seconds", None)
+    if lower is None or upper is None:
+        return UNAVAILABLE
+    return f"starts in {_forecast_range(lower, upper)}"
+
+
+def _forecast_range(lower_seconds: int, upper_seconds: int) -> str:
+    lower = _forecast_duration(lower_seconds)
+    upper = _forecast_duration(upper_seconds)
+    return lower if lower == upper else f"{lower}-{upper}"
+
+
+def _forecast_duration(seconds: int) -> str:
+    seconds = max(0, seconds)
+    hours = seconds // 3600
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h"
+    minutes = seconds // 60
+    return f"{minutes}m" if minutes > 0 else f"{seconds}s"
+
+
+def _forecast_reason(reason: str | None) -> str:
+    if reason == "insufficient_history":
+        return "insufficient history"
+    if reason == "multi_lane_capacity_not_supported":
+        return "multi-lane capacity unsupported"
+    if reason is None:
+        return UNAVAILABLE
+    return reason.replace("_", " ")
 
 
 def _session_panel(snapshot: SchedulerSnapshot) -> Panel:
