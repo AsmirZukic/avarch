@@ -6,6 +6,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth, ResourceSample
 from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
@@ -149,6 +150,8 @@ class UpcomingJobSummary(SnapshotModel):
     queued_at: datetime | None = None
     selection_position: int | None = Field(default=None, ge=1, strict=True)
     selection_confidence: str | None = None
+    estimated_start_lower_seconds: int | None = Field(default=None, ge=0, strict=True)
+    estimated_start_upper_seconds: int | None = Field(default=None, ge=0, strict=True)
 
 
 class SchedulerAlert(SnapshotModel):
@@ -222,6 +225,15 @@ class WatchLogTailSummary(SnapshotModel):
     truncated: bool = False
 
 
+class QueueForecastSummary(SnapshotModel):
+    available: bool
+    reason: str | None = None
+    confidence: ForecastConfidence = ForecastConfidence.UNAVAILABLE
+    sample_count: int = Field(default=0, ge=0, strict=True)
+    lower_seconds: int | None = Field(default=None, ge=0, strict=True)
+    upper_seconds: int | None = Field(default=None, ge=0, strict=True)
+
+
 class SchedulerSnapshot(SnapshotModel):
     captured_at: datetime
     workspace: WorkspaceSummary
@@ -237,7 +249,7 @@ class SchedulerSnapshot(SnapshotModel):
     watch_details: WatchJobDetailsSummary | None = None
     watch_log_tail: WatchLogTailSummary | None = None
     alerts: tuple[SchedulerAlert, ...] = ()
-    forecast: object | None = None
+    forecast: QueueForecastSummary | None = None
 
     def to_canonical_json(self) -> str:
         return canonical_json(self)
