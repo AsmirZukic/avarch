@@ -46,6 +46,11 @@ class JobProgressView:
     observed_at: datetime | None
     heartbeat_at: datetime | None
     advanced_at: datetime | None
+    chunks_current: int | None = None
+    chunks_total: int | None = None
+    bitrate_kbps: int | None = None
+    estimated_output_bytes: int | None = None
+    written_output_bytes: int | None = None
 
 
 def job_progress_view(
@@ -122,6 +127,11 @@ def job_progress_view(
         observed_at=snapshot.observed_at,
         heartbeat_at=snapshot.heartbeat_at,
         advanced_at=snapshot.advanced_at,
+        chunks_current=snapshot.chunks_current,
+        chunks_total=snapshot.chunks_total,
+        bitrate_kbps=snapshot.bitrate_kbps,
+        estimated_output_bytes=snapshot.estimated_output_bytes,
+        written_output_bytes=snapshot.written_output_bytes,
     )
 
 

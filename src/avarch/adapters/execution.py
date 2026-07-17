@@ -644,6 +644,10 @@ def _publish_av1an_sample(
             observed_at=now,
             heartbeat_at=now,
             advanced_at=now,
+            chunks_current=sample.chunks_current,
+            chunks_total=sample.chunks_total,
+            bitrate_kbps=sample.bitrate_kbps,
+            estimated_output_bytes=sample.estimated_output_bytes,
         ),
     )
 
