@@ -1086,6 +1086,21 @@ The overhaul is complete only when all of the following are true.
 - Pyright passes at the project's configured strictness.
 - Migration and database tests pass.
 - No circular imports remain.
+
+## 21. Scheduler Watch and Studio Integration Notes
+
+`scheduler watch` is intentionally a presentation and control boundary, not a
+second scheduler runtime. The watch loop reads snapshots, samples host/container
+telemetry outside SQLite, and delegates pause, resume, cancellation, details,
+and log path resolution through application-layer ports. It must not call CLI
+command functions or mutate scheduler state directly.
+
+This split is the future Studio integration point. A graphical Studio surface
+should consume the same snapshot models and control boundary, while keeping
+keyboard input, terminal rendering, and Rich-specific layout code replaceable.
+Logs stay as bounded tails and are never parsed into lifecycle events by the
+dashboard. Resource telemetry remains Linux-first and informational: active
+output growth is not a claim about physical disk throughput.
 - No unused compatibility layers remain.
 - No broad `utils`, `helpers`, or `manager` modules contain domain behavior.
 - Documentation reflects the final package structure and lifecycle.

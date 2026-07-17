@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from sqlalchemy import Engine
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
@@ -34,12 +36,13 @@ from avarch.adapters.sqlite.job_transitions import (
     claim_job_stage,
     clear_hold_fields,
     complete_job_stage,
+    complete_scene_detect_stage,
     fail_job_stage,
     interrupt_job_stage,
     require_attempt,
     require_job,
 )
-from avarch.adapters.sqlite.models import Job, MediaFile, ProbeResult, ValidationResult
+from avarch.adapters.sqlite.models import Job, JobEvent, MediaFile, ProbeResult, ValidationResult
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.sqlite.progress import SqliteProgressStore
@@ -51,6 +54,7 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     RejectedOutputCleanupError,
     cleanup_rejected_output,
 )
+from avarch.adapters.sqlite.stage_events import record_stage_event
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
 from avarch.adapters.validation import ValidationError as OutputValidationError
 from avarch.adapters.validation import (
@@ -77,7 +81,13 @@ from avarch.application.vapoursynth_identity import (
     resolve_vapoursynth_template,
 )
 from avarch.config import AppConfig
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, job_has_passed_validation
+from avarch.domain.jobs import (
+    AttemptStatus,
+    JobEventType,
+    JobStage,
+    JobStatus,
+    job_has_passed_validation,
+)
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.models.execution import (
@@ -97,6 +107,136 @@ class _ProgressFanoutSink:
     def publish(self, snapshot: ProgressSnapshot) -> None:
         for sink in self._sinks:
             publish_progress_safely(sink, snapshot)
+
+
+class _SceneDetectStageProgressSink:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        job_id: int,
+        attempt_id: int,
+        downstream: ProgressSink,
+        scene_completed: bool = False,
+    ) -> None:
+        self._engine = engine
+        self._job_id = job_id
+        self._attempt_id = attempt_id
+        self._downstream = downstream
+        self._scene_started_at: datetime | None = None
+        self._scenes_found: int | None = None
+        self._chunks_prepared: int | None = None
+        self._completed = scene_completed
+        self._lock = Lock()
+
+    def publish(self, snapshot: ProgressSnapshot) -> None:
+        if snapshot.phase == ProgressPhase.SCENE_DETECTION:
+            if self._is_completed():
+                if snapshot.source == ProgressSource.PROCESS_HEARTBEAT:
+                    publish_progress_safely(self._downstream, _encoding_heartbeat(snapshot))
+                return
+            self._record_scene_progress(snapshot)
+        elif snapshot.phase == ProgressPhase.ENCODING:
+            self._complete_scene_detect(snapshot.observed_at)
+        publish_progress_safely(self._downstream, snapshot)
+
+    def complete_if_needed(self, *, now: datetime) -> None:
+        self._complete_scene_detect(now)
+
+    def _record_scene_progress(self, snapshot: ProgressSnapshot) -> None:
+        with self._lock:
+            self._scene_started_at = self._scene_started_at or snapshot.phase_started_at
+            self._scenes_found = _scenes_found_from_message(snapshot.message) or self._scenes_found
+            self._chunks_prepared = (
+                _chunks_prepared_from_message(snapshot.message) or self._chunks_prepared
+            )
+
+    def _is_completed(self) -> bool:
+        with self._lock:
+            return self._completed
+
+    def _complete_scene_detect(self, now: datetime) -> None:
+        with self._lock:
+            if self._completed:
+                return
+            started_at = self._scene_started_at
+            scenes_found = self._scenes_found
+            chunks_prepared = self._chunks_prepared
+            duration_seconds = (
+                round((now - started_at).total_seconds(), 1) if started_at is not None else None
+            )
+            with Session(self._engine) as session, session.begin():
+                complete_scene_detect_stage(
+                    session,
+                    job_id=self._job_id,
+                    attempt_id=self._attempt_id,
+                    scenes_found=scenes_found,
+                    chunks_prepared=chunks_prepared,
+                    duration_seconds=duration_seconds,
+                    now=now,
+                )
+            self._completed = True
+
+
+def _scenes_found_from_message(message: str | None) -> int | None:
+    if message is None:
+        return None
+    match = re.search(r"\bscenes found:\s*(\d[\d,]*)\b", message, re.IGNORECASE)
+    if match is None:
+        return None
+    return int(match.group(1).replace(",", ""))
+
+
+def _chunks_prepared_from_message(message: str | None) -> int | None:
+    if message is None:
+        return None
+    match = re.search(r"\bchunks prepared:\s*(\d[\d,]*)\b", message, re.IGNORECASE)
+    if match is None:
+        return None
+    return int(match.group(1).replace(",", ""))
+
+
+def _scene_detection_completed(session: Session, *, job_id: int) -> bool:
+    return (
+        session.exec(
+            select(JobEvent.id)
+            .where(JobEvent.job_id == job_id)
+            .where(JobEvent.event_type == JobEventType.SCENE_DETECT_COMPLETED)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
+def _restore_missing_scene_detect_stage(session: Session, *, job: Job) -> bool:
+    if JobStage(job.stage) != JobStage.ENCODE:
+        return False
+    job_id = require_id(job)
+    if _scene_detection_completed(session, job_id=job_id):
+        return True
+    job.stage = JobStage.SCENE_DETECT
+    session.add(job)
+    session.flush()
+    return False
+
+
+def _encoding_heartbeat(snapshot: ProgressSnapshot) -> ProgressSnapshot:
+    return replace(
+        snapshot,
+        phase=ProgressPhase.ENCODING,
+        current=None,
+        total=None,
+        unit=None,
+        rate_per_second=None,
+        speed_ratio=None,
+        message="telemetry pending",
+        chunks_current=None,
+        chunks_total=None,
+        bitrate_kbps=None,
+        estimated_output_bytes=None,
+        written_output_bytes=None,
+        advanced_at=None,
+    )
 
 
 async def execute_probe_job(
@@ -297,7 +437,7 @@ async def execute_plan_job(
             session,
             job_id=job_id,
             attempt_id=attempt_id,
-            next_stage=JobStage.ENCODE,
+            next_stage=JobStage.SCENE_DETECT,
             now=_utc_now(),
         )
 
@@ -313,6 +453,8 @@ async def execute_encode_job(
     now = _utc_now()
     with Session(engine) as session, session.begin():
         job = require_job(session, job_id)
+        scene_completed = _restore_missing_scene_detect_stage(session, job=job)
+        initial_stage = JobStage(job.stage)
         media_file = source_media_file(session, job.media_file_id)
         attempt = claim_job_stage(session, job_id=job_id, runner_id=runner_id, now=now)
         attempt_id = require_id(attempt)
@@ -359,11 +501,21 @@ async def execute_encode_job(
         )
     )
     persisted_progress_sink = ProgressPersistenceThrottle(progress_bridge)
-    execution_progress_sink = _ProgressFanoutSink(
+    execution_progress_sink: ProgressSink = _ProgressFanoutSink(
         (persisted_progress_sink, progress_sink)
         if progress_sink is not None
         else (persisted_progress_sink,)
     )
+    scene_detect_sink: _SceneDetectStageProgressSink | None = None
+    if initial_stage in {JobStage.SCENE_DETECT, JobStage.ENCODE}:
+        scene_detect_sink = _SceneDetectStageProgressSink(
+            engine=engine,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            downstream=execution_progress_sink,
+            scene_completed=scene_completed,
+        )
+        execution_progress_sink = scene_detect_sink
     process_cancellation = ProcessCancellationToken()
     execution_task = asyncio.create_task(
         asyncio.to_thread(
@@ -433,6 +585,8 @@ async def execute_encode_job(
     completed = _phase_snapshot(ProgressPhase.COMPLETED, now=_utc_now())
     await _persist_attempt_progress(engine, attempt_id=attempt_id, snapshot=completed)
     publish_progress_safely(progress_sink, completed)
+    if scene_detect_sink is not None:
+        scene_detect_sink.complete_if_needed(now=_utc_now())
     with Session(engine) as session, session.begin():
         attempt = require_attempt(session, attempt_id)
         attempt.details_json = canonical_json(
@@ -564,14 +718,31 @@ async def execute_validation_job(
             failed_checks=failed_checks,
             failed_summary=failed_check_summary(report),
         )
+        size_decision = None
         if report.passed:
-            _apply_size_policy_after_validation(
+            size_decision = _apply_size_policy_after_validation(
                 job=job,
                 plan=plan,
                 report=report,
                 config=config,
                 now=_utc_now(),
             )
+        record_stage_event(
+            session,
+            job_id=job_id,
+            attempt=attempt,
+            event_type=JobEventType.STAGE_COMPLETED
+            if report.passed
+            else JobEventType.STAGE_FAILED,
+            now=report.finished_at,
+            details=_validation_event_details(
+                result_id=result.id,
+                report=report,
+                failed_checks=failed_checks,
+                size_decision=size_decision,
+                source_size_bytes=plan.validation.source_size_bytes,
+            ),
+        )
         if report.passed and job.hold_requested_at is not None:
             clear_hold_fields(job)
         if report.passed:
@@ -660,11 +831,38 @@ async def execute_cleanup_job(
                 attempt.error_type = exc.__class__.__name__
                 attempt.error_message = str(exc)
                 attempt.finished_at = _utc_now()
+                record_stage_event(
+                    session,
+                    job_id=job_id,
+                    attempt=attempt,
+                    event_type=JobEventType.STAGE_FAILED,
+                    now=attempt.finished_at,
+                    details=_cleanup_event_details(
+                        decision=decision,
+                        plan=plan,
+                        report=report,
+                        output_path=validation.output_path,
+                        error_type=attempt.error_type,
+                    ),
+                )
                 session.add(job)
                 session.add(attempt)
                 return
             attempt.status = AttemptStatus.COMPLETED
             attempt.finished_at = _utc_now()
+            record_stage_event(
+                session,
+                job_id=job_id,
+                attempt=attempt,
+                event_type=JobEventType.STAGE_COMPLETED,
+                now=attempt.finished_at,
+                details=_cleanup_event_details(
+                    decision=decision,
+                    plan=plan,
+                    report=report,
+                    output_path=validation.output_path,
+                ),
+            )
             session.add(job)
             session.add(attempt)
         except Exception as exc:
@@ -725,12 +923,13 @@ def _apply_size_policy_after_validation(
     report: Any,
     config: AppConfig,
     now: datetime,
-) -> None:
+) -> SizeDecision:
     profile = require_profile(config, job.profile_name).profile
     decision = _size_policy_decision(profile=profile, plan=plan, report=report)
     if decision == SizeDecision.ACCEPT:
-        return
+        return decision
     job_transition_adapter.queue_rejected_output_cleanup(job, now=now)
+    return decision
 
 
 def _size_policy_decision(
@@ -752,6 +951,60 @@ def _size_policy_decision(
             minimum_savings_percent=profile.promotion.minimum_savings_percent,
         ),
     )
+
+
+def _validation_event_details(
+    *,
+    result_id: int | None,
+    report: ValidationReport,
+    failed_checks: list[str],
+    size_decision: SizeDecision | None,
+    source_size_bytes: int,
+) -> dict[str, object | None]:
+    output_size_bytes = _observed_output_size(report)
+    return {
+        "validation_result_id": result_id,
+        "passed": report.passed,
+        "failed_checks": list(failed_checks),
+        "source_size_bytes": source_size_bytes,
+        "output_size_bytes": output_size_bytes,
+        "saved_bytes": source_size_bytes - output_size_bytes
+        if output_size_bytes is not None
+        else None,
+        "size_decision": size_decision.value if size_decision is not None else None,
+        "source_safety_outcome": "original_retained",
+    }
+
+
+def _cleanup_event_details(
+    *,
+    decision: SizeDecision,
+    plan: TranscodePlan,
+    report: ValidationReport,
+    output_path: str,
+    error_type: str | None = None,
+) -> dict[str, object | None]:
+    output_size_bytes = _observed_output_size(report)
+    return {
+        "size_decision": decision.value,
+        "source_size_bytes": plan.validation.source_size_bytes,
+        "output_size_bytes": output_size_bytes,
+        "saved_bytes": plan.validation.source_size_bytes - output_size_bytes
+        if output_size_bytes is not None
+        else None,
+        "output_path": output_path,
+        "source_safety_outcome": "original_retained",
+        "error_type": error_type,
+    }
+
+
+def _observed_output_size(report: ValidationReport) -> int | None:
+    if report.observed is not None and report.observed.output_size_bytes is not None:
+        return report.observed.output_size_bytes
+    try:
+        return Path(report.output_path).stat().st_size
+    except OSError:
+        return None
 
 
 def _phase_snapshot(

@@ -74,6 +74,11 @@ class SqliteProgressStore:
             observed_at=row.observed_at,
             heartbeat_at=row.heartbeat_at,
             advanced_at=row.advanced_at,
+            chunks_current=row.chunks_current,
+            chunks_total=row.chunks_total,
+            bitrate_kbps=row.bitrate_kbps,
+            estimated_output_bytes=row.estimated_output_bytes,
+            written_output_bytes=row.written_output_bytes,
         )
 
     def finalize_snapshot(
@@ -115,6 +120,11 @@ class SqliteProgressStore:
             unit=ProgressUnit(existing.unit) if existing.unit is not None else None,
             rate_per_second=existing.rate_per_second,
             speed_ratio=existing.speed_ratio,
+            chunks_current=existing.chunks_current,
+            chunks_total=existing.chunks_total,
+            bitrate_kbps=existing.bitrate_kbps,
+            estimated_output_bytes=existing.estimated_output_bytes,
+            written_output_bytes=existing.written_output_bytes,
             advanced_at=_terminal_advanced_at(existing.advanced_at, snapshot=snapshot),
         )
 
@@ -167,6 +177,11 @@ def _apply_numeric_fields(row: JobAttemptProgress, *, snapshot: ProgressSnapshot
     row.unit = snapshot.unit
     row.rate_per_second = snapshot.rate_per_second
     row.speed_ratio = snapshot.speed_ratio
+    row.chunks_current = snapshot.chunks_current
+    row.chunks_total = snapshot.chunks_total
+    row.bitrate_kbps = snapshot.bitrate_kbps
+    row.estimated_output_bytes = snapshot.estimated_output_bytes
+    row.written_output_bytes = snapshot.written_output_bytes
 
 
 def _preserve_existing_progress(row: JobAttemptProgress, *, snapshot: ProgressSnapshot) -> bool:

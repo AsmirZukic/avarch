@@ -59,10 +59,20 @@ class ProgressSnapshot:
     observed_at: datetime
     heartbeat_at: datetime
     advanced_at: datetime | None
+    chunks_current: int | None = None
+    chunks_total: int | None = None
+    bitrate_kbps: int | None = None
+    estimated_output_bytes: int | None = None
+    written_output_bytes: int | None = None
 
     def __post_init__(self) -> None:
         _validate_non_negative("current", self.current)
         _validate_positive("total", self.total)
+        _validate_non_negative("chunks_current", self.chunks_current)
+        _validate_positive("chunks_total", self.chunks_total)
+        _validate_non_negative("bitrate_kbps", self.bitrate_kbps)
+        _validate_non_negative("estimated_output_bytes", self.estimated_output_bytes)
+        _validate_non_negative("written_output_bytes", self.written_output_bytes)
         _validate_optional_positive_float("rate_per_second", self.rate_per_second)
         _validate_optional_positive_float("speed_ratio", self.speed_ratio)
         if (self.current is not None or self.total is not None) and self.unit is None:

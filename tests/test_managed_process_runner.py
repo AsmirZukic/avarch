@@ -281,6 +281,8 @@ while True:
     assert result is not None
     assert result.termination_reason is ProcessTerminationReason.FORCED_KILL
     assert result.succeeded is False
+    assert result.termination_requested_at is not None
+    assert result.started_at <= result.termination_requested_at <= result.finished_at
 
 
 class _ThreadedProcessResult:

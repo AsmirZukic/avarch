@@ -16,15 +16,20 @@ from avarch.adapters.sqlite.models import (
     PromotionRecord,
 )
 from avarch.adapters.sqlite.progress import SqliteProgressStore
+from avarch.adapters.sqlite.stage_events import (
+    current_scheduler_session_id,
+    record_stage_event,
+)
 from avarch.domain.jobs import (
     AttemptStatus,
+    JobEventType,
     JobOutcomeReason,
     JobStage,
     JobStatus,
     ResourceClass,
 )
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
-from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
+from avarch.models.promotion import FileStatSnapshot, PromotionMode, PromotionPhase, PromotionStatus
 
 
 class PromotionRecordNotFoundError(LookupError):
@@ -169,6 +174,7 @@ def persist_promotion_claim(
     job.updated_at = claim.now
     attempt = JobAttempt(
         job_id=claim.job_id,
+        scheduler_session_id=current_scheduler_session_id(session, runner_id=claim.owner_token),
         attempt_number=claim.attempt_number,
         stage=JobStage.PROMOTE,
         resource_class=ResourceClass.FILE_OP,
@@ -223,6 +229,18 @@ def persist_promotion_claim(
         persisted_at=claim.now,
     )
     job.latest_promotion_id = record.id
+    record_stage_event(
+        session,
+        job_id=claim.job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_STARTED,
+        now=claim.now,
+        details={
+            "promotion_id": record.id,
+            "mode": claim.mode.value,
+            "validation_result_id": claim.validation_result_id,
+        },
+    )
     session.add(job)
     return record
 
@@ -307,6 +325,7 @@ def update_promotion_cleanup(
     now: datetime,
 ) -> PromotionRecord:
     record = _require_promotion_record(session, promotion_id)
+    attempt = _require_attempt(session, record.attempt_id)
     if cleanup_error is None:
         record.cleanup_completed = True
         record.phase = PromotionPhase.CLEANUP_COMPLETE
@@ -316,6 +335,24 @@ def update_promotion_cleanup(
     record.updated_at = now
     session.add(record)
     session.flush()
+    record_stage_event(
+        session,
+        job_id=record.job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_COMPLETED
+        if cleanup_error is None
+        else JobEventType.STAGE_FAILED,
+        stage=JobStage.CLEANUP,
+        now=now,
+        details={
+            "promotion_id": promotion_id,
+            "cleanup_completed": cleanup_error is None,
+            "cleanup_error": cleanup_error,
+            "source_safety_outcome": "original_retained"
+            if PromotionMode(record.mode) == PromotionMode.KEEP_ORIGINAL
+            else "promoted_source_verified",
+        },
+    )
     session.refresh(record)
     return record.model_copy(deep=True)
 
@@ -345,6 +382,18 @@ def mark_promotion_rolled_back(
         attempt_id=attempt.id or record.attempt_id,
         snapshot=_promotion_progress_snapshot(ProgressPhase.CANCELLED, now=now),
         persisted_at=now,
+    )
+    record_stage_event(
+        session,
+        job_id=record.job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_CANCELLED,
+        now=now,
+        details={
+            "promotion_id": promotion_id,
+            "phase": PromotionPhase.ROLLED_BACK.value,
+            "source_safety_outcome": "rolled_back_to_original",
+        },
     )
     session.add(record)
     session.add(attempt)
@@ -407,6 +456,22 @@ def mark_promotion_failed_or_validated(
         ),
         persisted_at=now,
     )
+    record_stage_event(
+        session,
+        job_id=record.job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_FAILED,
+        now=now,
+        details={
+            "promotion_id": promotion_id,
+            "phase": str(record.phase),
+            "error_type": error.__class__.__name__,
+            "can_return_to_promote": can_return_to_promote,
+            "source_safety_outcome": "original_retained"
+            if can_return_to_promote
+            else "manual_inspection_required",
+        },
+    )
     session.add(record)
     session.add(attempt)
     session.add(job)
@@ -463,6 +528,31 @@ def commit_verified_promotion(
         attempt_id=attempt.id or record.attempt_id,
         snapshot=_promotion_progress_snapshot(ProgressPhase.COMPLETED, now=now),
         persisted_at=now,
+    )
+    mode = PromotionMode(record.mode)
+    source_stat = FileStatSnapshot.model_validate_json(record.source_stat_json)
+    output_size_bytes = (
+        media_snapshot.size_bytes if media_snapshot is not None else installed_path.stat().st_size
+    )
+    record_stage_event(
+        session,
+        job_id=record.job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_COMPLETED,
+        now=now,
+        details={
+            "promotion_id": record.id,
+            "mode": mode.value,
+            "source_size_bytes": source_stat.size_bytes,
+            "output_size_bytes": output_size_bytes,
+            "saved_bytes": source_stat.size_bytes - output_size_bytes
+            if mode != PromotionMode.KEEP_ORIGINAL
+            else 0,
+            "source_safety_outcome": "original_retained"
+            if mode == PromotionMode.KEEP_ORIGINAL
+            else "source_replaced_after_verified_backup",
+            "final_path": str(installed_path),
+        },
     )
     session.add(record)
     session.add(attempt)

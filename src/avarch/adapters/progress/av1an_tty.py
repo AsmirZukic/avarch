@@ -8,9 +8,17 @@ from avarch.domain.progress import ProgressPhase, ProgressUnit
 SUPPORTED_AV1AN_TTY_PROGRESS_VERSION_FAMILY = "0.5.x"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-_CHUNKS_RE = re.compile(r"\[(?P<current>\d+)/(?P<total>\d+)\s+Chunks\]", re.IGNORECASE)
+_CHUNKS_RE = re.compile(
+    r"\[(?P<current>\d[\d,]*)/(?P<total>\d[\d,]*)\s+Chunks\]",
+    re.IGNORECASE,
+)
 _PROGRESS_RE = re.compile(
-    r".*?\b(?P<current>\d+)/(?P<total>\d+)\s*"
+    r".*?\b(?P<current>\d[\d,]*)/(?P<total>\d[\d,]*)\s*"
+    r"\(\s*(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
+    re.IGNORECASE,
+)
+_SCENE_SPINNER_RE = re.compile(
+    r".*?\b(?P<current>\d[\d,]*)\s+frames\s*"
     r"\(\s*(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
     re.IGNORECASE,
 )
@@ -19,11 +27,23 @@ _INPUT_FPS_RE = re.compile(
     re.IGNORECASE,
 )
 _BITRATE_RE = re.compile(
-    r",\s*(?P<bitrate>\d+(?:\.\d+)?\s+[KMGT]?bps)\b",
+    r",\s*(?P<bitrate_value>\d+(?:\.\d+)?)\s+(?P<bitrate_unit>[KMGT]?bps)\b",
     re.IGNORECASE,
 )
 _ESTIMATED_SIZE_RE = re.compile(
-    r",\s*(?P<size>est\.\s+\d+(?:\.\d+)?\s+[KMGT]?i?B)\b",
+    r",\s*est\.\s+(?P<size_value>\d+(?:\.\d+)?)\s+(?P<size_unit>[KMGT]?i?B)\b",
+    re.IGNORECASE,
+)
+_SCENECUT_RE = re.compile(
+    r"\bscenecut:\s+found\s+(?P<count>\d[\d,]*)\s+scene",
+    re.IGNORECASE,
+)
+_EXTRA_SPLIT_RE = re.compile(
+    r"\bextra_splits\s*\([^)]*\)\s*:\s*(?P<count>\d[\d,]*)\s+scene",
+    re.IGNORECASE,
+)
+_QUEUE_RE = re.compile(
+    r"\bQueue\s+(?P<chunks>\d[\d,]*)\s+Workers\s+(?P<workers>\d[\d,]*)\s+Encoder\b",
     re.IGNORECASE,
 )
 
@@ -31,12 +51,16 @@ _ESTIMATED_SIZE_RE = re.compile(
 @dataclass(frozen=True, slots=True)
 class Av1anTtyProgressSample:
     phase: ProgressPhase
-    current: int
-    total: int
-    unit: ProgressUnit
+    current: int | None
+    total: int | None
+    unit: ProgressUnit | None
     rate_per_second: float | None
     speed_ratio: float | None
     message: str | None
+    chunks_current: int | None = None
+    chunks_total: int | None = None
+    bitrate_kbps: int | None = None
+    estimated_output_bytes: int | None = None
 
 
 def av1an_tty_progress_supported(version_family: str, *, enabled: bool = True) -> bool:
@@ -106,22 +130,70 @@ def _parse_record(
     *,
     source_fps: float | None,
 ) -> Av1anTtyProgressSample | None:
+    queue = _QUEUE_RE.search(record)
+    if queue is not None:
+        chunks = _parse_int(queue.group("chunks"))
+        workers = _parse_int(queue.group("workers"))
+        return Av1anTtyProgressSample(
+            phase=ProgressPhase.ENCODING,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            message=f"{chunks} chunks queued, {workers} workers",
+        )
     match = _PROGRESS_RE.search(record)
     if match is None:
-        return None
+        spinner = _SCENE_SPINNER_RE.search(record)
+        if spinner is not None:
+            try:
+                current = _parse_int(spinner.group("current"))
+                rate = float(spinner.group("fps"))
+            except ValueError:
+                return None
+            return Av1anTtyProgressSample(
+                phase=ProgressPhase.SCENE_DETECTION,
+                current=current,
+                total=None,
+                unit=ProgressUnit.FRAMES,
+                rate_per_second=rate,
+                speed_ratio=_speed_ratio(rate, source_fps=source_fps),
+                message=None,
+            )
+        scene_message = _scene_detection_message(record)
+        if scene_message is None and record.strip() != "Scene detection":
+            return None
+        return Av1anTtyProgressSample(
+            phase=ProgressPhase.SCENE_DETECTION,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            message=scene_message,
+            chunks_total=_prepared_chunks(record),
+        )
     try:
-        current = int(match.group("current"))
-        total = int(match.group("total"))
+        current = _parse_int(match.group("current"))
+        total = _parse_int(match.group("total"))
         rate = float(match.group("fps"))
     except ValueError:
         return None
     chunks = _CHUNKS_RE.search(record)
     if chunks is None:
         phase = ProgressPhase.SCENE_DETECTION
-        message = None
+        message = _scene_detection_message(record)
+        chunks_current = None
+        chunks_total = _prepared_chunks(record)
     else:
         phase = ProgressPhase.ENCODING
         message = _encoding_message(record, chunks=chunks)
+        try:
+            chunks_current = _parse_int(chunks.group("current"))
+            chunks_total = _parse_int(chunks.group("total"))
+        except ValueError:
+            return None
     return Av1anTtyProgressSample(
         phase=phase,
         current=current,
@@ -130,6 +202,10 @@ def _parse_record(
         rate_per_second=rate,
         speed_ratio=_speed_ratio(rate, source_fps=source_fps),
         message=message,
+        chunks_current=chunks_current,
+        chunks_total=chunks_total,
+        bitrate_kbps=_parse_bitrate_kbps(record),
+        estimated_output_bytes=_parse_estimated_size_bytes(record),
     )
 
 
@@ -145,14 +221,76 @@ def _parse_source_fps(record: str) -> float | None:
 
 
 def _encoding_message(record: str, *, chunks: re.Match[str]) -> str:
-    parts = [f"{int(chunks.group('current'))}/{int(chunks.group('total'))} chunks"]
+    parts = [
+        f"{_parse_int(chunks.group('current'))}/{_parse_int(chunks.group('total'))} chunks"
+    ]
     bitrate = _BITRATE_RE.search(record)
     if bitrate is not None:
-        parts.append(bitrate.group("bitrate"))
+        parts.append(f"{bitrate.group('bitrate_value')} {bitrate.group('bitrate_unit')}")
     estimated_size = _ESTIMATED_SIZE_RE.search(record)
     if estimated_size is not None:
-        parts.append(estimated_size.group("size"))
+        parts.append(
+            f"est. {estimated_size.group('size_value')} {estimated_size.group('size_unit')}"
+        )
     return ", ".join(parts)
+
+
+def _scene_detection_message(record: str) -> str | None:
+    scenecut = _SCENECUT_RE.search(record)
+    if scenecut is None:
+        return None
+    parts = [f"scenes found: {_parse_int(scenecut.group('count'))}"]
+    extra_split = _EXTRA_SPLIT_RE.search(record)
+    if extra_split is not None:
+        parts.append(f"chunks prepared: {_parse_int(extra_split.group('count'))}")
+    return ", ".join(parts)
+
+
+def _prepared_chunks(record: str) -> int | None:
+    extra_split = _EXTRA_SPLIT_RE.search(record)
+    if extra_split is None:
+        return None
+    return _parse_int(extra_split.group("count"))
+
+
+def _parse_bitrate_kbps(record: str) -> int | None:
+    match = _BITRATE_RE.search(record)
+    if match is None:
+        return None
+    value = float(match.group("bitrate_value"))
+    unit = match.group("bitrate_unit").lower()
+    multiplier = {
+        "bps": 0.001,
+        "kbps": 1,
+        "mbps": 1_000,
+        "gbps": 1_000_000,
+        "tbps": 1_000_000_000,
+    }[unit]
+    return int(round(value * multiplier))
+
+
+def _parse_estimated_size_bytes(record: str) -> int | None:
+    match = _ESTIMATED_SIZE_RE.search(record)
+    if match is None:
+        return None
+    value = float(match.group("size_value"))
+    unit = match.group("size_unit").lower()
+    multiplier = {
+        "b": 1,
+        "kb": 1_000,
+        "mb": 1_000_000,
+        "gb": 1_000_000_000,
+        "tb": 1_000_000_000_000,
+        "kib": 1024,
+        "mib": 1024**2,
+        "gib": 1024**3,
+        "tib": 1024**4,
+    }[unit]
+    return int(round(value * multiplier))
+
+
+def _parse_int(value: str) -> int:
+    return int(value.replace(",", ""))
 
 
 def _speed_ratio(rate: float, *, source_fps: float | None) -> float | None:

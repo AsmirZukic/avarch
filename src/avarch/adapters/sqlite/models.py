@@ -163,14 +163,35 @@ class JobEvent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 
     job_id: int = Field(foreign_key="job.id", index=True)
+    attempt_id: int | None = Field(default=None, foreign_key="jobattempt.id", index=True)
+    scheduler_session_id: int | None = Field(
+        default=None,
+        foreign_key="scheduler_session.id",
+        index=True,
+    )
 
     event_type: JobEventType = Field(sa_column=Column(String(), nullable=False, index=True))
+    stage: JobStage | None = Field(default=None, sa_column=Column(String(), nullable=True))
 
     actor: str
     reason: str | None = None
     details_json: str | None = None
+    dedupe_key: str | None = Field(default=None, index=True)
 
     created_at: datetime
+
+
+class SchedulerSession(SQLModel, table=True):
+    __tablename__: ClassVar[str] = "scheduler_session"  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    id: int | None = Field(default=None, primary_key=True)
+    owner_id: str = Field(index=True)
+    workspace_id: str
+    pid: int | None = Field(default=None, index=True)
+    host: str
+    started_at: datetime
+    ended_at: datetime | None = Field(default=None, index=True)
+    end_reason: str | None = None
 
 
 class JobAttempt(SQLModel, table=True):
@@ -179,6 +200,11 @@ class JobAttempt(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 
     job_id: int = Field(foreign_key="job.id", index=True)
+    scheduler_session_id: int | None = Field(
+        default=None,
+        foreign_key="scheduler_session.id",
+        index=True,
+    )
     attempt_number: int
 
     stage: JobStage = Field(sa_column=Column(String(), nullable=False, index=True))
@@ -218,6 +244,11 @@ class JobAttemptProgress(SQLModel, table=True):
     speed_ratio: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
     source: ProgressSource = Field(sa_column=Column(String(), nullable=False))
     message: str | None = None
+    chunks_current: int | None = None
+    chunks_total: int | None = None
+    bitrate_kbps: int | None = None
+    estimated_output_bytes: int | None = None
+    written_output_bytes: int | None = None
 
     phase_started_at: datetime
     observed_at: datetime
@@ -323,5 +354,13 @@ class SchedulerState(SQLModel, table=True):
 
     heartbeat_at: datetime | None = None
     lease_expires_at: datetime | None = None
+
+    capacity_cheap_workers: int | None = None
+    capacity_cheap_active: int | None = None
+    capacity_av1an_jobs: int | None = None
+    capacity_av1an_active: int | None = None
+    capacity_file_ops: int | None = None
+    capacity_file_ops_active: int | None = None
+    capacity_observed_at: datetime | None = None
 
     updated_at: datetime

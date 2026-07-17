@@ -48,6 +48,7 @@ class JobOutcomeReason(StrEnum):
 class JobStage(StrEnum):
     PROBE = "probe"
     PLAN = "plan"
+    SCENE_DETECT = "scene_detect"
     ENCODE = "encode"
     VALIDATE = "validate"
     PROMOTE = "promote"
@@ -69,6 +70,12 @@ class AttemptStatus(StrEnum):
 
 
 class JobEventType(StrEnum):
+    STAGE_STARTED = "stage_started"
+    STAGE_COMPLETED = "stage_completed"
+    SCENE_DETECT_STARTED = "scene_detect_started"
+    SCENE_DETECT_COMPLETED = "scene_detect_completed"
+    STAGE_FAILED = "stage_failed"
+    STAGE_CANCELLED = "stage_cancelled"
     HOLD_REQUESTED = "hold_requested"
     HELD = "held"
     HOLD_RELEASED = "hold_released"

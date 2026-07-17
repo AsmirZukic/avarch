@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
+from avarch.adapters.sqlite.stage_events import (
+    current_scheduler_session_id,
+    record_stage_event,
+)
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
@@ -46,6 +50,7 @@ __all__ = [
     "cancel_claimed_job",
     "claim_job_stage",
     "clear_hold_fields",
+    "complete_scene_detect_stage",
     "complete_job_stage",
     "fail_job_stage",
     "fail_job_after_external",
@@ -110,6 +115,7 @@ def claim_job_stage(
     job.updated_at = now
     attempt = SQLiteJobAttempt(
         job_id=job_id,
+        scheduler_session_id=current_scheduler_session_id(session, runner_id=runner_id),
         attempt_number=job.attempts,
         stage=job.stage,
         resource_class=resource_for_stage(job.stage),
@@ -122,7 +128,71 @@ def claim_job_stage(
     session.flush()
     if attempt.id is None:
         raise JobClaimError("Attempt id was not assigned after claim.")
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=(
+            JobEventType.SCENE_DETECT_STARTED
+            if JobStage(job.stage) == JobStage.SCENE_DETECT
+            else JobEventType.STAGE_STARTED
+        ),
+        now=now,
+    )
     return attempt
+
+
+def complete_scene_detect_stage(
+    session: Session,
+    *,
+    job_id: int,
+    attempt_id: int,
+    scenes_found: int | None,
+    duration_seconds: float | None,
+    now: datetime,
+    chunks_prepared: int | None = None,
+) -> None:
+    job = require_job(session, job_id)
+    attempt = require_attempt(session, attempt_id)
+    if JobStage(job.stage) == JobStage.ENCODE and JobStage(attempt.stage) == JobStage.ENCODE:
+        return
+    if (
+        JobStage(job.stage) != JobStage.SCENE_DETECT
+        or JobStage(attempt.stage) != JobStage.SCENE_DETECT
+    ):
+        raise JobTransitionError("Scene detection can only complete from the scene_detect stage.")
+    if job.cancel_requested_at is not None:
+        cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+        return
+
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.SCENE_DETECT_COMPLETED,
+        stage=JobStage.SCENE_DETECT,
+        details={
+            "scenes_found": scenes_found,
+            "chunks_prepared": chunks_prepared,
+            "duration_seconds": duration_seconds,
+        },
+        now=now,
+    )
+    job.stage = JobStage.ENCODE
+    job.status = active_status_for_stage(JobStage.ENCODE)
+    job.updated_at = now
+    attempt.stage = JobStage.ENCODE
+    attempt.resource_class = resource_for_stage(JobStage.ENCODE)
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_STARTED,
+        stage=JobStage.ENCODE,
+        now=now,
+    )
+    session.add(job)
+    session.add(attempt)
 
 
 def complete_job_stage(
@@ -175,6 +245,13 @@ def complete_job_stage(
             reason=job.hold_reason,
             now=now,
         )
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_COMPLETED,
+        now=now,
+    )
     session.add(job)
     session.add(attempt)
 
@@ -207,6 +284,17 @@ def fail_job_stage(
     clear_hold_fields(job)
     job.updated_at = now
     job.finished_at = now
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_FAILED,
+        now=now,
+        details={
+            "error_type": attempt.error_type,
+            "exit_code": exit_code,
+        },
+    )
     session.add(job)
     session.add(attempt)
 
@@ -246,6 +334,14 @@ def interrupt_job_stage(
     job.claimed_by = None
     job.updated_at = now
     job.finished_at = None
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_CANCELLED,
+        now=now,
+        details={"reason": "interrupted"},
+    )
     session.add(job)
     session.add(attempt)
 
@@ -580,6 +676,14 @@ def cancel_claimed_job(
         actor=job.cancel_requested_by or "scheduler",
         reason=job.cancel_reason,
         now=now,
+    )
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_CANCELLED,
+        now=now,
+        details={"reason": "cancelled"},
     )
     session.add(job)
     session.add(attempt)

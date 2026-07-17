@@ -1,23 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
 from avarch.adapters.scheduler_workers import (
+    execute_cleanup_job,
     execute_encode_job,
     execute_promotion_job,
     execute_validation_job,
 )
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
-from avarch.adapters.sqlite.models import Job, JobAttemptProgress, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.models import (
+    Job,
+    JobAttemptProgress,
+    JobEvent,
+    MediaFile,
+    MediaFileStatus,
+)
 from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.adapters.validation import ValidationExecutionError
 from avarch.application.progress import ProgressSink
 from avarch.application.promotion import (
     PromotionPreflightView,
@@ -25,7 +34,7 @@ from avarch.application.promotion import (
     PromotionResultView,
 )
 from avarch.config import AppConfig, DatabaseSettings
-from avarch.domain.jobs import JobStage, JobStatus
+from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
@@ -466,11 +475,125 @@ def test_validation_worker_persists_validating_then_completed_progress(
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
         progress = session.get(JobAttemptProgress, 1)
+        events = session.exec(
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+        ).all()
 
     assert result is not None
     assert observed_phases == [ProgressPhase.VALIDATING]
     assert progress is not None
     assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
+    assert [JobEventType(event.event_type) for event in events] == [
+        JobEventType.STAGE_STARTED,
+        JobEventType.STAGE_COMPLETED,
+    ]
+    completion_details = json.loads(events[-1].details_json or "{}")
+    assert completion_details["passed"] is True
+    assert completion_details["size_decision"] == "accept"
+    assert completion_details["source_safety_outcome"] == "original_retained"
+
+
+def test_validation_worker_records_failure_lifecycle_event(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, _plan = _stored_validation_job(tmp_path)
+
+    async def fake_validate_output(**_kwargs: object) -> ValidationReport:
+        raise ValidationExecutionError("decode sample failed")
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.validate_output", fake_validate_output)
+
+    result = asyncio.run(execute_validation_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        events = session.exec(
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+        ).all()
+
+    assert result is None
+    assert [JobEventType(event.event_type) for event in events] == [
+        JobEventType.STAGE_STARTED,
+        JobEventType.STAGE_FAILED,
+    ]
+    failure_details = json.loads(events[-1].details_json or "{}")
+    assert failure_details["error_type"] == "ValidationExecutionError"
+
+
+def test_size_rejection_records_validation_and_cleanup_lifecycle_events(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, plan = _stored_validation_job(tmp_path)
+
+    async def fake_validate_output(**_kwargs: object) -> ValidationReport:
+        return _validation_report(
+            plan=plan,
+            now=datetime.now(UTC),
+            output_size_bytes=plan.validation.source_size_bytes + 1,
+        )
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.validate_output", fake_validate_output)
+
+    validation = asyncio.run(execute_validation_job(job_id=1, runner_id="runner", config=config))
+    asyncio.run(execute_cleanup_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        job = session.get(Job, 1)
+        events = session.exec(
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+        ).all()
+
+    assert validation is not None
+    assert job is not None
+    assert job.status == JobStatus.SIZE_REJECTED
+    cleanup_event = events[-1]
+    validation_event = events[1]
+    validation_details = json.loads(validation_event.details_json or "{}")
+    cleanup_details = json.loads(cleanup_event.details_json or "{}")
+    assert JobEventType(validation_event.event_type) == JobEventType.STAGE_COMPLETED
+    assert validation_details["size_decision"] == "reject_not_smaller"
+    assert JobStage(cleanup_event.stage) == JobStage.CLEANUP
+    assert JobEventType(cleanup_event.event_type) == JobEventType.STAGE_COMPLETED
+    assert cleanup_details["size_decision"] == "reject_not_smaller"
+    assert cleanup_details["source_safety_outcome"] == "original_retained"
+
+
+def test_rejected_output_cleanup_failure_records_lifecycle_event(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    config, plan = _stored_validation_job(tmp_path)
+
+    async def fake_validate_output(**_kwargs: object) -> ValidationReport:
+        return _validation_report(
+            plan=plan,
+            now=datetime.now(UTC),
+            output_size_bytes=plan.validation.source_size_bytes + 1,
+        )
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.validate_output", fake_validate_output)
+
+    validation = asyncio.run(execute_validation_job(job_id=1, runner_id="runner", config=config))
+    plan.output_path.unlink()
+    plan.output_path.mkdir()
+    asyncio.run(execute_cleanup_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        events = session.exec(
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+        ).all()
+
+    assert validation is not None
+    cleanup_event = events[-1]
+    cleanup_details = json.loads(cleanup_event.details_json or "{}")
+    assert JobStage(cleanup_event.stage) == JobStage.CLEANUP
+    assert JobEventType(cleanup_event.event_type) == JobEventType.STAGE_FAILED
+    assert cleanup_details["error_type"] == "RejectedOutputCleanupError"
+    assert cleanup_details["source_safety_outcome"] == "original_retained"
 
 
 def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path) -> None:
@@ -637,7 +760,12 @@ def _stored_validation_job(tmp_path: Path) -> tuple[AppConfig, Any]:
     return config, plan
 
 
-def _validation_report(*, plan: Any, now: datetime) -> ValidationReport:
+def _validation_report(
+    *,
+    plan: Any,
+    now: datetime,
+    output_size_bytes: int | None = None,
+) -> ValidationReport:
     return ValidationReport(
         plan_hash=plan.plan_hash,
         policy_hash=plan.validation.policy_hash,
@@ -659,7 +787,9 @@ def _validation_report(*, plan: Any, now: datetime) -> ValidationReport:
         ],
         warnings=[],
         observed=ObservedValidationMedia(
-            output_size_bytes=plan.output_path.stat().st_size,
+            output_size_bytes=output_size_bytes
+            if output_size_bytes is not None
+            else plan.output_path.stat().st_size,
             container="matroska,webm",
             duration_seconds=plan.validation.source_duration_seconds,
             video_streams=[],

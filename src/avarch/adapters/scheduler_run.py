@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+import socket
 from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from sqlmodel import Session
 
+from avarch.adapters.execution import pause_managed_processes, resume_managed_processes
 from avarch.adapters.job_preparation import encoded_output_exists, require_id
 from avarch.adapters.scheduler_workers import (
     execute_cleanup_job,
@@ -15,6 +18,7 @@ from avarch.adapters.scheduler_workers import (
     execute_validation_job,
 )
 from avarch.adapters.sqlite import job_transitions as job_transition_adapter
+from avarch.adapters.sqlite import scheduler_sessions as scheduler_session_adapter
 from avarch.adapters.sqlite import scheduler_state as scheduler_state_adapter
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import interrupt_running_job
@@ -27,6 +31,7 @@ from avarch.adapters.sqlite.scheduler_state import (
 from avarch.application.promotion import PromotionWorkflow
 from avarch.application.scheduler_run import (
     SchedulerAlreadyRunningError,
+    SchedulerCapacityUsage,
     SchedulerControlError,
     SchedulerControlSnapshot,
     SchedulerLeaseLostError,
@@ -66,8 +71,16 @@ class SqliteSchedulerRunStore:
     ) -> None:
         self._engine = create_db_engine(config.database.url)
         self._claimable_stages = claimable_stages
+        self._workspace_id = config.database.url
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         try:
             with Session(self._engine) as session, session.begin():
                 scheduler_state_adapter.acquire_scheduler_lease(
@@ -75,11 +88,27 @@ class SqliteSchedulerRunStore:
                     runner_id=runner_id,
                     now=now,
                     resume=resume,
+                    capacity=_capacity_usage(capacity),
                 )
         except scheduler_state_adapter.SchedulerAlreadyRunningError as exc:
             raise SchedulerAlreadyRunningError(str(exc)) from exc
         except scheduler_state_adapter.SchedulerControlError as exc:
             raise SchedulerControlError(str(exc)) from exc
+
+    def start_session(self, *, runner_id: str, now: datetime) -> int:
+        with Session(self._engine) as session, session.begin():
+            scheduler_session = scheduler_session_adapter.start_scheduler_session(
+                session,
+                owner_id=runner_id,
+                workspace_id=self._workspace_id,
+                pid=os.getpid(),
+                host=socket.gethostname(),
+                now=now,
+            )
+            session_id = scheduler_session.id
+            if session_id is None:
+                raise RuntimeError("Scheduler session was not persisted.")
+            return session_id
 
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         with Session(self._engine) as session, session.begin():
@@ -89,13 +118,20 @@ class SqliteSchedulerRunStore:
                 encoded_output_exists=encoded_output_exists,
             )
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None:
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         try:
             with Session(self._engine) as session, session.begin():
                 scheduler_state_adapter.renew_scheduler_lease(
                     session,
                     runner_id=runner_id,
                     now=now,
+                    capacity=_capacity_usage(capacity),
                 )
         except scheduler_state_adapter.SchedulerLeaseLostError as exc:
             raise SchedulerLeaseLostError(str(exc)) from exc
@@ -147,6 +183,15 @@ class SqliteSchedulerRunStore:
                 now=now,
             )
 
+    def end_session(self, *, session_id: int, now: datetime, reason: str) -> None:
+        with Session(self._engine) as session, session.begin():
+            scheduler_session_adapter.end_scheduler_session(
+                session,
+                session_id=session_id,
+                now=now,
+                reason=reason,
+            )
+
     def terminal_counts(self) -> SchedulerTerminalCounts:
         with Session(self._engine) as session:
             counts = terminal_job_counts(session)
@@ -180,8 +225,28 @@ class SchedulerWorkerAdapter:
         worker = {
             JobStage.PROBE: execute_probe_job,
             JobStage.PLAN: execute_plan_job,
+            JobStage.SCENE_DETECT: execute_encode_job,
             JobStage.ENCODE: execute_encode_job,
             JobStage.VALIDATE: execute_validation_job,
             JobStage.CLEANUP: execute_cleanup_job,
         }[stage]
         await worker(job_id=job_id, runner_id=runner_id, config=config)
+
+    def pause_active_jobs(self) -> None:
+        pause_managed_processes()
+
+    def resume_active_jobs(self) -> None:
+        resume_managed_processes()
+
+
+def _capacity_usage(
+    capacity: SchedulerCapacityUsage,
+) -> scheduler_state_adapter.SchedulerCapacityUsage:
+    return scheduler_state_adapter.SchedulerCapacityUsage(
+        cheap_workers=capacity.cheap_workers,
+        cheap_active=capacity.cheap_active,
+        av1an_jobs=capacity.av1an_jobs,
+        av1an_active=capacity.av1an_active,
+        file_ops=capacity.file_ops,
+        file_ops_active=capacity.file_ops_active,
+    )
