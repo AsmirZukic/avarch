@@ -19,105 +19,112 @@ from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
             JobStatus.QUEUED,
             JobStage.PROBE,
             None,
-            "probe:pending plan:pending encode:pending validate:pending promote:pending cleanup:skipped",
+            "probe:pending plan:pending scene_detect:pending encode:pending validate:pending promote:pending cleanup:skipped",
         ),
         (
             "active probe",
             JobStatus.ENCODING,
             JobStage.PROBE,
             AttemptStatus.RUNNING,
-            "probe:active plan:pending encode:pending validate:pending promote:pending cleanup:skipped",
+            "probe:active plan:pending scene_detect:pending encode:pending validate:pending promote:pending cleanup:skipped",
         ),
         (
             "active plan",
             JobStatus.ENCODING,
             JobStage.PLAN,
             AttemptStatus.RUNNING,
-            "probe:complete plan:active encode:pending validate:pending promote:pending cleanup:skipped",
+            "probe:complete plan:active scene_detect:pending encode:pending validate:pending promote:pending cleanup:skipped",
+        ),
+        (
+            "active scene detect",
+            JobStatus.ENCODING,
+            JobStage.SCENE_DETECT,
+            AttemptStatus.RUNNING,
+            "probe:complete plan:complete scene_detect:active encode:pending validate:pending promote:pending cleanup:skipped",
         ),
         (
             "active encode",
             JobStatus.ENCODING,
             JobStage.ENCODE,
             AttemptStatus.RUNNING,
-            "probe:complete plan:complete encode:active validate:pending promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:active validate:pending promote:pending cleanup:skipped",
         ),
         (
             "encoded waiting for validation",
             JobStatus.ENCODED,
             JobStage.VALIDATE,
             AttemptStatus.COMPLETED,
-            "probe:complete plan:complete encode:complete validate:pending promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:pending promote:pending cleanup:skipped",
         ),
         (
             "active validation",
             JobStatus.VALIDATING,
             JobStage.VALIDATE,
             AttemptStatus.RUNNING,
-            "probe:complete plan:complete encode:complete validate:active promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:active promote:pending cleanup:skipped",
         ),
         (
             "ready to promote",
             JobStatus.READY_TO_PROMOTE,
             JobStage.PROMOTE,
             AttemptStatus.COMPLETED,
-            "probe:complete plan:complete encode:complete validate:complete promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:pending cleanup:skipped",
         ),
         (
             "active promotion",
             JobStatus.PROMOTING,
             JobStage.PROMOTE,
             AttemptStatus.RUNNING,
-            "probe:complete plan:complete encode:complete validate:complete promote:active cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:active cleanup:skipped",
         ),
         (
             "promoted",
             JobStatus.PROMOTED,
             JobStage.PROMOTE,
             AttemptStatus.COMPLETED,
-            "probe:complete plan:complete encode:complete validate:complete promote:complete cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:complete cleanup:skipped",
         ),
         (
             "cleanup",
             JobStatus.CLEANING,
             JobStage.CLEANUP,
             AttemptStatus.RUNNING,
-            "probe:complete plan:complete encode:complete validate:complete promote:complete cleanup:active",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:complete cleanup:active",
         ),
         (
             "validation failure",
             JobStatus.VALIDATION_FAILED,
             JobStage.VALIDATE,
             AttemptStatus.FAILED,
-            "probe:complete plan:complete encode:complete validate:failed promote:blocked cleanup:blocked",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:failed promote:blocked cleanup:blocked",
         ),
         (
             "size rejection",
             JobStatus.SIZE_REJECTED,
             JobStage.PROMOTE,
             AttemptStatus.COMPLETED,
-            "probe:complete plan:complete encode:complete validate:complete promote:blocked cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:blocked cleanup:skipped",
         ),
         (
             "cancellation during encode",
             JobStatus.CANCELLED,
             JobStage.ENCODE,
             AttemptStatus.CANCELED,
-            "probe:complete plan:complete encode:failed validate:blocked promote:blocked cleanup:blocked",
+            "probe:complete plan:complete scene_detect:complete encode:failed validate:blocked promote:blocked cleanup:blocked",
         ),
         (
             "retry attempt",
             JobStatus.ENCODING,
             JobStage.ENCODE,
             AttemptStatus.RUNNING,
-            "probe:complete plan:complete encode:active validate:pending promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:active validate:pending promote:pending cleanup:skipped",
         ),
         (
             "stage not applicable",
             JobStatus.READY_TO_PROMOTE,
             JobStage.PROMOTE,
             None,
-            "probe:complete plan:complete encode:complete validate:complete promote:pending cleanup:skipped",
+            "probe:complete plan:complete scene_detect:complete encode:complete validate:complete promote:pending cleanup:skipped",
         ),
     ],
 )
@@ -148,11 +155,19 @@ def test_active_probe_and_plan_are_not_labeled_as_encoding() -> None:
         job_stage=JobStage.PLAN,
         attempt_status=AttemptStatus.RUNNING,
     )
+    scene_detect = project_workflow_steps(
+        job_status=JobStatus.ENCODING,
+        job_stage=JobStage.SCENE_DETECT,
+        attempt_status=AttemptStatus.RUNNING,
+    )
 
     assert _state_for(probe, JobStage.PROBE) is WorkflowStepState.ACTIVE
     assert _state_for(probe, JobStage.ENCODE) is WorkflowStepState.PENDING
     assert _state_for(plan, JobStage.PLAN) is WorkflowStepState.ACTIVE
+    assert _state_for(plan, JobStage.SCENE_DETECT) is WorkflowStepState.PENDING
     assert _state_for(plan, JobStage.ENCODE) is WorkflowStepState.PENDING
+    assert _state_for(scene_detect, JobStage.SCENE_DETECT) is WorkflowStepState.ACTIVE
+    assert _state_for(scene_detect, JobStage.ENCODE) is WorkflowStepState.PENDING
 
 
 def _compact(steps: tuple[object, ...]) -> str:

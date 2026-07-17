@@ -31,6 +31,7 @@ from avarch.application.scheduler_snapshot import (
     WorkspaceSummary,
 )
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
+from avarch.domain.progress import ProgressPhase
 from avarch.presentation.scheduler_dashboard import DashboardMode, render_scheduler_dashboard
 
 
@@ -69,6 +70,43 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "encode jobs" in output
     assert "Recent activity unavailable" in output
     assert "Resource telemetry unavailable" in output
+
+
+def test_scene_detection_progress_shows_scan_rate_speed_and_pending_chunks() -> None:
+    job = _active_job(1, "/media/movie.mkv")
+    job = job.model_copy(
+        update={
+            "stage": JobStage.SCENE_DETECT,
+            "attempt": job.attempt.model_copy(  # type: ignore[union-attr]
+                update={
+                    "phase": ProgressPhase.SCENE_DETECTION,
+                    "frames_current": 1420,
+                    "frames_total": 31_625,
+                    "rate_per_second": 384.0,
+                    "speed_ratio": 16.0,
+                    "chunks_current": None,
+                    "chunks_total": None,
+                }
+            ),
+            "workflow_steps": (
+                WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),
+                WorkflowStepSummary(stage=JobStage.PLAN, state=WorkflowStepState.COMPLETE),
+                WorkflowStepSummary(
+                    stage=JobStage.SCENE_DETECT,
+                    state=WorkflowStepState.ACTIVE,
+                ),
+                WorkflowStepSummary(stage=JobStage.ENCODE, state=WorkflowStepState.PENDING),
+            ),
+        }
+    )
+
+    output = _render(_snapshot(active_jobs=(job,)), width=150)
+
+    assert "● scene_detect" in output
+    assert "scene scan 1420/31625 frames" in output
+    assert "384.0 fps scan" in output
+    assert "16.00x" in output
+    assert "chunks pending" in output
 
 
 def test_dashboard_respects_requested_widths() -> None:
@@ -211,16 +249,37 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
 def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
     observer = _render(_snapshot(), width=120, mode=DashboardMode.OBSERVER)
     owner = _render(_snapshot(), width=120, mode=DashboardMode.OWNER)
-    unsupported = _render(
+    unsupported_observer = _render(
         _snapshot(),
         width=120,
         mode=DashboardMode.OBSERVER,
         shortcuts_available=False,
     )
+    unsupported_owner = _render(
+        _snapshot(),
+        width=120,
+        mode=DashboardMode.OWNER,
+        shortcuts_available=False,
+    )
 
-    assert "p pause/resume   c cancel   l logs   Enter details   q detach" in observer
-    assert "p pause/resume   c cancel   l logs   Enter details   q detach   Ctrl+C stop" in owner
-    assert "Ctrl+C detach · interactive shortcuts unavailable" in unsupported
+    assert "p pause/resume   c cancel   l logs   Enter details   d/q detach" in observer
+    assert "p pause/resume   c cancel   l logs   Enter details   d/q detach   Ctrl+C stop" in owner
+    assert "Ctrl+C detach · interactive shortcuts unavailable" in unsupported_observer
+    assert "Ctrl+C stop · interactive shortcuts unavailable" in unsupported_owner
+
+
+def test_dashboard_footer_surfaces_cancel_confirmation() -> None:
+    snapshot = _snapshot().model_copy(
+        update={
+            "watch_message": "Confirm cancellation for job 42.",
+            "watch_confirmation_required": True,
+        }
+    )
+
+    output = _render(snapshot, width=160, mode=DashboardMode.OWNER)
+
+    assert "Confirm cancellation for job 42. Press c again to confirm." in output
+    assert "d/q detach" in output
 
 
 def test_live_dashboard_uses_full_height_and_plain_footer() -> None:
@@ -230,7 +289,7 @@ def test_live_dashboard_uses_full_height_and_plain_footer() -> None:
     assert len(lines) == 40
     assert "Recent Activity" in output
     assert "Controls" not in output
-    assert "p pause/resume   c cancel   l logs   Enter details   q detach" in lines[-2]
+    assert "p pause/resume   c cancel   l logs   Enter details   d/q detach" in lines[-2]
 
 
 def test_dashboard_renders_resource_telemetry() -> None:
@@ -261,9 +320,11 @@ def test_dashboard_renders_resource_telemetry() -> None:
 
     assert "CPU" in wide
     assert "95%" in wide
+    assert "━━━━━━━━━━━" in wide
     assert "active" in wide
     assert "memory" in wide
     assert "11.0 GiB/14.5 GiB" in wide
+    assert "━━━━━━━━━" in wide
     assert "warning" in wide
     assert "output write" in wide
     assert "84.0 MiB/s" in wide

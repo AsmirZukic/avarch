@@ -50,6 +50,7 @@ __all__ = [
     "cancel_claimed_job",
     "claim_job_stage",
     "clear_hold_fields",
+    "complete_scene_detect_stage",
     "complete_job_stage",
     "fail_job_stage",
     "fail_job_after_external",
@@ -131,10 +132,67 @@ def claim_job_stage(
         session,
         job_id=job_id,
         attempt=attempt,
-        event_type=JobEventType.STAGE_STARTED,
+        event_type=(
+            JobEventType.SCENE_DETECT_STARTED
+            if JobStage(job.stage) == JobStage.SCENE_DETECT
+            else JobEventType.STAGE_STARTED
+        ),
         now=now,
     )
     return attempt
+
+
+def complete_scene_detect_stage(
+    session: Session,
+    *,
+    job_id: int,
+    attempt_id: int,
+    scenes_found: int | None,
+    duration_seconds: float | None,
+    now: datetime,
+    chunks_prepared: int | None = None,
+) -> None:
+    job = require_job(session, job_id)
+    attempt = require_attempt(session, attempt_id)
+    if JobStage(job.stage) == JobStage.ENCODE and JobStage(attempt.stage) == JobStage.ENCODE:
+        return
+    if (
+        JobStage(job.stage) != JobStage.SCENE_DETECT
+        or JobStage(attempt.stage) != JobStage.SCENE_DETECT
+    ):
+        raise JobTransitionError("Scene detection can only complete from the scene_detect stage.")
+    if job.cancel_requested_at is not None:
+        cancel_claimed_job(session, job=job, attempt=attempt, now=now)
+        return
+
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.SCENE_DETECT_COMPLETED,
+        stage=JobStage.SCENE_DETECT,
+        details={
+            "scenes_found": scenes_found,
+            "chunks_prepared": chunks_prepared,
+            "duration_seconds": duration_seconds,
+        },
+        now=now,
+    )
+    job.stage = JobStage.ENCODE
+    job.status = active_status_for_stage(JobStage.ENCODE)
+    job.updated_at = now
+    attempt.stage = JobStage.ENCODE
+    attempt.resource_class = resource_for_stage(JobStage.ENCODE)
+    record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_STARTED,
+        stage=JobStage.ENCODE,
+        now=now,
+    )
+    session.add(job)
+    session.add(attempt)
 
 
 def complete_job_stage(

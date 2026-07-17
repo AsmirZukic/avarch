@@ -25,6 +25,7 @@ from avarch.application.scheduler_watch_controls import SchedulerWatchControlSta
 from avarch.application.scheduler_watch_keys import (
     KEY_CANCEL,
     KEY_CTRL_C,
+    KEY_DETACH,
     KEY_DETAILS,
     KEY_LOGS,
     KEY_PAUSE,
@@ -65,6 +66,11 @@ class SchedulerWatchLoop:
     watch_control_state: SchedulerWatchControlState = field(
         default_factory=SchedulerWatchControlState
     )
+    ctrl_c_stops_scheduler: bool = False
+    stop_when_scheduler_stops: bool = False
+    startup_grace_iterations: int = 20
+    _observed_scheduler_active: bool = field(default=False, init=False)
+    _stopped_iterations: int = field(default=0, init=False)
 
     async def run(self) -> None:
         iterations = 0
@@ -80,12 +86,18 @@ class SchedulerWatchLoop:
                 self.sink.render(_failure_renderable(exc, consecutive_failures))
             else:
                 consecutive_failures = 0
-                snapshot = self._snapshot_with_resources(snapshot)
-                should_stop = self._handle_key(snapshot)
-                snapshot = self.watch_control_state.apply_to_snapshot(snapshot)
-                self.sink.render(self.renderer(snapshot, width))
-                if should_stop:
-                    return
+                try:
+                    snapshot = self._snapshot_with_resources(snapshot)
+                    should_stop = self._handle_key(snapshot)
+                    snapshot = self.watch_control_state.apply_to_snapshot(snapshot)
+                    self.sink.render(self.renderer(snapshot, width))
+                    if should_stop:
+                        return
+                    if self._scheduler_finished(snapshot):
+                        return
+                except Exception as exc:
+                    consecutive_failures += 1
+                    self.sink.render(_failure_renderable(exc, consecutive_failures))
 
             iterations += 1
             if self.stop_after_iterations is not None and iterations >= self.stop_after_iterations:
@@ -124,37 +136,73 @@ class SchedulerWatchLoop:
             or not self.key_source.supported
         ):
             return False
-        key = self.key_source.poll_key()
+        try:
+            key = self.key_source.poll_key()
+        except Exception:
+            self.key_source = None
+            return False
         if key is None:
             return False
-        if key in {KEY_QUIT, KEY_CTRL_C}:
+        if key in {KEY_DETACH, KEY_QUIT}:
+            self.watch_controller.detach()
+            return True
+        if key == KEY_CTRL_C:
+            if self.ctrl_c_stops_scheduler:
+                action = self.watch_controller.stop(reason="owner dashboard")
+                self.watch_control_state.record_action(action)
+                return False
             self.watch_controller.detach()
             return True
         if key == KEY_PAUSE:
             if snapshot.scheduler.state == SchedulerRuntimeState.RUNNING:
-                self.watch_controller.pause(reason="watch")
+                action = self.watch_controller.pause(reason="watch")
+                self.watch_control_state.record_action(action)
             elif snapshot.scheduler.state == SchedulerRuntimeState.PAUSED:
-                self.watch_controller.resume()
+                action = self.watch_controller.resume()
+                self.watch_control_state.record_action(action)
             return False
         if key == KEY_DETAILS:
-            self.watch_control_state.handle_details_key(controller=self.watch_controller)
+            action = self.watch_control_state.handle_details_key(controller=self.watch_controller)
+            self.watch_control_state.record_action(action)
             return False
         if key == KEY_LOGS:
-            self.watch_control_state.handle_logs_key(controller=self.watch_controller)
+            action = self.watch_control_state.handle_logs_key(controller=self.watch_controller)
+            self.watch_control_state.record_action(action)
             return False
         if key == KEY_CANCEL:
             if self.watch_control_state.cancel_confirmation is not None:
-                self.watch_control_state.confirm_cancel(
+                action = self.watch_control_state.confirm_cancel(
                     controller=self.watch_controller,
                     now=snapshot.captured_at,
                 )
             else:
-                self.watch_control_state.handle_key(
+                action = self.watch_control_state.handle_key(
                     key,
                     snapshot=snapshot,
                     now=snapshot.captured_at,
                 )
+            if action is not None:
+                self.watch_control_state.record_action(action)
         return False
+
+    def _scheduler_finished(self, snapshot: SchedulerSnapshot) -> bool:
+        if not self.stop_when_scheduler_stops:
+            return False
+        if snapshot.scheduler.state in {
+            SchedulerRuntimeState.RUNNING,
+            SchedulerRuntimeState.PAUSED,
+            SchedulerRuntimeState.DRAINING,
+            SchedulerRuntimeState.STOPPING,
+        }:
+            self._observed_scheduler_active = True
+            self._stopped_iterations = 0
+            return False
+        if snapshot.scheduler.state != SchedulerRuntimeState.STOPPED:
+            return False
+        self._stopped_iterations += 1
+        return self._observed_scheduler_active or (
+            self._stopped_iterations >= self.startup_grace_iterations
+        )
 
 
 def validate_live_watch_terminal(*, stdout_is_tty: bool) -> None:

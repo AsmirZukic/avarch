@@ -683,6 +683,36 @@ def run_queue(
     runtime_config = cli_workspace.runtime_config
     workspace = cli_workspace.workspace
 
+    if (
+        not detached
+        and not managed_child
+        and _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty())
+    ):
+        child_argv = ["scheduler", "run"]
+        if resume:
+            child_argv.append("--resume")
+        if not promote:
+            child_argv.append("--no-promote")
+        try:
+            launch_detached(
+                scheduler_process_controller(),
+                workspace=workspace,
+                argv=child_argv,
+            )
+        except SchedulerLifecycleError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        asyncio.run(
+            _run_scheduler_watch_live(
+                database_url=database_url,
+                workspace_root=cli_workspace.workspace_root,
+                interval_seconds=DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+                no_color=os.environ.get("NO_COLOR") is not None,
+                owner=True,
+            )
+        )
+        return
+
     if detached and not managed_child:
         child_argv = ["scheduler", "run"]
         if resume:
@@ -779,6 +809,7 @@ async def _run_scheduler_with_optional_live_progress(
         else {
             JobStage.PROBE,
             JobStage.PLAN,
+            JobStage.SCENE_DETECT,
             JobStage.ENCODE,
             JobStage.VALIDATE,
             JobStage.CLEANUP,
@@ -819,7 +850,12 @@ async def _render_scheduler_live_progress(database_url: str, *, workspace_root: 
     console = Console(file=sys.stdout, color_system="auto" if color else None)
     query = _LiveSchedulerSnapshotQuery(database_url=database_url, workspace_root=workspace_root)
     resource_sampler = scheduler_resource_sampler(database_url=database_url, clock=_utc_now)
-    with Live(console=console, refresh_per_second=4, transient=False, screen=True) as live:
+    with Live(
+        console=console,
+        auto_refresh=False,
+        transient=False,
+        screen=True,
+    ) as live:
         while True:
             snapshot = _snapshot_with_resource_telemetry(
                 query.snapshot(),
@@ -831,7 +867,9 @@ async def _render_scheduler_live_progress(database_url: str, *, workspace_root: 
                     width=console.width,
                     mode=DashboardMode.OWNER,
                     height=console.height,
-                )
+                    shortcuts_available=False,
+                ),
+                refresh=True,
             )
             await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
 
@@ -917,6 +955,7 @@ def queue_retry_command(
     typer.echo(f"Requires requeue:  {summary.requires_requeue}")
     typer.echo(f"Resume probe:      {summary.reset_to_probe}")
     typer.echo(f"Resume plan:       {summary.reset_to_plan}")
+    typer.echo(f"Resume scenes:     {summary.reset_to_scene_detect}")
     typer.echo(f"Resume encode:     {summary.reset_to_encode}")
     typer.echo(f"Resume validate:   {summary.reset_to_validate}")
     typer.echo(f"Return to promote: {summary.return_to_promote}")
@@ -1051,6 +1090,10 @@ def scheduler_watch_command(
         bool,
         typer.Option("--no-color", help="Disable terminal colours."),
     ] = False,
+    owner: Annotated[
+        bool,
+        typer.Option("--owner", help="Internal owner dashboard mode.", hidden=True),
+    ] = False,
 ) -> None:
     if json_output:
         once = True
@@ -1067,6 +1110,7 @@ def scheduler_watch_command(
                 workspace_root=cli_workspace.workspace_root,
                 interval_seconds=interval,
                 no_color=no_color,
+                owner=owner,
             )
         )
         return
@@ -1109,6 +1153,7 @@ async def _run_scheduler_watch_live(
     workspace_root: Path,
     interval_seconds: float,
     no_color: bool,
+    owner: bool = False,
 ) -> None:
     console = Console(file=sys.stdout, color_system=None if no_color else "auto")
     query = _LiveSchedulerSnapshotQuery(
@@ -1117,7 +1162,7 @@ async def _run_scheduler_watch_live(
     )
     with PosixKeySource() as key_source, Live(
         console=console,
-        refresh_per_second=4,
+        auto_refresh=False,
         transient=False,
         screen=True,
     ) as live:
@@ -1126,7 +1171,7 @@ async def _run_scheduler_watch_live(
             renderer=lambda snapshot, width: render_scheduler_dashboard(
                 snapshot,
                 width=width,
-                mode=DashboardMode.OBSERVER,
+                mode=DashboardMode.OWNER if owner else DashboardMode.OBSERVER,
                 height=console.height,
                 shortcuts_available=key_source.supported,
             ),
@@ -1139,6 +1184,8 @@ async def _run_scheduler_watch_live(
             ),
             key_source=key_source,
             watch_controller=_LiveSchedulerWatchController(database_url=database_url),
+            ctrl_c_stops_scheduler=owner,
+            stop_when_scheduler_stops=owner,
         )
         await loop.run()
 
@@ -1163,7 +1210,7 @@ class _LiveSchedulerWatchSink:
         self._live = live
 
     def render(self, renderable: RenderableType) -> None:
-        self._live.update(renderable)
+        self._live.update(renderable, refresh=True)
 
 
 class _LiveSchedulerWatchController:
@@ -1197,6 +1244,10 @@ class _LiveSchedulerWatchController:
     def detach(self):  # type: ignore[no-untyped-def]
         with db_session(self._database_url) as session:
             return self._controller(session).detach()
+
+    def stop(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).stop(reason=reason)
 
     def _controller(self, session):  # type: ignore[no-untyped-def]
         return SchedulerWatchController(

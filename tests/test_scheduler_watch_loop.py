@@ -123,6 +123,30 @@ def test_scheduler_watch_loop_renders_transient_failures_and_retries() -> None:
     assert sleeps == [1]
 
 
+def test_scheduler_watch_loop_survives_key_source_failure() -> None:
+    query = _FakeQuery([_snapshot(0), _snapshot(1)])
+    sink = _FakeSink()
+
+    async def scenario() -> None:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, _width: Text(str(snapshot.captured_at.second)),
+            sink=sink,
+            interval_seconds=1,
+            terminal_width=lambda: 100,
+            sleeper=lambda _interval: asyncio.sleep(0),
+            stop_after_iterations=2,
+            key_source=_BrokenKeySource(),  # type: ignore[arg-type]
+            watch_controller=object(),  # type: ignore[arg-type]
+        )
+        await loop.run()
+
+    asyncio.run(scenario())
+
+    assert sink.texts[0] == "0"
+    assert sink.texts[1] == "1"
+
+
 def test_scheduler_watch_loop_uses_bounded_retry_sleep_for_repeated_failures() -> None:
     query = _FakeQuery([RuntimeError("locked")] * 5)
     sink = _FakeSink()
@@ -297,6 +321,13 @@ class _FakeQuery:
         if isinstance(result, BaseException):
             raise result
         return result
+
+
+class _BrokenKeySource:
+    supported = True
+
+    def poll_key(self) -> str | None:
+        raise RuntimeError("input failed")
 
 
 class _NonOverlappingQuery(_FakeQuery):

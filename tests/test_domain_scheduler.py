@@ -164,7 +164,7 @@ def test_select_retry_stage_resumes_from_candidate_state() -> None:
                 promotion_completed=False,
             )
         )
-        == JobStage.ENCODE
+        == JobStage.SCENE_DETECT
     )
     assert (
         select_retry_stage(

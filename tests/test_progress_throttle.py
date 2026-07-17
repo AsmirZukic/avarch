@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 
 from avarch.application.progress import (
@@ -118,6 +119,37 @@ def test_throttle_bounds_write_count_under_heavy_samples() -> None:
     clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
     throttle.flush_due()
     assert [snapshot.current for snapshot in sink.snapshots] == [0, 9_999]
+
+
+def test_throttle_serializes_concurrent_parser_and_heartbeat_publications() -> None:
+    clock = _FakeClock()
+    sink = RecordingProgressSink()
+    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
+    barrier = threading.Barrier(3)
+
+    def publish_numeric() -> None:
+        barrier.wait()
+        for value in range(1, 101):
+            throttle.publish(_snapshot(current=value))
+
+    def publish_heartbeats() -> None:
+        barrier.wait()
+        for offset in range(1, 101):
+            throttle.publish(
+                _snapshot(current=None, unit=None, observed_offset_seconds=offset)
+            )
+
+    numeric_thread = threading.Thread(target=publish_numeric)
+    heartbeat_thread = threading.Thread(target=publish_heartbeats)
+    numeric_thread.start()
+    heartbeat_thread.start()
+    barrier.wait()
+    numeric_thread.join()
+    heartbeat_thread.join()
+    throttle.publish(_snapshot(current=101))
+    throttle.close()
+
+    assert sink.snapshots[-1].current == 101
 
 
 def test_throttle_preserves_transitions_and_latest_snapshot_in_high_frequency_stream() -> None:

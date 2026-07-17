@@ -40,6 +40,7 @@ class SchedulerWatchControlState:
     logs_visible: bool = False
     details: WatchJobDetailsSummary | None = None
     log_tail: WatchLogTailSummary | None = None
+    action_message: str | None = None
 
     def refresh(self, snapshot: SchedulerSnapshot) -> None:
         active_ids = tuple(job.job_id for job in snapshot.active_jobs)
@@ -127,8 +128,14 @@ class SchedulerWatchControlState:
             update={
                 "watch_details": self.details if self.details_visible else None,
                 "watch_log_tail": self.log_tail if self.logs_visible else None,
+                "watch_message": self.action_message,
+                "watch_confirmation_required": self.cancel_confirmation is not None,
             }
         )
+
+    def record_action(self, action: WatchControlAction | object) -> None:
+        message = getattr(action, "message", None)
+        self.action_message = str(message) if message else None
 
     def confirm_cancel(
         self,

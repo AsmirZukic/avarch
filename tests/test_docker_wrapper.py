@@ -226,8 +226,59 @@ def test_wrapper_allocates_tty_for_interactive_workflow_run(tmp_path: Path) -> N
 
     args = arg_log.read_text(encoding="utf-8").splitlines()
     assert result.returncode == 0
+    assert "-i" in args
     assert "-t" in args
+    assert args.index("-i") < args.index("avarch:test")
     assert args.index("-t") < args.index("avarch:test")
+
+
+def test_wrapper_allocates_interactive_tty_for_live_scheduler_watch(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "scheduler", "watch"],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-i" in args
+    assert "-t" in args
+    assert args.index("-i") < args.index("avarch:test")
+    assert args.index("-t") < args.index("avarch:test")
+
+
+def test_wrapper_runs_encoder_detached_with_interactive_owner_dashboard(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "scheduler", "run"],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    commands = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-i" in args
+    assert "-t" in args
+    assert len(commands) == 2
+    assert " -d " in f" {commands[0]} "
+    assert "--name avarch-encoder" in commands[0]
+    assert "avarch:test scheduler run --mode detached" in commands[0]
+    assert " -i -t " in f" {commands[1]} "
+    assert "avarch:test scheduler watch --owner" in commands[1]
 
 
 def test_wrapper_keeps_redirected_workflow_run_non_tty(tmp_path: Path) -> None:
@@ -252,6 +303,46 @@ def test_wrapper_keeps_redirected_workflow_run_non_tty(tmp_path: Path) -> None:
     assert "-t" not in args
 
 
+def test_wrapper_keeps_one_shot_scheduler_watch_non_tty(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "scheduler", "watch", "--once"],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-i" not in args
+    assert "-t" not in args
+
+
+def test_wrapper_keeps_json_scheduler_watch_non_tty(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(fake_bin, log, image="avarch:test")
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = _run_wrapper_with_stdout_pty(
+        [str(WRAPPER), "scheduler", "watch", "--json"],
+        cwd=workspace,
+        env=env,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert "-i" not in args
+    assert "-t" not in args
+
+
 def test_wrapper_does_not_allocate_tty_for_detached_scheduler(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
@@ -268,6 +359,7 @@ def test_wrapper_does_not_allocate_tty_for_detached_scheduler(tmp_path: Path) ->
 
     args = arg_log.read_text(encoding="utf-8").splitlines()
     assert result.returncode == 0
+    assert "-i" not in args
     assert "-t" not in args
 
 
