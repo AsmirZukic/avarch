@@ -95,11 +95,26 @@ def test_scheduler_watch_live_uses_alternate_screen(monkeypatch, tmp_path: Path)
     class FakeLoop:
         def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
             seen["resource_sampler"] = kwargs["resource_sampler"]
+            seen["key_source"] = kwargs["key_source"]
+            seen["watch_controller"] = kwargs["watch_controller"]
 
         async def run(self) -> None:
             seen["ran"] = True
 
+    class FakeKeySource:
+        supported = True
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def poll_key(self) -> None:
+            return None
+
     monkeypatch.setattr(cli_module, "Live", FakeLive)
+    monkeypatch.setattr(cli_module, "PosixKeySource", FakeKeySource)
     monkeypatch.setattr(cli_module, "_LiveSchedulerSnapshotQuery", lambda **kwargs: object())
     monkeypatch.setattr(cli_module, "SchedulerWatchLoop", FakeLoop)
     monkeypatch.setattr(cli_module, "scheduler_resource_sampler", lambda **kwargs: "sampler")
@@ -115,6 +130,8 @@ def test_scheduler_watch_live_uses_alternate_screen(monkeypatch, tmp_path: Path)
 
     assert seen["screen"] is True
     assert seen["resource_sampler"] == "sampler"
+    assert isinstance(seen["key_source"], FakeKeySource)
+    assert seen["watch_controller"] is not None
     assert seen["ran"] is True
 
 
