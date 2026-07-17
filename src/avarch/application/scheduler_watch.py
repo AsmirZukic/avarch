@@ -15,10 +15,13 @@ from avarch.application.resource_telemetry import (
     safe_sample_resources,
 )
 from avarch.application.scheduler_snapshot import (
+    SchedulerRuntimeState,
     SchedulerSnapshot,
     SchedulerSnapshotQuery,
     resource_telemetry_summary,
 )
+from avarch.application.scheduler_watch_controller import WatchController
+from avarch.application.scheduler_watch_keys import KEY_CTRL_C, KEY_PAUSE, KEY_QUIT, KeySource
 
 
 class SchedulerWatchModeError(RuntimeError):
@@ -48,6 +51,8 @@ class SchedulerWatchLoop:
     resource_sampler: ResourceSampler | None = None
     resource_policy: ResourceTelemetryPolicy = field(default_factory=ResourceTelemetryPolicy)
     resource_stale_after_seconds: int = 10
+    key_source: KeySource | None = None
+    watch_controller: WatchController | None = None
 
     async def run(self) -> None:
         iterations = 0
@@ -65,6 +70,8 @@ class SchedulerWatchLoop:
                 consecutive_failures = 0
                 snapshot = self._snapshot_with_resources(snapshot)
                 self.sink.render(self.renderer(snapshot, width))
+                if self._handle_key(snapshot):
+                    return
 
             iterations += 1
             if self.stop_after_iterations is not None and iterations >= self.stop_after_iterations:
@@ -94,6 +101,21 @@ class SchedulerWatchLoop:
                 )
             }
         )
+
+    def _handle_key(self, snapshot: SchedulerSnapshot) -> bool:
+        if self.key_source is None or self.watch_controller is None:
+            return False
+        key = self.key_source.poll_key()
+        if key in {KEY_QUIT, KEY_CTRL_C}:
+            self.watch_controller.detach()
+            return True
+        if key != KEY_PAUSE:
+            return False
+        if snapshot.scheduler.state == SchedulerRuntimeState.RUNNING:
+            self.watch_controller.pause(reason="watch")
+        elif snapshot.scheduler.state == SchedulerRuntimeState.PAUSED:
+            self.watch_controller.resume()
+        return False
 
 
 def validate_live_watch_terminal(*, stdout_is_tty: bool) -> None:
