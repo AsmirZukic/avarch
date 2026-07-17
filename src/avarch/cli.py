@@ -126,6 +126,10 @@ from avarch.application.scheduler_run import (
     run_scheduler,
 )
 from avarch.application.scheduler_status import scheduler_status
+from avarch.application.scheduler_watch import (
+    SchedulerWatchLoop,
+    validate_live_watch_terminal,
+)
 from avarch.application.validation_summary import format_validation_report_summary
 from avarch.application.vapoursynth_environment import (
     VapourSynthEnvironmentWorkflowError,
@@ -1030,11 +1034,21 @@ def scheduler_watch_command(
     if json_output:
         once = True
     if not once:
-        if not sys.stdout.isatty():
-            typer.echo("Live scheduler watch requires a TTY. Use --once or --json.")
-            raise typer.Exit(1)
-        typer.echo("Live scheduler watch is not available yet. Use --once or --json.")
-        raise typer.Exit(1)
+        try:
+            validate_live_watch_terminal(stdout_is_tty=sys.stdout.isatty())
+        except RuntimeError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+        cli_workspace = _load_cli_workspace()
+        asyncio.run(
+            _run_scheduler_watch_live(
+                database_url=cli_workspace.database_url,
+                workspace_root=cli_workspace.workspace_root,
+                interval_seconds=interval,
+                no_color=no_color,
+            )
+        )
+        return
 
     cli_workspace = _load_cli_workspace()
     with db_session(cli_workspace.database_url) as session:
@@ -1061,6 +1075,56 @@ def scheduler_watch_command(
             mode=DashboardMode.OBSERVER,
         )
     )
+
+
+async def _run_scheduler_watch_live(
+    *,
+    database_url: str,
+    workspace_root: Path,
+    interval_seconds: float,
+    no_color: bool,
+) -> None:
+    console = Console(file=sys.stdout, color_system=None if no_color else "auto")
+    query = _LiveSchedulerSnapshotQuery(
+        database_url=database_url,
+        workspace_root=workspace_root,
+    )
+    with Live(console=console, refresh_per_second=4, transient=False) as live:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, width: render_scheduler_dashboard(
+                snapshot,
+                width=width,
+                mode=DashboardMode.OBSERVER,
+            ),
+            sink=_LiveSchedulerWatchSink(live),
+            interval_seconds=interval_seconds,
+            terminal_width=lambda: console.width,
+        )
+        await loop.run()
+
+
+class _LiveSchedulerSnapshotQuery:
+    def __init__(self, *, database_url: str, workspace_root: Path) -> None:
+        self._database_url = database_url
+        self._workspace_root = workspace_root
+
+    def snapshot(self):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return SqliteSchedulerSnapshotQuery(
+                session,
+                workspace_root=str(self._workspace_root),
+                database_url=self._database_url,
+                now=_utc_now,
+            ).snapshot()
+
+
+class _LiveSchedulerWatchSink:
+    def __init__(self, live: Live) -> None:
+        self._live = live
+
+    def render(self, renderable: RenderableType) -> None:
+        self._live.update(renderable)
 
 
 @scheduler_app.command("status")
