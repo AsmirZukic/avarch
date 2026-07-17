@@ -168,7 +168,7 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.stale is True
     assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
     assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
-    assert query_count <= 11
+    assert query_count <= 12
 
 
 def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligible(
@@ -248,6 +248,79 @@ def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligibl
     assert snapshot.upcoming_jobs[0].selection_confidence == "current_snapshot"
     assert all("held" not in job.source_path for job in snapshot.upcoming_jobs)
     assert all("cancel-requested" not in job.source_path for job in snapshot.upcoming_jobs)
+
+
+def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        session.add(
+            SchedulerState(
+                id=1,
+                mode=SchedulerMode.RUNNING,
+                runner_id="scheduler-1",
+                heartbeat_at=now.replace(tzinfo=None),
+                lease_expires_at=(now + timedelta(seconds=30)).replace(tzinfo=None),
+                capacity_cheap_workers=1,
+                capacity_cheap_active=0,
+                capacity_av1an_jobs=1,
+                capacity_av1an_active=1,
+                capacity_file_ops=1,
+                capacity_file_ops_active=0,
+                capacity_observed_at=now.replace(tzinfo=None),
+                updated_at=now.replace(tzinfo=None),
+            )
+        )
+        _job(
+            session,
+            path="/media/running-encode.mkv",
+            status=JobStatus.ENCODING,
+            stage=JobStage.ENCODE,
+            priority=100,
+            created_at=now - timedelta(minutes=5),
+        )
+        _job(
+            session,
+            path="/media/would-encode-next.mkv",
+            status=JobStatus.QUEUED,
+            stage=JobStage.ENCODE,
+            priority=90,
+            created_at=now - timedelta(minutes=4),
+        )
+        _job(
+            session,
+            path="/media/can-validate.mkv",
+            status=JobStatus.ENCODED,
+            stage=JobStage.VALIDATE,
+            priority=80,
+            created_at=now - timedelta(minutes=3),
+        )
+        _job(
+            session,
+            path="/media/can-promote.mkv",
+            status=JobStatus.READY_TO_PROMOTE,
+            stage=JobStage.PROMOTE,
+            priority=70,
+            created_at=now - timedelta(minutes=2),
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    assert [job.source_path for job in snapshot.upcoming_jobs] == [
+        "/media/can-validate.mkv",
+        "/media/can-promote.mkv",
+    ]
+    assert [job.selection_confidence for job in snapshot.upcoming_jobs] == [
+        "current_snapshot",
+        "current_snapshot",
+    ]
 
 
 def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path: Path) -> None:
