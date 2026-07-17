@@ -232,6 +232,11 @@ from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
+from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
+from avarch.presentation.scheduler_dashboard import (
+    DashboardMode,
+    render_scheduler_dashboard,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -1000,6 +1005,62 @@ def stop_scheduler_command(
     ):
         typer.echo("Timed out waiting for scheduler stop.")
         raise typer.Exit(1)
+
+
+@scheduler_app.command("watch")
+def scheduler_watch_command(
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Print one scheduler snapshot and exit."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print one machine-readable scheduler snapshot."),
+    ] = False,
+    interval: Annotated[
+        float,
+        typer.Option("--interval", help="Polling interval for live watch mode."),
+    ] = DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable terminal colours."),
+    ] = False,
+) -> None:
+    del interval
+    if json_output:
+        once = True
+    if not once:
+        if not sys.stdout.isatty():
+            typer.echo("Live scheduler watch requires a TTY. Use --once or --json.")
+            raise typer.Exit(1)
+        typer.echo("Live scheduler watch is not available yet. Use --once or --json.")
+        raise typer.Exit(1)
+
+    cli_workspace = _load_cli_workspace()
+    with db_session(cli_workspace.database_url) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(cli_workspace.workspace_root),
+            database_url=cli_workspace.database_url,
+            now=_utc_now,
+        ).snapshot()
+
+    if json_output:
+        typer.echo(snapshot.to_canonical_json())
+        return
+
+    console = Console(
+        file=sys.stdout,
+        color_system=None if no_color else "auto",
+        force_terminal=False,
+    )
+    console.print(
+        render_scheduler_dashboard(
+            snapshot,
+            width=console.width,
+            mode=DashboardMode.OBSERVER,
+        )
+    )
 
 
 @scheduler_app.command("status")
