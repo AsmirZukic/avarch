@@ -136,6 +136,8 @@ from avarch.application.scheduler_watch import (
     SchedulerWatchLoop,
     validate_live_watch_terminal,
 )
+from avarch.application.scheduler_watch_controller import SchedulerWatchController, WatchLogPaths
+from avarch.application.scheduler_watch_keys import PosixKeySource
 from avarch.application.validation_summary import format_validation_report_summary
 from avarch.application.vapoursynth_environment import (
     VapourSynthEnvironmentWorkflowError,
@@ -1113,7 +1115,12 @@ async def _run_scheduler_watch_live(
         database_url=database_url,
         workspace_root=workspace_root,
     )
-    with Live(console=console, refresh_per_second=4, transient=False, screen=True) as live:
+    with PosixKeySource() as key_source, Live(
+        console=console,
+        refresh_per_second=4,
+        transient=False,
+        screen=True,
+    ) as live:
         loop = SchedulerWatchLoop(
             snapshot_query=query,
             renderer=lambda snapshot, width: render_scheduler_dashboard(
@@ -1121,6 +1128,7 @@ async def _run_scheduler_watch_live(
                 width=width,
                 mode=DashboardMode.OBSERVER,
                 height=console.height,
+                shortcuts_available=key_source.supported,
             ),
             sink=_LiveSchedulerWatchSink(live),
             interval_seconds=interval_seconds,
@@ -1129,6 +1137,8 @@ async def _run_scheduler_watch_live(
                 database_url=database_url,
                 clock=_utc_now,
             ),
+            key_source=key_source,
+            watch_controller=_LiveSchedulerWatchController(database_url=database_url),
         )
         await loop.run()
 
@@ -1154,6 +1164,48 @@ class _LiveSchedulerWatchSink:
 
     def render(self, renderable: RenderableType) -> None:
         self._live.update(renderable)
+
+
+class _LiveSchedulerWatchController:
+    def __init__(self, *, database_url: str) -> None:
+        self._database_url = database_url
+        self._actor = cli_actor()
+
+    def pause(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).pause(reason=reason)
+
+    def resume(self):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).resume()
+
+    def cancel(self, *, job_id: int, reason: str | None = None):  # type: ignore[no-untyped-def]
+        with db_transaction(self._database_url) as session:
+            return self._controller(session).cancel(job_id=job_id, reason=reason)
+
+    def details(self, *, job_id: int):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return self._controller(session).details(job_id=job_id)
+
+    def log_paths(self, *, job_id: int, attempt_number: int | None = None) -> WatchLogPaths:
+        with db_session(self._database_url) as session:
+            return self._controller(session).log_paths(
+                job_id=job_id,
+                attempt_number=attempt_number,
+            )
+
+    def detach(self):  # type: ignore[no-untyped-def]
+        with db_session(self._database_url) as session:
+            return self._controller(session).detach()
+
+    def _controller(self, session):  # type: ignore[no-untyped-def]
+        return SchedulerWatchController(
+            scheduler_store=scheduler_control_store(session),
+            job_store=job_control_store(session),
+            job_view_store=job_view_store(session),
+            actor=self._actor,
+            clock=_utc_now,
+        )
 
 
 def _snapshot_with_resource_telemetry(

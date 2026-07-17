@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 from rich.console import RenderableType
 from rich.text import Text
 
+from avarch.application.job_views import JobAttemptView, JobDetails
 from avarch.application.scheduler_snapshot import (
+    ActiveJobSummary,
     CapacitySummary,
     PipelineSummary,
     SchedulerRuntimeState,
@@ -16,7 +19,15 @@ from avarch.application.scheduler_snapshot import (
     WorkspaceSummary,
 )
 from avarch.application.scheduler_watch import SchedulerWatchLoop
-from avarch.application.scheduler_watch_keys import KEY_CTRL_C, UnsupportedKeySource
+from avarch.application.scheduler_watch_controller import WatchLogPaths
+from avarch.application.scheduler_watch_keys import (
+    KEY_CANCEL,
+    KEY_CTRL_C,
+    KEY_DETAILS,
+    KEY_LOGS,
+    UnsupportedKeySource,
+)
+from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
 
 
 def test_q_detaches_scheduler_watch() -> None:
@@ -61,6 +72,62 @@ def test_unknown_key_takes_no_action() -> None:
     assert controller.calls == []
 
 
+def test_enter_renders_selected_job_details() -> None:
+    controller = _Controller(details=_job_details(42))
+    sink = _FakeSink()
+
+    asyncio.run(
+        _run_with_key(
+            KEY_DETAILS,
+            controller=controller,
+            sink=sink,
+            active_jobs=(_active_job(42),),
+            renderer=lambda snapshot, _width: Text(
+                str(snapshot.watch_details.job_id if snapshot.watch_details else "none")
+            ),
+        )
+    )
+
+    assert sink.texts == ["42"]
+
+
+def test_l_renders_selected_job_log_tail(tmp_path: Path) -> None:
+    log_path = tmp_path / "stderr.log"
+    log_path.write_text("one\ntwo\n", encoding="utf-8")
+    controller = _Controller(stderr_log=str(log_path))
+    sink = _FakeSink()
+
+    asyncio.run(
+        _run_with_key(
+            KEY_LOGS,
+            controller=controller,
+            sink=sink,
+            active_jobs=(_active_job(42),),
+            renderer=lambda snapshot, _width: Text(
+                "|".join(snapshot.watch_log_tail.lines) if snapshot.watch_log_tail else "none"
+            ),
+        )
+    )
+
+    assert sink.texts == ["one|two"]
+
+
+def test_second_c_confirms_selected_job_cancel() -> None:
+    controller = _Controller()
+
+    asyncio.run(
+        _run_with_key_source(
+            _KeySource([KEY_CANCEL, KEY_CANCEL]),
+            controller=controller,
+            sink=_FakeSink(),
+            snapshots=(_snapshot(active_jobs=(_active_job(42),)),) * 2,
+            stop_after_iterations=2,
+        )
+    )
+
+    assert controller.calls == ["cancel:42:watch"]
+
+
 def test_unsupported_key_source_disables_shortcuts_cleanly() -> None:
     controller = _Controller()
     sink = _FakeSink()
@@ -77,12 +144,15 @@ async def _run_with_key(
     controller: _Controller,
     sink: _FakeSink | None = None,
     state: SchedulerRuntimeState = SchedulerRuntimeState.RUNNING,
+    active_jobs: tuple[ActiveJobSummary, ...] = (),
+    renderer: object | None = None,
 ) -> None:
     await _run_with_key_source(
         _KeySource([key]),
         controller=controller,
         sink=sink or _FakeSink(),
-        state=state,
+        snapshots=(_snapshot(state, active_jobs=active_jobs),),
+        renderer=renderer,
     )
 
 
@@ -91,16 +161,19 @@ async def _run_with_key_source(
     *,
     controller: _Controller,
     sink: _FakeSink,
-    state: SchedulerRuntimeState = SchedulerRuntimeState.RUNNING,
+    snapshots: Sequence[SchedulerSnapshot] | None = None,
+    renderer: object | None = None,
+    stop_after_iterations: int = 1,
 ) -> None:
+    renderer = renderer or (lambda snapshot, _width: Text(snapshot.scheduler.state.value))
     loop = SchedulerWatchLoop(
-        snapshot_query=_Query([_snapshot(state)]),
-        renderer=lambda snapshot, _width: Text(snapshot.scheduler.state.value),
+        snapshot_query=_Query(snapshots or (_snapshot(),)),
+        renderer=renderer,  # type: ignore[arg-type]
         sink=sink,
         interval_seconds=1,
         terminal_width=lambda: 100,
         sleeper=lambda _interval: asyncio.sleep(0),
-        stop_after_iterations=1,
+        stop_after_iterations=stop_after_iterations,
         key_source=key_source,  # type: ignore[arg-type]
         watch_controller=controller,
     )
@@ -120,8 +193,15 @@ class _KeySource:
 
 
 class _Controller:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        details: JobDetails | None = None,
+        stderr_log: str | None = None,
+    ) -> None:
         self.calls: list[str] = []
+        self._details = details
+        self._stderr_log = stderr_log
 
     def pause(self, *, reason: str | None = None) -> object:
         self.calls.append(f"pause:{reason}")
@@ -135,13 +215,13 @@ class _Controller:
         self.calls.append(f"cancel:{job_id}:{reason}")
         return object()
 
-    def details(self, *, job_id: int) -> None:
+    def details(self, *, job_id: int) -> JobDetails | None:
         del job_id
-        return None
+        return self._details
 
-    def log_paths(self, *, job_id: int, attempt_number: int | None = None) -> object:
+    def log_paths(self, *, job_id: int, attempt_number: int | None = None) -> WatchLogPaths:
         del job_id, attempt_number
-        return object()
+        return WatchLogPaths(stdout_log=None, stderr_log=self._stderr_log)
 
     def detach(self) -> object:
         self.calls.append("detach")
@@ -166,17 +246,72 @@ class _Query:
         return self._snapshots.pop(0)
 
 
-def _snapshot(state: SchedulerRuntimeState) -> SchedulerSnapshot:
+def _snapshot(
+    state: SchedulerRuntimeState = SchedulerRuntimeState.RUNNING,
+    *,
+    active_jobs: tuple[ActiveJobSummary, ...] = (),
+) -> SchedulerSnapshot:
     return SchedulerSnapshot(
         captured_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
         workspace=WorkspaceSummary(root_path="/workspace"),
         scheduler=SchedulerRuntimeSummary(state=state),
-        pipeline=PipelineSummary(queued=0, active=0, completed=0, failed=0),
-        active_jobs=(),
+        pipeline=PipelineSummary(queued=0, active=len(active_jobs), completed=0, failed=0),
+        active_jobs=active_jobs,
         capacity=CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0),
         upcoming_jobs=(),
         recent_events=(),
         alerts=(),
         resources=None,
         forecast=None,
+    )
+
+
+def _active_job(job_id: int) -> ActiveJobSummary:
+    return ActiveJobSummary(
+        job_id=job_id,
+        source_path=f"/media/{job_id}.mkv",
+        status=JobStatus.ENCODING,
+        stage=JobStage.ENCODE,
+        priority=0,
+        workflow_steps=(),
+    )
+
+
+def _job_details(job_id: int) -> JobDetails:
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+    return JobDetails(
+        id=job_id,
+        source_path="/media/movie.mkv",
+        profile_name="default",
+        profile_hash="profile",
+        queue_key="queue",
+        priority=0,
+        status=JobStatus.ENCODING,
+        stage=JobStage.ENCODE,
+        claimed_by="runner",
+        attempts=1,
+        created_at=now,
+        started_at=now,
+        finished_at=None,
+        cancel_requested_at=None,
+        hold_requested_at=None,
+        probe_hash="probe",
+        plan_hash="plan",
+        plan_path="/plans/plan.json",
+        output_path="/work/movie.av1.mkv",
+        latest_validation_id=None,
+        latest_promotion_id=None,
+        last_error_type=None,
+        last_error_message=None,
+        attempt_history=[
+            JobAttemptView(
+                attempt_number=1,
+                stage=JobStage.ENCODE,
+                status=AttemptStatus.RUNNING,
+                runner_id="runner",
+                stdout_log="/logs/stdout.log",
+                stderr_log="/logs/stderr.log",
+            )
+        ],
+        events=[],
     )

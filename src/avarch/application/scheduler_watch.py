@@ -21,7 +21,16 @@ from avarch.application.scheduler_snapshot import (
     resource_telemetry_summary,
 )
 from avarch.application.scheduler_watch_controller import WatchController
-from avarch.application.scheduler_watch_keys import KEY_CTRL_C, KEY_PAUSE, KEY_QUIT, KeySource
+from avarch.application.scheduler_watch_controls import SchedulerWatchControlState
+from avarch.application.scheduler_watch_keys import (
+    KEY_CANCEL,
+    KEY_CTRL_C,
+    KEY_DETAILS,
+    KEY_LOGS,
+    KEY_PAUSE,
+    KEY_QUIT,
+    KeySource,
+)
 
 
 class SchedulerWatchModeError(RuntimeError):
@@ -53,6 +62,9 @@ class SchedulerWatchLoop:
     resource_stale_after_seconds: int = 10
     key_source: KeySource | None = None
     watch_controller: WatchController | None = None
+    watch_control_state: SchedulerWatchControlState = field(
+        default_factory=SchedulerWatchControlState
+    )
 
     async def run(self) -> None:
         iterations = 0
@@ -69,8 +81,10 @@ class SchedulerWatchLoop:
             else:
                 consecutive_failures = 0
                 snapshot = self._snapshot_with_resources(snapshot)
+                should_stop = self._handle_key(snapshot)
+                snapshot = self.watch_control_state.apply_to_snapshot(snapshot)
                 self.sink.render(self.renderer(snapshot, width))
-                if self._handle_key(snapshot):
+                if should_stop:
                     return
 
             iterations += 1
@@ -103,18 +117,43 @@ class SchedulerWatchLoop:
         )
 
     def _handle_key(self, snapshot: SchedulerSnapshot) -> bool:
-        if self.key_source is None or self.watch_controller is None:
+        self.watch_control_state.refresh(snapshot)
+        if (
+            self.key_source is None
+            or self.watch_controller is None
+            or not self.key_source.supported
+        ):
             return False
         key = self.key_source.poll_key()
+        if key is None:
+            return False
         if key in {KEY_QUIT, KEY_CTRL_C}:
             self.watch_controller.detach()
             return True
-        if key != KEY_PAUSE:
+        if key == KEY_PAUSE:
+            if snapshot.scheduler.state == SchedulerRuntimeState.RUNNING:
+                self.watch_controller.pause(reason="watch")
+            elif snapshot.scheduler.state == SchedulerRuntimeState.PAUSED:
+                self.watch_controller.resume()
             return False
-        if snapshot.scheduler.state == SchedulerRuntimeState.RUNNING:
-            self.watch_controller.pause(reason="watch")
-        elif snapshot.scheduler.state == SchedulerRuntimeState.PAUSED:
-            self.watch_controller.resume()
+        if key == KEY_DETAILS:
+            self.watch_control_state.handle_details_key(controller=self.watch_controller)
+            return False
+        if key == KEY_LOGS:
+            self.watch_control_state.handle_logs_key(controller=self.watch_controller)
+            return False
+        if key == KEY_CANCEL:
+            if self.watch_control_state.cancel_confirmation is not None:
+                self.watch_control_state.confirm_cancel(
+                    controller=self.watch_controller,
+                    now=snapshot.captured_at,
+                )
+            else:
+                self.watch_control_state.handle_key(
+                    key,
+                    snapshot=snapshot,
+                    now=snapshot.captured_at,
+                )
         return False
 
 
