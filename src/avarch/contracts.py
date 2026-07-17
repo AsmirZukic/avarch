@@ -25,11 +25,12 @@ VALIDATION_POLICY_HASH_CONTRACT = "validation-policy-v2"
 PROMOTION_POLICY_HASH_CONTRACT = "promotion-policy-v1"
 
 ALEMBIC_BASELINE_REVISION = "0001_initial"
-ALEMBIC_HEAD_REVISION = "0006_job_attempt_progress"
+ALEMBIC_HEAD_REVISION = "0007_structured_attempt_progress"
 ALEMBIC_SUPPORTED_REVISIONS = frozenset(
     {
         ALEMBIC_BASELINE_REVISION,
         "0005_job_state_version",
+        "0006_job_attempt_progress",
         ALEMBIC_HEAD_REVISION,
     }
 )

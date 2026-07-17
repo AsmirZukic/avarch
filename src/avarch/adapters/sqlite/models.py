@@ -218,6 +218,11 @@ class JobAttemptProgress(SQLModel, table=True):
     speed_ratio: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
     source: ProgressSource = Field(sa_column=Column(String(), nullable=False))
     message: str | None = None
+    chunks_current: int | None = None
+    chunks_total: int | None = None
+    bitrate_kbps: int | None = None
+    estimated_output_bytes: int | None = None
+    written_output_bytes: int | None = None
 
     phase_started_at: datetime
     observed_at: datetime

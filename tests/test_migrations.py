@@ -24,6 +24,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0004_promotion_target_lock.py",
         "0005_job_state_version.py",
         "0006_job_attempt_progress.py",
+        "0007_structured_attempt_progress.py",
     ]
 
 
@@ -78,10 +79,18 @@ def test_job_state_version_revision_depends_on_promotion_target_lock() -> None:
 
 def test_job_attempt_progress_revision_depends_on_job_state_version() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0006_job_attempt_progress")
 
     assert revision is not None
     assert revision.down_revision == "0005_job_state_version"
+
+
+def test_structured_attempt_progress_revision_depends_on_attempt_progress() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0006_job_attempt_progress"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -216,6 +225,11 @@ def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
     assert columns["unit"]["nullable"] is True
     assert columns["rate_per_second"]["nullable"] is True
     assert columns["speed_ratio"]["nullable"] is True
+    assert columns["chunks_current"]["nullable"] is True
+    assert columns["chunks_total"]["nullable"] is True
+    assert columns["bitrate_kbps"]["nullable"] is True
+    assert columns["estimated_output_bytes"]["nullable"] is True
+    assert columns["written_output_bytes"]["nullable"] is True
     assert columns["source"]["nullable"] is False
     assert columns["message"]["nullable"] is True
     assert columns["phase_started_at"]["nullable"] is False
@@ -375,6 +389,61 @@ def test_upgrade_from_job_state_version_adds_progress_without_changing_jobs(
     assert job == (job_id, "pending", "encode")
     assert attempt == (attempt_id, "completed", "encode")
     assert progress_count == 0
+
+
+def test_upgrade_from_attempt_progress_adds_nullable_structured_metrics(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+    config = _alembic_config(database_url)
+    now = datetime(2026, 7, 1, tzinfo=UTC)
+
+    command.upgrade(config, "0006_job_attempt_progress")
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        media_id = _insert(connection, "mediafile", _media_values(now))
+        probe_id = _insert(connection, "proberesult", _probe_values(media_id, now))
+        job_id = _insert(connection, "job", _job_values(media_id, probe_id, now))
+        attempt_id = _insert(connection, "jobattempt", _attempt_values(job_id, now))
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO job_attempt_progress (
+                    attempt_id, phase, current_value, total_value, unit,
+                    rate_per_second, speed_ratio, source, message,
+                    phase_started_at, observed_at, heartbeat_at, advanced_at,
+                    created_at, updated_at
+                ) VALUES (
+                    :attempt_id, 'encoding', 12, 24, 'frames',
+                    6.0, 1.2, 'av1an_output', 'encoding',
+                    :now, :now, :now, :now, :now, :now
+                )
+                """
+            ),
+            {"attempt_id": attempt_id, "now": now},
+        )
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(create_db_engine(database_url)).get_columns("job_attempt_progress")
+    }
+    with create_db_engine(database_url).connect() as connection:
+        row = connection.execute(
+            sa.text(
+                """
+                SELECT current_value, chunks_current, chunks_total, bitrate_kbps,
+                       estimated_output_bytes, written_output_bytes
+                FROM job_attempt_progress
+                WHERE attempt_id = :attempt_id
+                """
+            ),
+            {"attempt_id": attempt_id},
+        ).one()
+
+    assert columns["chunks_current"]["nullable"] is True
+    assert row == (12.0, None, None, None, None, None)
 
 
 def test_alembic_has_one_head() -> None:
