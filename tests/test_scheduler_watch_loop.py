@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import pytest
 from rich.console import RenderableType
 from rich.text import Text
 
+from avarch.application.resource_telemetry import (
+    NullResourceSampler,
+    ResourceMetric,
+    ResourceSample,
+)
 from avarch.application.scheduler_snapshot import (
     CapacitySummary,
     PipelineSummary,
@@ -163,6 +169,103 @@ def test_scheduler_watch_loop_uses_latest_terminal_width() -> None:
     assert sink.texts == ["90", "140"]
 
 
+def test_scheduler_watch_loop_merges_resource_telemetry_before_rendering() -> None:
+    captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+    query = _FakeQuery([_snapshot(0)])
+    sink = _FakeSink()
+
+    class FixedSampler:
+        def sample(self) -> ResourceSample:
+            return ResourceSample(
+                sampled_at=captured_at,
+                metrics=(
+                    ResourceMetric(name="cpu", value=95.0, unit="percent"),
+                        ResourceMetric(
+                            name="memory",
+                            value=7 * 1024**3,
+                            total=10 * 1024**3,
+                            unit="bytes",
+                        ),
+                    ResourceMetric(
+                        name="output write rate",
+                        value=84 * 1024**2,
+                        unit="bytes_per_second",
+                    ),
+                ),
+            )
+
+    async def scenario() -> None:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, _width: Text(
+                f"{snapshot.resources.health}:{snapshot.resources.metrics[0].value}"  # type: ignore[union-attr]
+            ),
+            sink=sink,
+            interval_seconds=1,
+            terminal_width=lambda: 100,
+            sleeper=lambda _interval: asyncio.sleep(0),
+            stop_after_iterations=1,
+            resource_sampler=FixedSampler(),
+        )
+        await loop.run()
+
+    asyncio.run(scenario())
+
+    assert sink.texts == ["ok:95.0"]
+
+
+def test_scheduler_watch_loop_marks_resource_telemetry_stale() -> None:
+    query = _FakeQuery([_snapshot(20)])
+    sink = _FakeSink()
+
+    class OldSampler:
+        def sample(self) -> ResourceSample:
+            return ResourceSample(
+                sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+                metrics=(ResourceMetric(name="cpu", value=10.0, unit="percent"),),
+            )
+
+    async def scenario() -> None:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, _width: Text(str(snapshot.resources.stale)),  # type: ignore[union-attr]
+            sink=sink,
+            interval_seconds=1,
+            terminal_width=lambda: 100,
+            sleeper=lambda _interval: asyncio.sleep(0),
+            stop_after_iterations=1,
+            resource_sampler=OldSampler(),
+            resource_stale_after_seconds=10,
+        )
+        await loop.run()
+
+    asyncio.run(scenario())
+
+    assert sink.texts == ["True"]
+
+
+def test_scheduler_watch_loop_renders_unsupported_resource_telemetry() -> None:
+    query = _FakeQuery([_snapshot(0)])
+    sink = _FakeSink()
+
+    async def scenario() -> None:
+        loop = SchedulerWatchLoop(
+            snapshot_query=query,
+            renderer=lambda snapshot, _width: Text(str(snapshot.resources.health)),  # type: ignore[union-attr]
+            sink=sink,
+            interval_seconds=1,
+            terminal_width=lambda: 100,
+            sleeper=lambda _interval: asyncio.sleep(0),
+            stop_after_iterations=1,
+            resource_sampler=NullResourceSampler(reason="unsupported_platform"),
+        )
+        await loop.run()
+
+    asyncio.run(scenario())
+
+    assert sink.texts == ["unavailable"]
+
+
 def test_live_watch_rejects_non_tty() -> None:
     with pytest.raises(SchedulerWatchModeError, match="Use --once or --json"):
         validate_live_watch_terminal(stdout_is_tty=False)
@@ -183,7 +286,7 @@ class _FakeSink:
 
 
 class _FakeQuery:
-    def __init__(self, results: list[SchedulerSnapshot | BaseException]) -> None:
+    def __init__(self, results: Sequence[SchedulerSnapshot | BaseException]) -> None:
         self._results = results
         self.calls = 0
         self.scheduler_mutations = 0

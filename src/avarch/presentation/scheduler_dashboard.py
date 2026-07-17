@@ -10,13 +10,15 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from avarch.application.resource_telemetry import ResourceHealth
 from avarch.application.scheduler_snapshot import (
-    ActiveJobSummary,
     AttemptProgressSummary,
     BlockedJobSummary,
     LifecycleEventSummary,
-    SchedulerSnapshot,
+    ResourceMetricSummary,
+    ResourceTelemetrySummary,
     SchedulerSessionRunSummary,
+    SchedulerSnapshot,
     WorkflowStepState,
     WorkflowStepSummary,
 )
@@ -111,7 +113,7 @@ def _compact_dashboard(
         ),
         width,
     )
-    _append_line(text, "Resource telemetry unavailable", width)
+    _append_line(text, _resource_summary(snapshot.resources), width)
     if snapshot.blocked_jobs:
         _append_line(text, f"Blocked {len(snapshot.blocked_jobs)}", width)
         for job in snapshot.blocked_jobs[:3]:
@@ -250,7 +252,22 @@ def _blocked_panel(snapshot: SchedulerSnapshot) -> Panel:
 def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
     if snapshot.resources is None:
         return Panel("Resource telemetry unavailable", title="Resources", border_style="grey50")
-    return Panel(str(snapshot.resources), title="Resources", border_style="green")
+    resources = snapshot.resources
+    if resources.health == ResourceHealth.UNAVAILABLE:
+        return Panel("Resource telemetry unavailable", title="Resources", border_style="grey50")
+    table = Table.grid(padding=(0, 2))
+    table.add_column()
+    table.add_column(justify="right")
+    table.add_column()
+    for metric in resources.metrics:
+        table.add_row(
+            _resource_label(metric),
+            _resource_value(metric),
+            _resource_status(metric),
+        )
+    if resources.stale:
+        table.add_row("freshness", "stale", "")
+    return Panel(table, title="Resources", border_style=_resource_border(resources.health))
 
 
 def _session_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -332,6 +349,63 @@ def _alerts_panel(snapshot: SchedulerSnapshot) -> Panel:
     return Panel(text, title="Alerts", border_style="yellow")
 
 
+def _resource_summary(resources: ResourceTelemetrySummary | None) -> str:
+    if resources is None or resources.health == ResourceHealth.UNAVAILABLE:
+        return "Resource telemetry unavailable"
+    parts = [_resource_compact(metric) for metric in resources.metrics if metric.available]
+    if resources.stale:
+        parts.append("stale")
+    return "Resources " + " · ".join(parts) if parts else "Resource telemetry unavailable"
+
+
+def _resource_compact(metric: ResourceMetricSummary) -> str:
+    label = _resource_label(metric)
+    value = _resource_value(metric)
+    return f"{label} {value}"
+
+
+def _resource_label(metric: ResourceMetricSummary) -> str:
+    if metric.name == "cpu":
+        return "CPU"
+    if metric.name == "output write rate":
+        return "output write"
+    return metric.name
+
+
+def _resource_value(metric: ResourceMetricSummary) -> str:
+    if not metric.available:
+        return UNAVAILABLE
+    if metric.value is None:
+        return UNAVAILABLE
+    if metric.name == "cpu" and metric.unit == "percent":
+        return f"{metric.value:.0f}%"
+    if metric.name == "memory" and metric.unit == "bytes" and metric.total is not None:
+        return f"{format_size(int(metric.value))}/{format_size(int(metric.total))}"
+    if metric.name == "output write rate" and metric.unit == "bytes_per_second":
+        return f"{format_size(int(metric.value))}/s"
+    if metric.unit:
+        return f"{metric.value} {metric.unit}"
+    return str(metric.value)
+
+
+def _resource_status(metric: ResourceMetricSummary) -> str:
+    if not metric.available:
+        return metric.reason or UNAVAILABLE
+    if metric.name in {"cpu", "output write rate"}:
+        return "active"
+    if metric.health != ResourceHealth.OK:
+        return metric.health.value
+    return ""
+
+
+def _resource_border(health: ResourceHealth) -> str:
+    if health == ResourceHealth.CRITICAL:
+        return "red"
+    if health == ResourceHealth.WARNING:
+        return "yellow"
+    return "green"
+
+
 def _workflow_steps(steps: tuple[WorkflowStepSummary, ...]) -> Text:
     text = Text()
     for index, step in enumerate(steps):
@@ -357,8 +431,9 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
         return UNAVAILABLE
     parts: list[str] = []
     if progress.stale and progress.last_update_age_seconds is not None:
+        age = format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))
         parts.append(
-            f"last update {format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))} ago"
+            f"last update {age} ago"
         )
     if progress.frames_current is not None:
         if progress.frames_total is not None:

@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from avarch.application.resource_telemetry import (
+    CompositeResourceSampler,
     NullResourceSampler,
     ResourceHealth,
     ResourceMetric,
     ResourceSample,
+    ResourceTelemetryPolicy,
+    apply_resource_health,
     safe_sample_resources,
     sample_health,
 )
@@ -72,3 +75,104 @@ def test_high_cpu_alone_is_not_warning_or_critical() -> None:
     )
 
     assert sample_health(metrics) == ResourceHealth.OK
+
+
+def test_memory_warns_when_available_memory_approaches_reserve() -> None:
+    sample = ResourceSample(
+        sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+        metrics=(
+            ResourceMetric(
+                name="memory",
+                value=9 * 1024**3,
+                total=10 * 1024**3,
+                unit="bytes",
+            ),
+        ),
+    )
+
+    classified = apply_resource_health(
+        sample,
+        policy=ResourceTelemetryPolicy(
+            memory_reserve_bytes=2 * 1024**3,
+            memory_critical_bytes=512 * 1024**2,
+        ),
+    )
+
+    assert classified.health == ResourceHealth.WARNING
+    assert classified.metrics[0].health == ResourceHealth.WARNING
+
+
+def test_memory_is_critical_only_below_hard_safety_threshold() -> None:
+    sample = ResourceSample(
+        sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+        metrics=(
+            ResourceMetric(
+                name="memory",
+                value=9 * 1024**3 + 400 * 1024**2,
+                total=10 * 1024**3,
+                unit="bytes",
+            ),
+        ),
+    )
+    policy = ResourceTelemetryPolicy(
+        memory_reserve_bytes=2 * 1024**3,
+        memory_critical_bytes=512 * 1024**2,
+    )
+
+    warning = apply_resource_health(sample, policy=policy)
+    critical = apply_resource_health(
+        ResourceSample(
+            sampled_at=sample.sampled_at,
+            metrics=(
+                ResourceMetric(
+                    name="memory",
+                    value=9 * 1024**3 + 800 * 1024**2,
+                    total=10 * 1024**3,
+                    unit="bytes",
+                ),
+            ),
+        ),
+        policy=policy,
+    )
+
+    assert warning.health == ResourceHealth.WARNING
+    assert critical.health == ResourceHealth.CRITICAL
+
+
+def test_output_write_rate_is_informational_for_health() -> None:
+    sample = ResourceSample(
+        sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+        metrics=(
+            ResourceMetric(name="output write rate", value=500 * 1024**2, unit="bytes_per_second"),
+        ),
+    )
+
+    classified = apply_resource_health(sample)
+
+    assert classified.health == ResourceHealth.OK
+
+
+def test_composite_sampler_merges_metrics_from_child_samplers() -> None:
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    class FixedSampler:
+        def __init__(self, metric: ResourceMetric) -> None:
+            self._metric = metric
+
+        def sample(self) -> ResourceSample:
+            return ResourceSample(sampled_at=now, metrics=(self._metric,))
+
+    sampler = CompositeResourceSampler(
+        (
+            FixedSampler(ResourceMetric(name="cpu", value=25, unit="percent")),
+            FixedSampler(
+                ResourceMetric(name="output write rate", value=10, unit="bytes_per_second")
+            ),
+        ),
+        clock=lambda: now,
+    )
+
+    sample = sampler.sample()
+
+    assert [metric.name for metric in sample.metrics] == ["cpu", "output write rate"]
+    assert sample.health == ResourceHealth.OK
