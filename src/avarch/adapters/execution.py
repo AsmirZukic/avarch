@@ -807,6 +807,7 @@ def run_managed_process(
             reader.start()
         cancelled = False
         forced_kill = False
+        termination_requested_at: datetime | None = None
         try:
             while True:
                 exit_code = process.poll()
@@ -814,6 +815,7 @@ def run_managed_process(
                     break
                 if cancellation_token is not None and cancellation_token.cancel_requested:
                     cancelled = True
+                    termination_requested_at = _utc_now()
                     _terminate_process(process)
                     try:
                         exit_code = process.wait(timeout=termination_grace_seconds)
@@ -851,6 +853,7 @@ def run_managed_process(
             return_code=exit_code,
             started_at=started_at,
             finished_at=finished_at,
+            termination_requested_at=termination_requested_at,
         )
     if cancelled:
         return ProcessResult.cancelled(
@@ -858,6 +861,7 @@ def run_managed_process(
             return_code=exit_code,
             started_at=started_at,
             finished_at=finished_at,
+            termination_requested_at=termination_requested_at,
         )
     return ProcessResult.exited(
         command=result_command,
