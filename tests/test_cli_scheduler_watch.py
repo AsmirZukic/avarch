@@ -19,7 +19,7 @@ runner = CliRunner()
 def test_scheduler_watch_once_renders_empty_stopped_scheduler(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scheduler", "watch", "--once"])
+    result = runner.invoke(app, ["scheduler", "watch", "--once"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0
     assert "Avarch Scheduler" in result.output
@@ -29,7 +29,7 @@ def test_scheduler_watch_once_renders_empty_stopped_scheduler(tmp_path: Path) ->
 
 
 def test_scheduler_watch_help_documents_modes_and_options() -> None:
-    result = runner.invoke(app, ["scheduler", "watch", "--help"])
+    result = runner.invoke(app, ["scheduler", "watch", "--help"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0
     assert "--once" in result.output
@@ -53,7 +53,11 @@ def test_readme_documents_scheduler_watch_workflow() -> None:
 def test_scheduler_watch_once_no_color_has_no_ansi(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
-    result = runner.invoke(app, ["scheduler", "watch", "--once", "--no-color"])
+    result = runner.invoke(
+        app,
+        ["scheduler", "watch", "--once", "--no-color"],
+        env={"COLUMNS": "80"},
+    )
 
     assert result.exit_code == 0
     assert "\x1b" not in result.output
