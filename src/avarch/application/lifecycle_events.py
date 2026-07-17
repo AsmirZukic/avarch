@@ -38,7 +38,7 @@ class LifecycleEventStore(Protocol):
         details: Mapping[str, object] | None = None,
         dedupe_key: str | None = None,
     ) -> LifecycleEventRecord:
-        pass
+        ...
 
     def latest_events(self, *, limit: int) -> tuple[LifecycleEventRecord, ...]:
-        pass
+        ...

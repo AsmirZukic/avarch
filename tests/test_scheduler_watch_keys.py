@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from avarch.application.scheduler_snapshot import (
     WorkspaceSummary,
 )
 from avarch.application.scheduler_watch import SchedulerWatchLoop
-from avarch.application.scheduler_watch_controller import WatchLogPaths
+from avarch.application.scheduler_watch_controller import WatchControlResult, WatchLogPaths
 from avarch.application.scheduler_watch_keys import (
     KEY_CANCEL,
     KEY_CTRL_C,
@@ -208,7 +208,7 @@ async def _run_with_key(
     sink: _FakeSink | None = None,
     state: SchedulerRuntimeState = SchedulerRuntimeState.RUNNING,
     active_jobs: tuple[ActiveJobSummary, ...] = (),
-    renderer: object | None = None,
+    renderer: Callable[[SchedulerSnapshot, int], RenderableType] | None = None,
 ) -> None:
     await _run_with_key_source(
         _KeySource([key]),
@@ -225,14 +225,14 @@ async def _run_with_key_source(
     controller: _Controller,
     sink: _FakeSink,
     snapshots: Sequence[SchedulerSnapshot] | None = None,
-    renderer: object | None = None,
+    renderer: Callable[[SchedulerSnapshot, int], RenderableType] | None = None,
     stop_after_iterations: int = 1,
     ctrl_c_stops_scheduler: bool = False,
 ) -> None:
     renderer = renderer or (lambda snapshot, _width: Text(snapshot.scheduler.state.value))
     loop = SchedulerWatchLoop(
         snapshot_query=_Query(snapshots or (_snapshot(),)),
-        renderer=renderer,  # type: ignore[arg-type]
+        renderer=renderer,
         sink=sink,
         interval_seconds=1,
         terminal_width=lambda: 100,
@@ -268,17 +268,17 @@ class _Controller:
         self._details = details
         self._stderr_log = stderr_log
 
-    def pause(self, *, reason: str | None = None) -> object:
+    def pause(self, *, reason: str | None = None) -> WatchControlResult:
         self.calls.append(f"pause:{reason}")
-        return object()
+        return WatchControlResult(action="pause", message="paused")
 
-    def resume(self) -> object:
+    def resume(self) -> WatchControlResult:
         self.calls.append("resume")
-        return object()
+        return WatchControlResult(action="resume", message="resumed")
 
-    def cancel(self, *, job_id: int, reason: str | None = None) -> object:
+    def cancel(self, *, job_id: int, reason: str | None = None) -> WatchControlResult:
         self.calls.append(f"cancel:{job_id}:{reason}")
-        return object()
+        return WatchControlResult(action="cancel", message="cancelled")
 
     def details(self, *, job_id: int) -> JobDetails | None:
         del job_id
@@ -288,13 +288,13 @@ class _Controller:
         del job_id, attempt_number
         return WatchLogPaths(stdout_log=None, stderr_log=self._stderr_log)
 
-    def detach(self) -> object:
+    def detach(self) -> WatchControlResult:
         self.calls.append("detach")
-        return object()
+        return WatchControlResult(action="detach", message="detached")
 
-    def stop(self, *, reason: str | None = None) -> object:
+    def stop(self, *, reason: str | None = None) -> WatchControlResult:
         self.calls.append(f"stop:{reason}")
-        return object()
+        return WatchControlResult(action="stop", message="stopped")
 
 
 class _FakeSink:

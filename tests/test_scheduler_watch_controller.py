@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from avarch.application.job_views import (
+    CurrentJobProgressView,
     JobAttemptView,
     JobDetails,
     JobListItem,
@@ -222,7 +223,7 @@ class _JobViewStore:
         self.latest_attempt_requests.append((job_id, attempt_number))
         return self._latest
 
-    def current_job_progress(self, *, job_id: int) -> object | None:
+    def current_job_progress(self, *, job_id: int) -> CurrentJobProgressView | None:
         del job_id
         return None
 

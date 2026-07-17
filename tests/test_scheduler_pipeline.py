@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session, select
+import pytest
+from sqlmodel import Session, col, select
 
 from avarch.adapters.scheduler_run import SqliteSchedulerRunStore
 from avarch.adapters.scheduler_workers import (
@@ -179,7 +180,7 @@ def test_size_rejection_does_not_block_next_job(tmp_path: Path) -> None:
 
 
 def test_scheduler_continues_after_promotion_failure(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     async def fake_promote_job(**_kwargs: object) -> PromotionResultView:
@@ -223,7 +224,7 @@ def test_scheduler_continues_after_promotion_failure(
 
 
 def test_encode_worker_requests_process_token_when_cancelled(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from avarch.models.execution import ExecutionInterruptedError, ProcessCancellationToken
@@ -308,7 +309,7 @@ def test_encode_worker_requests_process_token_when_cancelled(
 
 
 def test_encode_worker_records_failed_progress_on_execution_error(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from avarch.models.execution import ExecutionError
@@ -339,7 +340,7 @@ def test_encode_worker_records_failed_progress_on_execution_error(
 
 
 def test_encode_worker_persists_preparing_then_encoding_progress(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, plan = _stored_encode_job(tmp_path)
@@ -380,7 +381,7 @@ def test_encode_worker_persists_preparing_then_encoding_progress(
 
 
 def test_encode_worker_persists_numeric_av1an_progress(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, _plan = _stored_encode_job(tmp_path)
@@ -413,7 +414,7 @@ def test_encode_worker_persists_numeric_av1an_progress(
 
 
 def test_encode_worker_ignores_external_progress_sink_failure(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, _plan = _stored_encode_job(tmp_path)
@@ -454,7 +455,7 @@ def test_encode_worker_ignores_external_progress_sink_failure(
 
 
 def test_validation_worker_persists_validating_then_completed_progress(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, plan = _stored_validation_job(tmp_path)
@@ -476,7 +477,7 @@ def test_validation_worker_persists_validating_then_completed_progress(
     with Session(engine) as session:
         progress = session.get(JobAttemptProgress, 1)
         events = session.exec(
-            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(col(JobEvent.id))
         ).all()
 
     assert result is not None
@@ -494,7 +495,7 @@ def test_validation_worker_persists_validating_then_completed_progress(
 
 
 def test_validation_worker_records_failure_lifecycle_event(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, _plan = _stored_validation_job(tmp_path)
@@ -509,7 +510,7 @@ def test_validation_worker_records_failure_lifecycle_event(
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
         events = session.exec(
-            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(col(JobEvent.id))
         ).all()
 
     assert result is None
@@ -522,7 +523,7 @@ def test_validation_worker_records_failure_lifecycle_event(
 
 
 def test_size_rejection_records_validation_and_cleanup_lifecycle_events(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, plan = _stored_validation_job(tmp_path)
@@ -543,7 +544,7 @@ def test_size_rejection_records_validation_and_cleanup_lifecycle_events(
     with Session(engine) as session:
         job = session.get(Job, 1)
         events = session.exec(
-            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(col(JobEvent.id))
         ).all()
 
     assert validation is not None
@@ -562,7 +563,7 @@ def test_size_rejection_records_validation_and_cleanup_lifecycle_events(
 
 
 def test_rejected_output_cleanup_failure_records_lifecycle_event(
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     config, plan = _stored_validation_job(tmp_path)
@@ -584,7 +585,7 @@ def test_rejected_output_cleanup_failure_records_lifecycle_event(
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
         events = session.exec(
-            select(JobEvent).where(JobEvent.job_id == 1).order_by(JobEvent.id)
+            select(JobEvent).where(JobEvent.job_id == 1).order_by(col(JobEvent.id))
         ).all()
 
     assert validation is not None

@@ -14,7 +14,7 @@ from avarch.application.scheduler_snapshot import (
     SchedulerSnapshot,
     WorkspaceSummary,
 )
-from avarch.application.scheduler_watch_controller import WatchLogPaths
+from avarch.application.scheduler_watch_controller import WatchControlResult, WatchLogPaths
 from avarch.application.scheduler_watch_controls import (
     SchedulerWatchControlState,
     read_bounded_log_tail,
@@ -164,18 +164,18 @@ class _Controller:
         self._stderr_log = stderr_log
         self.cancelled: list[tuple[int, str | None]] = []
 
-    def pause(self, *, reason: str | None = None) -> object:
+    def pause(self, *, reason: str | None = None) -> WatchControlResult:
         del reason
-        return object()
+        return WatchControlResult(action="pause", message="paused")
 
-    def resume(self) -> object:
-        return object()
+    def resume(self) -> WatchControlResult:
+        return WatchControlResult(action="resume", message="resumed")
 
-    def cancel(self, *, job_id: int, reason: str | None = None) -> object:
+    def cancel(self, *, job_id: int, reason: str | None = None) -> WatchControlResult:
         if self._error is not None:
             raise self._error
         self.cancelled.append((job_id, reason))
-        return object()
+        return WatchControlResult(action="cancel", message="cancelled")
 
     def details(self, *, job_id: int) -> JobDetails | None:
         del job_id
@@ -185,12 +185,12 @@ class _Controller:
         del job_id, attempt_number
         return WatchLogPaths(stdout_log=None, stderr_log=self._stderr_log)
 
-    def detach(self) -> object:
-        return object()
+    def detach(self) -> WatchControlResult:
+        return WatchControlResult(action="detach", message="detached")
 
-    def stop(self, *, reason: str | None = None) -> object:
+    def stop(self, *, reason: str | None = None) -> WatchControlResult:
         del reason
-        return object()
+        return WatchControlResult(action="stop", message="stopped")
 
 
 def _snapshot(*, active_jobs: tuple[ActiveJobSummary, ...]) -> SchedulerSnapshot:

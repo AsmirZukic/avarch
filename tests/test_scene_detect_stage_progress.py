@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import Engine
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from avarch.adapters import scheduler_workers
 from avarch.adapters.execution import (
@@ -72,7 +74,7 @@ def test_real_av1an_stream_advances_scene_detect_to_encode_once(tmp_path: Path) 
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
-        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+        events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
     assert job is not None
     assert job.stage == JobStage.ENCODE
     assert [event.event_type for event in events] == [
@@ -104,7 +106,7 @@ def test_scene_detect_progress_with_scene_count_does_not_advance_to_encode(
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
-        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+        events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert job is not None
     assert job.stage == JobStage.SCENE_DETECT
@@ -143,7 +145,7 @@ def test_scene_detect_progress_advances_to_encode_when_encoding_progress_starts(
 
     with Session(engine) as session:
         job = session.get(Job, job_id)
-        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+        events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert job is not None
     assert job.stage == JobStage.ENCODE
@@ -177,7 +179,7 @@ def test_scene_detect_transition_retries_after_a_transient_write_failure(
     original = scheduler_workers.complete_scene_detect_stage
     calls = 0
 
-    def fail_once(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fail_once(*args: Any, **kwargs: Any) -> object:
         nonlocal calls
         calls += 1
         if calls == 1:

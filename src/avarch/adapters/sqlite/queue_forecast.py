@@ -4,8 +4,9 @@ import json
 import re
 import shlex
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.models import Job, JobAttempt, MediaPlan, ProbeResult
@@ -23,9 +24,12 @@ def comparable_encode_history(
 ) -> tuple[ComparableEncodeSample, ...]:
     rows = session.exec(
         select(JobAttempt, Job, MediaPlan, ProbeResult)
-        .join(Job, Job.id == JobAttempt.job_id)
-        .join(MediaPlan, MediaPlan.plan_hash == Job.plan_hash)
-        .join(ProbeResult, ProbeResult.id == MediaPlan.probe_result_id)
+        .join(Job, cast(ColumnElement[bool], Job.id == JobAttempt.job_id))
+        .join(MediaPlan, cast(ColumnElement[bool], MediaPlan.plan_hash == Job.plan_hash))
+        .join(
+            ProbeResult,
+            cast(ColumnElement[bool], ProbeResult.id == MediaPlan.probe_result_id),
+        )
         .where(
             JobAttempt.status == AttemptStatus.COMPLETED,
             JobAttempt.stage == JobStage.ENCODE,
@@ -50,7 +54,7 @@ def _history_sample(
 ) -> ComparableEncodeSample | None:
     if attempt.id is None or job.id is None:
         return None
-    if attempt.started_at is None or attempt.finished_at is None:
+    if attempt.finished_at is None:
         return None
     duration = attempt.finished_at - attempt.started_at
     if duration <= timedelta(0) or duration > _MAX_REASONABLE_DURATION:
@@ -81,19 +85,20 @@ def _history_sample(
     )
 
 
-def _command_metadata(command_json: str | None) -> dict[str, str]:
+def _command_metadata(command_json: str | None) -> dict[str, str | None]:
     if command_json is None:
         return {}
     try:
-        value = json.loads(command_json)
+        value: object = json.loads(command_json)
     except json.JSONDecodeError:
         return {}
     if not isinstance(value, dict):
         return {}
-    argv = value.get("av1an_argv")
+    payload = cast(dict[str, object], value)
+    argv = payload.get("av1an_argv")
     if not isinstance(argv, list):
         return {}
-    args = [str(arg) for arg in argv]
+    args = [str(arg) for arg in cast(list[object], argv)]
     return {
         "encoder": _option_value(args, "--encoder"),
         "workers": _option_value(args, "--workers"),

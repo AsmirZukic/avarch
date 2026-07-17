@@ -9,7 +9,7 @@ from threading import Lock
 from typing import Any
 
 from sqlalchemy import Engine
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
@@ -41,8 +41,9 @@ from avarch.adapters.sqlite.job_transitions import (
     interrupt_job_stage,
     require_attempt,
     require_job,
+    restore_missing_scene_detect_stage,
 )
-from avarch.adapters.sqlite.models import Job, JobEvent, MediaFile, ProbeResult, ValidationResult
+from avarch.adapters.sqlite.models import Job, MediaFile, ProbeResult, ValidationResult
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.sqlite.progress import SqliteProgressStore
@@ -196,28 +197,8 @@ def _chunks_prepared_from_message(message: str | None) -> int | None:
     return int(match.group(1).replace(",", ""))
 
 
-def _scene_detection_completed(session: Session, *, job_id: int) -> bool:
-    return (
-        session.exec(
-            select(JobEvent.id)
-            .where(JobEvent.job_id == job_id)
-            .where(JobEvent.event_type == JobEventType.SCENE_DETECT_COMPLETED)
-            .limit(1)
-        ).first()
-        is not None
-    )
-
-
 def _restore_missing_scene_detect_stage(session: Session, *, job: Job) -> bool:
-    if JobStage(job.stage) != JobStage.ENCODE:
-        return False
-    job_id = require_id(job)
-    if _scene_detection_completed(session, job_id=job_id):
-        return True
-    job.stage = JobStage.SCENE_DETECT
-    session.add(job)
-    session.flush()
-    return False
+    return restore_missing_scene_detect_stage(session, job=job)
 
 
 def _encoding_heartbeat(snapshot: ProgressSnapshot) -> ProgressSnapshot:
