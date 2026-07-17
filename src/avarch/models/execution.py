@@ -46,10 +46,17 @@ class ProcessResult:
     started_at: datetime
     finished_at: datetime
     termination_reason: ProcessTerminationReason
+    termination_requested_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.finished_at < self.started_at:
             raise ValueError("finished_at must not be before started_at")
+        if self.termination_requested_at is None:
+            return
+        if self.termination_requested_at < self.started_at:
+            raise ValueError("termination_requested_at must not be before started_at")
+        if self.finished_at < self.termination_requested_at:
+            raise ValueError("finished_at must not be before termination_requested_at")
 
     @property
     def succeeded(self) -> bool:
@@ -80,6 +87,7 @@ class ProcessResult:
         return_code: int,
         started_at: datetime,
         finished_at: datetime,
+        termination_requested_at: datetime | None = None,
     ) -> ProcessResult:
         return cls(
             command=command,
@@ -87,6 +95,7 @@ class ProcessResult:
             started_at=started_at,
             finished_at=finished_at,
             termination_reason=ProcessTerminationReason.CANCELLED,
+            termination_requested_at=termination_requested_at,
         )
 
     @classmethod
@@ -97,6 +106,7 @@ class ProcessResult:
         return_code: int,
         started_at: datetime,
         finished_at: datetime,
+        termination_requested_at: datetime | None = None,
     ) -> ProcessResult:
         return cls(
             command=command,
@@ -104,6 +114,7 @@ class ProcessResult:
             started_at=started_at,
             finished_at=finished_at,
             termination_reason=ProcessTerminationReason.FORCED_KILL,
+            termination_requested_at=termination_requested_at,
         )
 
 
