@@ -53,6 +53,8 @@ class SchedulerTerminalCounts:
 class SchedulerRunStore(Protocol):
     def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None: ...
 
+    def start_session(self, *, runner_id: str, now: datetime) -> int: ...
+
     def recover_abandoned_jobs(self, *, now: datetime) -> None: ...
 
     def renew_lease(self, *, runner_id: str, now: datetime) -> None: ...
@@ -68,6 +70,8 @@ class SchedulerRunStore(Protocol):
     def has_pending_jobs(self) -> bool: ...
 
     def interrupt_running_job(self, *, job_id: int, now: datetime) -> None: ...
+
+    def end_session(self, *, session_id: int, now: datetime, reason: str) -> None: ...
 
     def release_lease(self, *, runner_id: str, now: datetime) -> None: ...
 
@@ -120,18 +124,22 @@ async def run_scheduler(
 ) -> SchedulerRunSummary:
     store = runtime.store(config=config)
     store.acquire_lease(runner_id=runner_id, now=utc_now(), resume=resume)
-    initial_terminal_counts = store.terminal_counts()
-    store.recover_abandoned_jobs(now=utc_now())
-
-    workers = runtime.workers()
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
-    active_job_ids: set[int] = set()
-    last_heartbeat = utc_now()
-    idle_since: datetime | None = None
-    current_mode = SchedulerMode.RUNNING
-    resource_capacity = _resource_capacity(config)
+    session_id: int | None = None
+    end_reason = "normal"
 
     try:
+        session_id = store.start_session(runner_id=runner_id, now=utc_now())
+        initial_terminal_counts = store.terminal_counts()
+        store.recover_abandoned_jobs(now=utc_now())
+
+        workers = runtime.workers()
+        active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
+        active_job_ids: set[int] = set()
+        last_heartbeat = utc_now()
+        idle_since: datetime | None = None
+        current_mode = SchedulerMode.RUNNING
+        resource_capacity = _resource_capacity(config)
+
         while True:
             now = utc_now()
             if (now - last_heartbeat).total_seconds() >= SCHEDULER_HEARTBEAT_SECONDS:
@@ -181,6 +189,7 @@ async def run_scheduler(
                 continue
 
             if current_mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING}:
+                end_reason = "drained" if current_mode == SchedulerMode.DRAINING else "stopped"
                 break
 
             if current_mode == SchedulerMode.PAUSED:
@@ -194,7 +203,12 @@ async def run_scheduler(
             else:
                 idle_since = None
             await asyncio.sleep(SCHEDULER_POLL_SECONDS)
+    except BaseException:
+        end_reason = "interrupted"
+        raise
     finally:
+        if session_id is not None:
+            store.end_session(session_id=session_id, now=utc_now(), reason=end_reason)
         store.release_lease(runner_id=runner_id, now=utc_now())
 
     terminal_counts = store.terminal_counts()
