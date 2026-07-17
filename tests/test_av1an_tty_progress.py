@@ -36,6 +36,10 @@ def test_parse_tty_fixture_extracts_encoding_chunk_context() -> None:
     assert encoding[-1].speed_ratio is not None
     assert encoding[-1].speed_ratio > 1
     assert encoding[-1].message == "1/1 chunks, 38.0 Kbps, est. 23.19 KiB"
+    assert encoding[-1].chunks_current == 1
+    assert encoding[-1].chunks_total == 1
+    assert encoding[-1].bitrate_kbps == 38
+    assert encoding[-1].estimated_output_bytes == 23747
 
 
 def test_parse_tty_encoding_line_includes_bitrate_context() -> None:
@@ -51,6 +55,25 @@ def test_parse_tty_encoding_line_includes_bitrate_context() -> None:
     assert samples[0].total == 31625
     assert samples[0].rate_per_second == 36.46
     assert samples[0].message == "9/317 chunks, 1344.1 Kbps, est. 211.35 MiB"
+    assert samples[0].chunks_current == 9
+    assert samples[0].chunks_total == 317
+    assert samples[0].bitrate_kbps == 1344
+    assert samples[0].estimated_output_bytes == 221616538
+
+
+def test_parse_tty_encoding_line_accepts_thousands_separators() -> None:
+    samples = parse_av1an_tty_progress(
+        b"00:01:04 [1,009/2,317 Chunks] 2,345/31,625 "
+        b"(36.46 fps, eta 13m, 1.5 Mbps, est. 1.25 GiB)\r"
+    )
+
+    assert len(samples) == 1
+    assert samples[0].current == 2345
+    assert samples[0].total == 31625
+    assert samples[0].chunks_current == 1009
+    assert samples[0].chunks_total == 2317
+    assert samples[0].bitrate_kbps == 1500
+    assert samples[0].estimated_output_bytes == 1342177280
 
 
 def test_parse_non_tty_output_returns_no_samples() -> None:
@@ -67,6 +90,10 @@ def test_parse_failure_output_returns_no_samples() -> None:
 
 def test_parse_unsupported_record_returns_no_sample() -> None:
     assert parse_av1an_tty_progress(b"progress: eighty percent maybe\n") == []
+
+
+def test_parse_malformed_numeric_data_remains_harmless() -> None:
+    assert parse_av1an_tty_progress(b"00:00:00 [x/1 Chunks] nope/120 (nan fps)\r") == []
 
 
 def test_av1an_tty_progress_supported_only_for_tested_version_family() -> None:
