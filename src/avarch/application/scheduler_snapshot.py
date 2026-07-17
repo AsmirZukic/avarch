@@ -151,3 +151,120 @@ class SchedulerSnapshot(SnapshotModel):
 class SchedulerSnapshotQuery(Protocol):
     def snapshot(self) -> SchedulerSnapshot:
         pass
+
+
+_WORKFLOW_STAGES = (
+    JobStage.PROBE,
+    JobStage.PLAN,
+    JobStage.ENCODE,
+    JobStage.VALIDATE,
+    JobStage.PROMOTE,
+    JobStage.CLEANUP,
+)
+
+
+def project_workflow_steps(
+    *,
+    job_status: JobStatus,
+    job_stage: JobStage,
+    attempt_status: AttemptStatus | None,
+) -> tuple[WorkflowStepSummary, ...]:
+    terminal_failure_state = _terminal_failure_state(job_status)
+    if job_status == JobStatus.PROMOTED:
+        return tuple(
+            WorkflowStepSummary(
+                stage=stage,
+                state=(
+                    WorkflowStepState.SKIPPED
+                    if stage == JobStage.CLEANUP
+                    else WorkflowStepState.COMPLETE
+                ),
+            )
+            for stage in _WORKFLOW_STAGES
+        )
+
+    if job_status == JobStatus.SIZE_REJECTED:
+        return tuple(
+            WorkflowStepSummary(stage=stage, state=_size_rejected_step_state(stage))
+            for stage in _WORKFLOW_STAGES
+        )
+
+    active_stage = _active_stage(job_status, job_stage, attempt_status)
+    failed_stage = job_stage if terminal_failure_state is not None else None
+    stage_index = _WORKFLOW_STAGES.index(job_stage)
+
+    steps: list[WorkflowStepSummary] = []
+    for index, stage in enumerate(_WORKFLOW_STAGES):
+        if active_stage == stage:
+            state = WorkflowStepState.ACTIVE
+        elif failed_stage == stage:
+            state = terminal_failure_state
+        elif failed_stage is not None and index > stage_index:
+            state = WorkflowStepState.BLOCKED
+        elif _stage_is_complete(stage, job_status=job_status, job_stage=job_stage):
+            state = WorkflowStepState.COMPLETE
+        elif stage == JobStage.CLEANUP and job_stage != JobStage.CLEANUP:
+            state = WorkflowStepState.SKIPPED
+        else:
+            state = WorkflowStepState.PENDING
+        steps.append(WorkflowStepSummary(stage=stage, state=state))
+    return tuple(steps)
+
+
+def _active_stage(
+    job_status: JobStatus,
+    job_stage: JobStage,
+    attempt_status: AttemptStatus | None,
+) -> JobStage | None:
+    if attempt_status not in {None, AttemptStatus.RUNNING}:
+        return None
+    if job_status == JobStatus.ENCODING and job_stage in {
+        JobStage.PROBE,
+        JobStage.PLAN,
+        JobStage.ENCODE,
+    }:
+        return job_stage
+    if job_status == JobStatus.VALIDATING and job_stage == JobStage.VALIDATE:
+        return job_stage
+    if job_status == JobStatus.PROMOTING and job_stage == JobStage.PROMOTE:
+        return job_stage
+    if job_status == JobStatus.CLEANING and job_stage == JobStage.CLEANUP:
+        return job_stage
+    return None
+
+
+def _terminal_failure_state(job_status: JobStatus) -> WorkflowStepState | None:
+    if job_status in {
+        JobStatus.FAILED,
+        JobStatus.VALIDATION_FAILED,
+        JobStatus.CANCELLED,
+    }:
+        return WorkflowStepState.FAILED
+    return None
+
+
+def _stage_is_complete(stage: JobStage, *, job_status: JobStatus, job_stage: JobStage) -> bool:
+    if job_status in {
+        JobStatus.ENCODED,
+        JobStatus.VALIDATING,
+        JobStatus.READY_TO_PROMOTE,
+        JobStatus.PROMOTING,
+        JobStatus.CLEANING,
+    }:
+        completed_through = {
+            JobStatus.ENCODED: JobStage.ENCODE,
+            JobStatus.VALIDATING: JobStage.ENCODE,
+            JobStatus.READY_TO_PROMOTE: JobStage.VALIDATE,
+            JobStatus.PROMOTING: JobStage.VALIDATE,
+            JobStatus.CLEANING: JobStage.PROMOTE,
+        }[job_status]
+        return _WORKFLOW_STAGES.index(stage) <= _WORKFLOW_STAGES.index(completed_through)
+    return _WORKFLOW_STAGES.index(stage) < _WORKFLOW_STAGES.index(job_stage)
+
+
+def _size_rejected_step_state(stage: JobStage) -> WorkflowStepState:
+    if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.ENCODE, JobStage.VALIDATE}:
+        return WorkflowStepState.COMPLETE
+    if stage == JobStage.PROMOTE:
+        return WorkflowStepState.BLOCKED
+    return WorkflowStepState.SKIPPED
