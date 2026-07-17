@@ -74,11 +74,22 @@ def test_narrow_dashboard_uses_compact_text_layout() -> None:
     assert "│" not in output
 
 
-def _render(snapshot: SchedulerSnapshot, *, width: int) -> str:
+def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
+    observer = _render(_snapshot(), width=120, mode=DashboardMode.OBSERVER)
+    owner = _render(_snapshot(), width=120, mode=DashboardMode.OWNER)
+
+    assert "Ctrl+C detaches; scheduler remains running" in observer
+    assert "Ctrl+C stops the scheduler" in owner
+
+
+def _render(
+    snapshot: SchedulerSnapshot,
+    *,
+    width: int,
+    mode: DashboardMode = DashboardMode.OBSERVER,
+) -> str:
     console = Console(record=True, width=width, color_system=None, file=StringIO())
-    console.print(
-        render_scheduler_dashboard(snapshot, width=width, mode=DashboardMode.OBSERVER)
-    )
+    console.print(render_scheduler_dashboard(snapshot, width=width, mode=mode))
     return console.export_text()
 
 
