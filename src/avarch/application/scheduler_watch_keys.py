@@ -8,6 +8,7 @@ from types import TracebackType
 from typing import Protocol, TextIO
 
 KEY_CTRL_C = "ctrl_c"
+KEY_CANCEL = "c"
 KEY_PAUSE = "p"
 KEY_QUIT = "q"
 
