@@ -29,12 +29,14 @@ from avarch.domain.jobs import (
 )
 from avarch.domain.scheduler import resource_for_stage
 from avarch.serialization import canonical_json
+from avarch.adapters.sqlite.lifecycle_events import SqliteLifecycleEventStore
 
 if TYPE_CHECKING:
     from avarch.adapters.sqlite.models import Job, JobAttempt
 
 from avarch.adapters.sqlite.models import Job as SQLiteJob
 from avarch.adapters.sqlite.models import JobAttempt as SQLiteJobAttempt
+from avarch.adapters.sqlite.models import SchedulerSession
 from avarch.adapters.sqlite.models import JobEvent
 
 __all__ = [
@@ -110,6 +112,7 @@ def claim_job_stage(
     job.updated_at = now
     attempt = SQLiteJobAttempt(
         job_id=job_id,
+        scheduler_session_id=_current_scheduler_session_id(session, runner_id=runner_id),
         attempt_number=job.attempts,
         stage=job.stage,
         resource_class=resource_for_stage(job.stage),
@@ -122,6 +125,13 @@ def claim_job_stage(
     session.flush()
     if attempt.id is None:
         raise JobClaimError("Attempt id was not assigned after claim.")
+    _record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_STARTED,
+        now=now,
+    )
     return attempt
 
 
@@ -175,6 +185,13 @@ def complete_job_stage(
             reason=job.hold_reason,
             now=now,
         )
+    _record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_COMPLETED,
+        now=now,
+    )
     session.add(job)
     session.add(attempt)
 
@@ -207,6 +224,17 @@ def fail_job_stage(
     clear_hold_fields(job)
     job.updated_at = now
     job.finished_at = now
+    _record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_FAILED,
+        now=now,
+        details={
+            "error_type": attempt.error_type,
+            "exit_code": exit_code,
+        },
+    )
     session.add(job)
     session.add(attempt)
 
@@ -246,6 +274,14 @@ def interrupt_job_stage(
     job.claimed_by = None
     job.updated_at = now
     job.finished_at = None
+    _record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_CANCELLED,
+        now=now,
+        details={"reason": "interrupted"},
+    )
     session.add(job)
     session.add(attempt)
 
@@ -581,6 +617,14 @@ def cancel_claimed_job(
         reason=job.cancel_reason,
         now=now,
     )
+    _record_stage_event(
+        session,
+        job_id=job_id,
+        attempt=attempt,
+        event_type=JobEventType.STAGE_CANCELLED,
+        now=now,
+        details={"reason": "cancelled"},
+    )
     session.add(job)
     session.add(attempt)
 
@@ -610,6 +654,46 @@ def reset_job_for_retry(job: Job, *, next_stage: JobStage, now: datetime) -> Non
     job.claimed_by = None
     job.finished_at = None
     job.updated_at = now
+
+
+def _record_stage_event(
+    session: Session,
+    *,
+    job_id: int,
+    attempt: JobAttempt,
+    event_type: JobEventType,
+    now: datetime,
+    details: dict[str, object | None] | None = None,
+) -> None:
+    attempt_id = _require_id(attempt)
+    cleaned_details = (
+        {key: value for key, value in details.items() if value is not None}
+        if details is not None
+        else None
+    )
+    SqliteLifecycleEventStore(session).record_event(
+        job_id=job_id,
+        attempt_id=attempt_id,
+        scheduler_session_id=attempt.scheduler_session_id,
+        event_type=event_type,
+        stage=attempt.stage,
+        actor=attempt.runner_id,
+        details=cleaned_details,
+        dedupe_key=f"attempt:{attempt_id}:{event_type.value}",
+        created_at=now,
+    )
+
+
+def _current_scheduler_session_id(session: Session, *, runner_id: str) -> int | None:
+    scheduler_session = session.exec(
+        select(SchedulerSession)
+        .where(
+            SchedulerSession.owner_id == runner_id,
+            col(SchedulerSession.ended_at).is_(None),
+        )
+        .order_by(col(SchedulerSession.started_at).desc(), col(SchedulerSession.id).desc())
+    ).first()
+    return scheduler_session.id if scheduler_session is not None else None
 
 
 def require_job(session: Session, job_id: int) -> Job:

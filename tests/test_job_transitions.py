@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,9 +20,17 @@ from avarch.adapters.sqlite.job_transitions import (
     queue_rejected_output_cleanup,
     transition_job,
 )
-from avarch.adapters.sqlite.models import Job, JobAttempt, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.models import (
+    Job,
+    JobAttempt,
+    JobEvent,
+    MediaFile,
+    MediaFileStatus,
+    SchedulerSession,
+)
 from avarch.domain.jobs import (
     AttemptStatus,
+    JobEventType,
     JobOutcomeReason,
     JobStage,
     JobStatus,
@@ -106,6 +115,31 @@ def test_completion_advances_stage(tmp_path: Path) -> None:
     assert job.stage == JobStage.PLAN
 
 
+def test_claim_and_completion_record_stage_lifecycle_events(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        complete_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            next_stage=JobStage.PLAN,
+            now=now + timedelta(seconds=1),
+        )
+        attempt_id = attempt.id
+        session.commit()
+        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+
+    assert [event.event_type for event in events] == [
+        JobEventType.STAGE_STARTED,
+        JobEventType.STAGE_COMPLETED,
+    ]
+    assert {event.attempt_id for event in events} == {attempt_id}
+    assert {event.stage for event in events} == {JobStage.PROBE}
+
+
 def test_final_completion_marks_job_completed(tmp_path: Path) -> None:
     engine, job_id = _stored_job(tmp_path)
     with Session(engine) as session:
@@ -165,6 +199,32 @@ def test_failure_records_error_type_and_message(tmp_path: Path) -> None:
     assert stored_attempt.error_message == "broken"
 
 
+def test_failure_records_stage_failed_event_with_stable_details(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        fail_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            error=ValueError("broken"),
+            exit_code=2,
+            now=now + timedelta(seconds=1),
+        )
+        attempt_id = attempt.id
+        session.commit()
+        failed = session.exec(
+            select(JobEvent).where(JobEvent.event_type == JobEventType.STAGE_FAILED)
+        ).one()
+
+    assert failed.attempt_id == attempt_id
+    assert failed.stage == JobStage.ENCODE
+    assert failed.details_json is not None
+    assert json.loads(failed.details_json) == {"error_type": "ValueError", "exit_code": 2}
+
+
 def test_interruption_returns_job_to_pending(tmp_path: Path) -> None:
     engine, job_id = _stored_job(tmp_path)
     with Session(engine) as session:
@@ -198,6 +258,87 @@ def test_interruption_records_attempt_as_interrupted(tmp_path: Path) -> None:
     assert stored_attempt is not None
     assert stored_attempt.status == AttemptStatus.INTERRUPTED
     assert stored_attempt.exit_code == 130
+
+
+def test_interruption_records_stage_cancelled_event(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        interrupt_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            now=now + timedelta(seconds=1),
+        )
+        attempt_id = attempt.id
+        session.commit()
+        cancelled = session.exec(
+            select(JobEvent).where(JobEvent.event_type == JobEventType.STAGE_CANCELLED)
+        ).one()
+
+    assert cancelled.attempt_id == attempt_id
+    assert cancelled.stage == JobStage.PROBE
+    assert cancelled.details_json is not None
+    assert json.loads(cancelled.details_json) == {"reason": "interrupted"}
+
+
+def test_cancelled_completion_records_stage_cancelled_event(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.cancel_requested_at = now
+        job.cancel_requested_by = "operator"
+        complete_job_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            next_stage=JobStage.PLAN,
+            now=now + timedelta(seconds=1),
+        )
+        attempt_id = attempt.id
+        session.commit()
+        cancelled = session.exec(
+            select(JobEvent).where(JobEvent.event_type == JobEventType.STAGE_CANCELLED)
+        ).one()
+
+    assert cancelled.attempt_id == attempt_id
+    assert cancelled.actor == "runner"
+    assert cancelled.details_json is not None
+    assert json.loads(cancelled.details_json) == {"reason": "cancelled"}
+
+
+def test_lifecycle_events_correlate_active_scheduler_session(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        session.add(
+            SchedulerSession(
+                owner_id="runner",
+                workspace_id="workspace",
+                pid=1234,
+                host="host",
+                started_at=now,
+            )
+        )
+        session.flush()
+        scheduler_session = session.exec(select(SchedulerSession)).one()
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        scheduler_session_id = scheduler_session.id
+        attempt_session_id = attempt.scheduler_session_id
+        session.commit()
+        started = session.exec(
+            select(JobEvent).where(JobEvent.event_type == JobEventType.STAGE_STARTED)
+        ).one()
+
+    assert attempt_session_id == scheduler_session_id
+    assert started.scheduler_session_id == scheduler_session_id
 
 
 def test_job_can_transition_from_encoded_to_validating(tmp_path: Path) -> None:
