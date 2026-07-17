@@ -18,6 +18,7 @@ class ResourceHealth(StrEnum):
 class ResourceMetric:
     name: str
     value: float | int | None = None
+    total: float | int | None = None
     unit: str | None = None
     available: bool = True
     reason: str | None = None
