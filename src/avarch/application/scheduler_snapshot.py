@@ -6,7 +6,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
 from avarch.serialization import canonical_json
 
@@ -51,6 +51,23 @@ class SchedulerRuntimeSummary(SnapshotModel):
     pid: int | None = Field(default=None, ge=0, strict=True)
     heartbeat_at: datetime | None = None
     stale: bool = False
+
+
+class SchedulerSessionRunSummary(SnapshotModel):
+    session_id: int = Field(ge=0, strict=True)
+    owner_id: str
+    workspace_id: str
+    pid: int | None = Field(default=None, ge=0, strict=True)
+    host: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    end_reason: str | None = None
+    active: bool = False
+
+
+class SessionSummary(SnapshotModel):
+    current: SchedulerSessionRunSummary | None = None
+    recent: tuple[SchedulerSessionRunSummary, ...] = ()
 
 
 class PipelineSummary(SnapshotModel):
@@ -137,17 +154,30 @@ class SchedulerAlert(SnapshotModel):
     observed_at: datetime | None = None
 
 
+class LifecycleEventSummary(SnapshotModel):
+    event_id: int = Field(ge=0, strict=True)
+    job_id: int = Field(ge=0, strict=True)
+    attempt_id: int | None = Field(default=None, ge=0, strict=True)
+    scheduler_session_id: int | None = Field(default=None, ge=0, strict=True)
+    event_type: JobEventType
+    stage: JobStage | None = None
+    actor: str
+    reason: str | None = None
+    details: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime
+
+
 class SchedulerSnapshot(SnapshotModel):
     captured_at: datetime
     workspace: WorkspaceSummary
     scheduler: SchedulerRuntimeSummary
     pipeline: PipelineSummary
-    session: object | None = None
+    session: SessionSummary | None = None
     active_jobs: tuple[ActiveJobSummary, ...]
     capacity: CapacitySummary
     resources: object | None = None
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
-    recent_events: tuple[object, ...] = ()
+    recent_events: tuple[LifecycleEventSummary, ...] = ()
     alerts: tuple[SchedulerAlert, ...] = ()
     forecast: object | None = None
 

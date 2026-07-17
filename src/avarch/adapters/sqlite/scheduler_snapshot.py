@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -10,7 +11,9 @@ from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
     JobAttemptProgress,
+    JobEvent,
     MediaFile,
+    SchedulerSession,
     SchedulerState,
 )
 from avarch.adapters.sqlite.scheduler_state import lease_active
@@ -18,17 +21,20 @@ from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
     CapacitySummary,
+    LifecycleEventSummary,
     PipelineSummary,
     SchedulerAlert,
     SchedulerAlertSeverity,
+    SchedulerSessionRunSummary,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
     SchedulerSnapshot,
+    SessionSummary,
     UpcomingJobSummary,
     WorkspaceSummary,
     project_workflow_steps,
 )
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressUnit
 from avarch.domain.scheduler import SchedulerMode
 
@@ -66,10 +72,11 @@ class SqliteSchedulerSnapshotQuery:
             ),
             scheduler=self._scheduler_summary(now=captured_at),
             pipeline=self._pipeline_summary(),
+            session=self._session_summary(),
             active_jobs=self._active_jobs(captured_at=captured_at),
             capacity=CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0),
             upcoming_jobs=self._upcoming_jobs(),
-            recent_events=(),
+            recent_events=self._recent_events(),
             alerts=self._alerts(now=captured_at),
             resources=None,
             forecast=None,
@@ -183,6 +190,33 @@ class SqliteSchedulerSnapshotQuery:
             for index, (job, media_file) in enumerate(rows, start=1)
         )
 
+    def _session_summary(self) -> SessionSummary | None:
+        sessions = tuple(
+            self._session.exec(
+                select(SchedulerSession)
+                .order_by(
+                    col(SchedulerSession.started_at).desc(),
+                    col(SchedulerSession.id).desc(),
+                )
+                .limit(5)
+            ).all()
+        )
+        if not sessions:
+            return None
+        current = next((session for session in sessions if session.ended_at is None), None)
+        return SessionSummary(
+            current=_session_run_summary(current) if current is not None else None,
+            recent=tuple(_session_run_summary(session) for session in sessions),
+        )
+
+    def _recent_events(self) -> tuple[LifecycleEventSummary, ...]:
+        events = self._session.exec(
+            select(JobEvent)
+            .order_by(col(JobEvent.created_at).desc(), col(JobEvent.id).desc())
+            .limit(8)
+        ).all()
+        return tuple(_lifecycle_event_summary(event) for event in events)
+
     def _alerts(self, *, now: datetime) -> tuple[SchedulerAlert, ...]:
         state = self._session.get(SchedulerState, 1)
         if state is None:
@@ -284,6 +318,35 @@ def _active_job_summary(
     )
 
 
+def _session_run_summary(session: SchedulerSession) -> SchedulerSessionRunSummary:
+    return SchedulerSessionRunSummary(
+        session_id=_required_id(session.id),
+        owner_id=session.owner_id,
+        workspace_id=session.workspace_id,
+        pid=session.pid,
+        host=session.host,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        end_reason=session.end_reason,
+        active=session.ended_at is None,
+    )
+
+
+def _lifecycle_event_summary(event: JobEvent) -> LifecycleEventSummary:
+    return LifecycleEventSummary(
+        event_id=_required_id(event.id),
+        job_id=event.job_id,
+        attempt_id=event.attempt_id,
+        scheduler_session_id=event.scheduler_session_id,
+        event_type=JobEventType(event.event_type),
+        stage=JobStage(event.stage) if event.stage is not None else None,
+        actor=event.actor,
+        reason=event.reason,
+        details=_event_details(event.details_json),
+        created_at=event.created_at,
+    )
+
+
 def _attempt_progress_summary(
     *,
     attempt: JobAttempt,
@@ -361,3 +424,12 @@ def _required_id(value: int | None) -> int:
     if value is None:
         raise ValueError("Expected persisted row id")
     return value
+
+
+def _event_details(details_json: str | None) -> dict[str, object]:
+    if details_json is None:
+        return {}
+    value = json.loads(details_json)
+    if isinstance(value, dict):
+        return value
+    return {"value": value}

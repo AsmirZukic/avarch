@@ -10,13 +10,15 @@ from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import (
     Job,
     JobAttempt,
+    JobEvent,
     MediaFile,
     MediaFileStatus,
+    SchedulerSession,
     SchedulerState,
 )
 from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, ResourceClass
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import SchedulerMode
 
@@ -166,7 +168,7 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.stale is True
     assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
     assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
-    assert query_count <= 9
+    assert query_count <= 11
 
 
 def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligible(
@@ -301,6 +303,91 @@ def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path:
     assert stale.resources is None
     assert stale.forecast is None
     assert stale.recent_events == ()
+    assert stale.session is None
+
+
+def test_scheduler_snapshot_includes_session_history_and_recent_events(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        job = _job(
+            session,
+            path="/media/movie.mkv",
+            status=JobStatus.ENCODING,
+            stage=JobStage.ENCODE,
+        )
+        ended = SchedulerSession(
+            owner_id="old-runner",
+            workspace_id="workspace",
+            pid=111,
+            host="old-host",
+            started_at=(now - timedelta(hours=2)).replace(tzinfo=None),
+            ended_at=(now - timedelta(hours=1)).replace(tzinfo=None),
+            end_reason="normal",
+        )
+        current = SchedulerSession(
+            owner_id="runner-1",
+            workspace_id="workspace",
+            pid=222,
+            host="host",
+            started_at=(now - timedelta(minutes=10)).replace(tzinfo=None),
+        )
+        session.add_all([ended, current])
+        session.flush()
+        attempt = _attempt(
+            job,
+            attempt_number=1,
+            status=AttemptStatus.RUNNING,
+            started_at=now - timedelta(minutes=9),
+        )
+        attempt.scheduler_session_id = current.id
+        session.add(attempt)
+        session.flush()
+        session.add(
+            JobEvent(
+                job_id=job.id or 0,
+                attempt_id=attempt.id,
+                scheduler_session_id=current.id,
+                event_type=JobEventType.STAGE_COMPLETED,
+                stage=JobStage.ENCODE,
+                actor="runner-1",
+                details_json='{"frames":100,"saved_bytes":42}',
+                created_at=(now - timedelta(minutes=1)).replace(tzinfo=None),
+            )
+        )
+        session.add(
+            JobEvent(
+                job_id=job.id or 0,
+                event_type=JobEventType.HOLD_REQUESTED,
+                actor="operator",
+                reason="pause",
+                created_at=(now - timedelta(minutes=2)).replace(tzinfo=None),
+            )
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    assert snapshot.session is not None
+    assert snapshot.session.current is not None
+    assert snapshot.session.current.owner_id == "runner-1"
+    assert snapshot.session.current.pid == 222
+    assert snapshot.session.current.active is True
+    assert [run.owner_id for run in snapshot.session.recent] == ["runner-1", "old-runner"]
+    assert snapshot.session.recent[1].end_reason == "normal"
+    assert [event.event_type for event in snapshot.recent_events] == [
+        JobEventType.STAGE_COMPLETED,
+        JobEventType.HOLD_REQUESTED,
+    ]
+    assert snapshot.recent_events[0].stage == JobStage.ENCODE
+    assert snapshot.recent_events[0].scheduler_session_id == snapshot.session.current.session_id
+    assert snapshot.recent_events[0].details == {"frames": 100, "saved_bytes": 42}
 
 
 def test_scheduler_snapshot_reports_stopped_when_no_scheduler_process(tmp_path: Path) -> None:

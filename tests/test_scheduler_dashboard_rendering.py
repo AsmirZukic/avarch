@@ -9,16 +9,19 @@ from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
     CapacitySummary,
+    LifecycleEventSummary,
     PipelineSummary,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
     SchedulerSnapshot,
+    SchedulerSessionRunSummary,
+    SessionSummary,
     UpcomingJobSummary,
     WorkflowStepState,
     WorkflowStepSummary,
     WorkspaceSummary,
 )
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.presentation.scheduler_dashboard import DashboardMode, render_scheduler_dashboard
 
 
@@ -81,6 +84,57 @@ def test_narrow_dashboard_uses_compact_text_layout() -> None:
     assert "│" not in output
 
 
+def test_dashboard_renders_session_and_recent_activity() -> None:
+    snapshot = _snapshot(
+        session=SessionSummary(
+            current=SchedulerSessionRunSummary(
+                session_id=1,
+                owner_id="runner-1",
+                workspace_id="workspace",
+                pid=1234,
+                host="host",
+                started_at=datetime(2026, 7, 17, 11, 55, tzinfo=UTC),
+                active=True,
+            ),
+            recent=(
+                SchedulerSessionRunSummary(
+                    session_id=1,
+                    owner_id="runner-1",
+                    workspace_id="workspace",
+                    pid=1234,
+                    host="host",
+                    started_at=datetime(2026, 7, 17, 11, 55, tzinfo=UTC),
+                    active=True,
+                ),
+            ),
+        ),
+        recent_events=(
+            LifecycleEventSummary(
+                event_id=1,
+                job_id=42,
+                attempt_id=7,
+                scheduler_session_id=1,
+                event_type=JobEventType.STAGE_COMPLETED,
+                stage=JobStage.PROMOTE,
+                actor="runner-1",
+                details={"saved_bytes": 2048},
+                created_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+
+    wide = _render(snapshot, width=150)
+    narrow = _render(snapshot, width=70)
+
+    assert "Session" in wide
+    assert "runner-1 on host pid 1234" in wide
+    assert "Recent Activity" in wide
+    assert "stage_completed" in wide
+    assert "saved 2.0 KiB" in wide
+    assert "Session runner-1 on host pid 1234" in narrow
+    assert "job 42 promote stage_completed saved 2.0 KiB" in narrow
+
+
 def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
     observer = _render(_snapshot(), width=120, mode=DashboardMode.OBSERVER)
     owner = _render(_snapshot(), width=120, mode=DashboardMode.OWNER)
@@ -103,6 +157,8 @@ def _render(
 def _snapshot(
     *,
     active_jobs: tuple[ActiveJobSummary, ...] | None = None,
+    session: SessionSummary | None = None,
+    recent_events: tuple[LifecycleEventSummary, ...] = (),
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -140,7 +196,8 @@ def _snapshot(
                 selection_confidence="current_snapshot",
             ),
         ),
-        recent_events=(),
+        session=session,
+        recent_events=recent_events,
         resources=None,
         forecast=None,
     )
