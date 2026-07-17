@@ -19,6 +19,13 @@ class _CpuCounters:
     observed_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _OutputFileState:
+    size: int
+    device_id: int
+    inode: int
+
+
 class LinuxResourceSampler:
     def __init__(
         self,
@@ -84,6 +91,56 @@ class LinuxResourceSampler:
         return ResourceMetric(name="memory", available=False, reason="unavailable")
 
 
+class OutputGrowthSampler:
+    def __init__(
+        self,
+        *,
+        paths: Callable[[], tuple[Path, ...]],
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._paths = paths
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._previous_sizes: dict[Path, _OutputFileState] = {}
+        self._previous_observed_at: datetime | None = None
+
+    def sample(self) -> ResourceSample:
+        sampled_at = self._clock()
+        current_sizes = _read_output_sizes(self._paths())
+        previous_observed_at = self._previous_observed_at
+        previous_sizes = self._previous_sizes
+        self._previous_observed_at = sampled_at
+        self._previous_sizes = current_sizes
+        if previous_observed_at is None:
+            metric = ResourceMetric(
+                name="output write rate",
+                available=False,
+                reason="delta_unavailable",
+            )
+        else:
+            elapsed = (sampled_at - previous_observed_at).total_seconds()
+            if elapsed <= 0:
+                metric = ResourceMetric(
+                    name="output write rate",
+                    available=False,
+                    reason="delta_unavailable",
+                )
+            else:
+                grown_bytes = _grown_output_bytes(
+                    previous=previous_sizes,
+                    current=current_sizes,
+                )
+                metric = ResourceMetric(
+                    name="output write rate",
+                    value=grown_bytes / elapsed,
+                    unit="bytes_per_second",
+                )
+        return ResourceSample(
+            sampled_at=sampled_at,
+            metrics=(metric,),
+            health=sample_health((metric,)),
+        )
+
+
 def _read_cgroup_cpu(cgroup_root: Path) -> _CpuCounters | None:
     try:
         fields = dict(
@@ -140,3 +197,39 @@ def _read_proc_memory(proc_root: Path) -> tuple[int, int] | None:
     if available is None:
         return None
     return max(0, total - available), total
+
+
+def _read_output_sizes(paths: tuple[Path, ...]) -> dict[Path, _OutputFileState]:
+    sizes: dict[Path, _OutputFileState] = {}
+    for path in paths:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            continue
+        if not path.is_file():
+            continue
+        sizes[path] = _OutputFileState(
+            size=stat_result.st_size,
+            device_id=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
+    return sizes
+
+
+def _grown_output_bytes(
+    *,
+    previous: dict[Path, _OutputFileState],
+    current: dict[Path, _OutputFileState],
+) -> int:
+    grown = 0
+    for path, current_state in current.items():
+        previous_state = previous.get(path)
+        if previous_state is None:
+            continue
+        if (
+            current_state.device_id != previous_state.device_id
+            or current_state.inode != previous_state.inode
+        ):
+            continue
+        grown += max(0, current_state.size - previous_state.size)
+    return grown
