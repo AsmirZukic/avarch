@@ -191,6 +191,7 @@ from avarch.bootstrap import (
     queue_retry_store,
     scheduler_control_store,
     scheduler_process_controller,
+    scheduler_resource_sampler,
     scheduler_runner,
     scheduler_snapshot_query,
     scheduler_status_store,
@@ -228,11 +229,7 @@ from avarch.config import (
     load_config,
     resolve_data_dir,
 )
-from avarch.domain.jobs import (
-    JobStage,
-    JobStatus,
-    ManualValidationAction,
-)
+from avarch.domain.jobs import JobStage, JobStatus, ManualValidationAction
 from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
@@ -1041,7 +1038,6 @@ def scheduler_watch_command(
         typer.Option("--no-color", help="Disable terminal colours."),
     ] = False,
 ) -> None:
-    del interval
     if json_output:
         once = True
     if not once:
@@ -1111,6 +1107,10 @@ async def _run_scheduler_watch_live(
             sink=_LiveSchedulerWatchSink(live),
             interval_seconds=interval_seconds,
             terminal_width=lambda: console.width,
+            resource_sampler=scheduler_resource_sampler(
+                database_url=database_url,
+                clock=_utc_now,
+            ),
         )
         await loop.run()
 

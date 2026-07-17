@@ -5,6 +5,8 @@ from io import StringIO
 
 from rich.console import Console
 
+from avarch.application.resource_telemetry import ResourceHealth
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
@@ -12,17 +14,18 @@ from avarch.application.scheduler_snapshot import (
     CapacitySummary,
     LifecycleEventSummary,
     PipelineSummary,
+    ResourceMetricSummary,
+    ResourceTelemetrySummary,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
-    SchedulerSnapshot,
     SchedulerSessionRunSummary,
+    SchedulerSnapshot,
     SessionSummary,
     UpcomingJobSummary,
     WorkflowStepState,
     WorkflowStepSummary,
     WorkspaceSummary,
 )
-from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.presentation.scheduler_dashboard import DashboardMode, render_scheduler_dashboard
 
@@ -196,6 +199,78 @@ def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
     assert "Ctrl+C stops the scheduler" in owner
 
 
+def test_dashboard_renders_resource_telemetry() -> None:
+    snapshot = _snapshot(
+        resources=ResourceTelemetrySummary(
+            sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+            health=ResourceHealth.WARNING,
+            metrics=(
+                ResourceMetricSummary(name="cpu", value=95.0, unit="percent"),
+                ResourceMetricSummary(
+                    name="memory",
+                    value=11_800_000_000,
+                    total=15_600_000_000,
+                    unit="bytes",
+                    health=ResourceHealth.WARNING,
+                ),
+                ResourceMetricSummary(
+                    name="output write rate",
+                    value=84 * 1024**2,
+                    unit="bytes_per_second",
+                ),
+            ),
+        )
+    )
+
+    wide = _render(snapshot, width=150)
+    narrow = _render(snapshot, width=70)
+
+    assert "CPU" in wide
+    assert "95%" in wide
+    assert "active" in wide
+    assert "memory" in wide
+    assert "11.0 GiB/14.5 GiB" in wide
+    assert "warning" in wide
+    assert "output write" in wide
+    assert "84.0 MiB/s" in wide
+    assert "Resources CPU 95%" in narrow
+    assert "output write 84.0 MiB/s" in narrow
+
+
+def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
+    unavailable = _render(
+        _snapshot(
+            resources=ResourceTelemetrySummary(
+                sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+                health=ResourceHealth.UNAVAILABLE,
+                metrics=(
+                    ResourceMetricSummary(
+                        name="cpu",
+                        available=False,
+                        reason="unsupported_platform",
+                    ),
+                ),
+            )
+        ),
+        width=150,
+    )
+    stale = _render(
+        _snapshot(
+            resources=ResourceTelemetrySummary(
+                sampled_at=datetime(2026, 7, 17, 11, 59, 40, tzinfo=UTC),
+                health=ResourceHealth.OK,
+                stale=True,
+                metrics=(ResourceMetricSummary(name="cpu", value=10.0, unit="percent"),),
+            )
+        ),
+        width=150,
+    )
+
+    assert "Resource telemetry unavailable" in unavailable
+    assert "freshness" in stale
+    assert "stale" in stale
+
+
 def _render(
     snapshot: SchedulerSnapshot,
     *,
@@ -214,6 +289,7 @@ def _snapshot(
     session: SessionSummary | None = None,
     recent_events: tuple[LifecycleEventSummary, ...] = (),
     blocked_jobs: tuple[BlockedJobSummary, ...] = (),
+    resources: ResourceTelemetrySummary | None = None,
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -229,7 +305,9 @@ def _snapshot(
             size_rejected=0,
             cancelled=0,
         ),
-        active_jobs=active_jobs if active_jobs is not None else (_active_job(1, "/media/movie.mkv"),),
+        active_jobs=(
+            active_jobs if active_jobs is not None else (_active_job(1, "/media/movie.mkv"),)
+        ),
         capacity=capacity
         or CapacitySummary(
             cheap_workers=2,
@@ -255,7 +333,7 @@ def _snapshot(
         ),
         session=session,
         recent_events=recent_events,
-        resources=None,
+        resources=resources,
         forecast=None,
     )
 

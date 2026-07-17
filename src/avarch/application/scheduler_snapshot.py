@@ -6,10 +6,11 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from avarch.application.resource_telemetry import ResourceHealth, ResourceSample
+from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
 from avarch.serialization import canonical_json
-from avarch.application.scheduler_blockers import JobEligibilityReason
 
 
 class SnapshotModel(BaseModel):
@@ -180,6 +181,24 @@ class LifecycleEventSummary(SnapshotModel):
     created_at: datetime
 
 
+class ResourceMetricSummary(SnapshotModel):
+    name: str
+    value: float | int | None = None
+    total: float | int | None = None
+    unit: str | None = None
+    available: bool = True
+    reason: str | None = None
+    health: ResourceHealth = ResourceHealth.OK
+
+
+class ResourceTelemetrySummary(SnapshotModel):
+    sampled_at: datetime
+    health: ResourceHealth
+    stale: bool = False
+    metrics: tuple[ResourceMetricSummary, ...]
+    error: str | None = None
+
+
 class SchedulerSnapshot(SnapshotModel):
     captured_at: datetime
     workspace: WorkspaceSummary
@@ -188,7 +207,7 @@ class SchedulerSnapshot(SnapshotModel):
     session: SessionSummary | None = None
     active_jobs: tuple[ActiveJobSummary, ...]
     capacity: CapacitySummary
-    resources: object | None = None
+    resources: ResourceTelemetrySummary | None = None
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
     blocked_jobs: tuple[BlockedJobSummary, ...] = ()
     recent_events: tuple[LifecycleEventSummary, ...] = ()
@@ -201,7 +220,36 @@ class SchedulerSnapshot(SnapshotModel):
 
 class SchedulerSnapshotQuery(Protocol):
     def snapshot(self) -> SchedulerSnapshot:
-        pass
+        ...
+
+
+def resource_telemetry_summary(
+    sample: ResourceSample,
+    *,
+    captured_at: datetime,
+    stale_after_seconds: int,
+) -> ResourceTelemetrySummary:
+    age_seconds = (
+        captured_at.replace(tzinfo=None) - sample.sampled_at.replace(tzinfo=None)
+    ).total_seconds()
+    return ResourceTelemetrySummary(
+        sampled_at=sample.sampled_at,
+        health=sample.health,
+        stale=age_seconds > stale_after_seconds,
+        metrics=tuple(
+            ResourceMetricSummary(
+                name=metric.name,
+                value=metric.value,
+                total=metric.total,
+                unit=metric.unit,
+                available=metric.available,
+                reason=metric.reason,
+                health=metric.health,
+            )
+            for metric in sample.metrics
+        ),
+        error=sample.error,
+    )
 
 
 _WORKFLOW_STAGES = (

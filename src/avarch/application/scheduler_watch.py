@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from rich.console import RenderableType
 from rich.text import Text
 
-from avarch.application.scheduler_snapshot import SchedulerSnapshot, SchedulerSnapshotQuery
+from avarch.application.resource_telemetry import (
+    ResourceSampler,
+    ResourceTelemetryPolicy,
+    apply_resource_health,
+    safe_sample_resources,
+)
+from avarch.application.scheduler_snapshot import (
+    SchedulerSnapshot,
+    SchedulerSnapshotQuery,
+    resource_telemetry_summary,
+)
 
 
 class SchedulerWatchModeError(RuntimeError):
@@ -35,6 +45,9 @@ class SchedulerWatchLoop:
     sleeper: Sleeper = asyncio.sleep
     max_consecutive_failures: int = 3
     stop_after_iterations: int | None = None
+    resource_sampler: ResourceSampler | None = None
+    resource_policy: ResourceTelemetryPolicy = field(default_factory=ResourceTelemetryPolicy)
+    resource_stale_after_seconds: int = 10
 
     async def run(self) -> None:
         iterations = 0
@@ -50,6 +63,7 @@ class SchedulerWatchLoop:
                 self.sink.render(_failure_renderable(exc, consecutive_failures))
             else:
                 consecutive_failures = 0
+                snapshot = self._snapshot_with_resources(snapshot)
                 self.sink.render(self.renderer(snapshot, width))
 
             iterations += 1
@@ -62,6 +76,24 @@ class SchedulerWatchLoop:
         if consecutive_failures <= self.max_consecutive_failures:
             return self.interval_seconds
         return min(self.interval_seconds * 2, 10.0)
+
+    def _snapshot_with_resources(self, snapshot: SchedulerSnapshot) -> SchedulerSnapshot:
+        if self.resource_sampler is None:
+            return snapshot
+        sample = safe_sample_resources(
+            self.resource_sampler,
+            clock=lambda: snapshot.captured_at,
+        )
+        sample = apply_resource_health(sample, policy=self.resource_policy)
+        return snapshot.model_copy(
+            update={
+                "resources": resource_telemetry_summary(
+                    sample,
+                    captured_at=snapshot.captured_at,
+                    stale_after_seconds=self.resource_stale_after_seconds,
+                )
+            }
+        )
 
 
 def validate_live_watch_terminal(*, stdout_is_tty: bool) -> None:
