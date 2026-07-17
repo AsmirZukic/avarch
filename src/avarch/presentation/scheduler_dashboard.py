@@ -13,6 +13,7 @@ from rich.text import Text
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
+    BlockedJobSummary,
     LifecycleEventSummary,
     SchedulerSnapshot,
     SchedulerSessionRunSummary,
@@ -40,6 +41,7 @@ def render_scheduler_dashboard(
         _pipeline_panel(snapshot),
         _active_jobs_panel(snapshot),
         _upcoming_panel(snapshot),
+        _blocked_panel(snapshot),
         _footer(mode),
     )
     side = Group(
@@ -110,6 +112,10 @@ def _compact_dashboard(
         width,
     )
     _append_line(text, "Resource telemetry unavailable", width)
+    if snapshot.blocked_jobs:
+        _append_line(text, f"Blocked {len(snapshot.blocked_jobs)}", width)
+        for job in snapshot.blocked_jobs[:3]:
+            _append_line(text, f"- {_display_path(job.source_path)} {job.reason.value}", width)
     if snapshot.session is not None and snapshot.session.current is not None:
         session = snapshot.session.current
         _append_line(
@@ -198,7 +204,7 @@ def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
             str(job.selection_position or ""),
             _display_path(job.source_path),
             job.profile_name or UNAVAILABLE,
-            job.stage.value,
+            f"{job.stage.value} · {job.selection_confidence or UNAVAILABLE}",
         )
     return Panel(table, title="Upcoming Jobs", border_style="blue")
 
@@ -211,6 +217,8 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
     table.add_row("cheap workers", f"{capacity.cheap_active}/{capacity.cheap_workers}")
     table.add_row("encode slots", f"{capacity.av1an_active}/{capacity.av1an_jobs}")
     table.add_row("file operations", f"{capacity.file_ops_active}/{capacity.file_ops}")
+    if capacity.stale:
+        table.add_row("freshness", "stale")
     workers = (
         f"{capacity.av1an_workers_configured} configured"
         if capacity.av1an_workers_configured is not None
@@ -218,6 +226,25 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
     )
     table.add_row("Av1an workers", workers)
     return Panel(table, title="Capacity", border_style="blue")
+
+
+def _blocked_panel(snapshot: SchedulerSnapshot) -> Panel:
+    if not snapshot.blocked_jobs:
+        return Panel("No blocked jobs", title="Blocked", border_style="green")
+    grouped: dict[str, list[BlockedJobSummary]] = {}
+    for job in snapshot.blocked_jobs:
+        grouped.setdefault(job.reason.value, []).append(job)
+    table = Table(expand=True)
+    table.add_column("Reason")
+    table.add_column("Count", justify="right")
+    table.add_column("Examples", overflow="fold")
+    for reason, jobs in grouped.items():
+        table.add_row(
+            reason.replace("_", " "),
+            str(len(jobs)),
+            ", ".join(_display_path(job.source_path) for job in jobs[:3]),
+        )
+    return Panel(table, title=f"Blocked {len(snapshot.blocked_jobs)}", border_style="yellow")
 
 
 def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
