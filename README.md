@@ -38,7 +38,7 @@ Jump to [Profiles and VapourSynth Templates](#profiles-and-vapoursynth-templates
 
 ## Alpha Safety Callout
 
-**Avarch is currently in v0.1-alpha.** The core encoding workflow is available,
+**Avarch is currently in v0.2-alpha.** The core encoding workflow is available,
 and your source media remains safe: Avarch builds and validates new output
 separately instead of encoding over the original. Some commands, configuration
 fields, and workspace formats may still change before the first stable release.
@@ -78,7 +78,7 @@ Install a semver-tagged image by setting `AVARCH_VERSION`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AsmirZukic/avarch/main/scripts/install.sh | \
-	AVARCH_VERSION=0.1.0 sh
+	AVARCH_VERSION=0.2.0 sh
 ```
 
 Use a full custom image by setting `AVARCH_IMAGE` for the install command:
@@ -99,7 +99,7 @@ avarch --version
 `avarch --version` should print:
 
 ```text
-0.1.0
+0.2.0
 ```
 
 ### What Gets Installed
@@ -123,7 +123,7 @@ installer to refresh the wrapper and pull the configured image again.
 Implemented version selection uses `AVARCH_IMAGE`:
 
 ```sh
-AVARCH_IMAGE=docker.io/asmir100/avarch:0.1.0 avarch --version
+AVARCH_IMAGE=docker.io/asmir100/avarch:0.2.0 avarch --version
 ```
 
 To stop using the wrapper, remove the installed `avarch` command from your
@@ -1582,7 +1582,7 @@ Avarch is not:
 
 ## Project Status and Alpha Limitations
 
-Current version: `0.1.0` in code, documented here as `v0.1-alpha` product state.
+Current version: `0.2.0` in code, documented here as `v0.2-alpha` product state.
 
 Supported operating system status:
 
@@ -1666,10 +1666,10 @@ image push is rejected. Pull request builds are validation-only and load the
 built image into the runner instead of pushing it.
 
 Docker image tags are generated from the major/minor version in `pyproject.toml`
-and the GitHub Actions run number. For version `0.1.0` on run `123`, CI
-publishes the build tag `0.1.123-ALPHA`. It also updates the moving `alpha` tag
+and the GitHub Actions run number. For version `0.2.0` on run `123`, CI
+publishes the build tag `0.2.123-ALPHA`. It also updates the moving `alpha` tag
 for installers and publishes `latest` on the default branch. Release tag pushes
-must match the project version, such as `v0.1.0` or `v0.1.0-ALPHA`.
+must match the project version, such as `v0.2.0` or `v0.2.0-ALPHA`.
 
 Configure these repository settings to enable Docker Hub publishing on
 default-branch and tag builds:
