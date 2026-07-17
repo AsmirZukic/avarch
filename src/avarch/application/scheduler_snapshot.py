@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
 from avarch.serialization import canonical_json
+from avarch.application.scheduler_blockers import JobEligibilityReason
 
 
 class SnapshotModel(BaseModel):
@@ -156,6 +157,16 @@ class SchedulerAlert(SnapshotModel):
     observed_at: datetime | None = None
 
 
+class BlockedJobSummary(SnapshotModel):
+    job_id: int = Field(ge=0, strict=True)
+    source_path: str
+    profile_name: str | None = None
+    stage: JobStage
+    status: JobStatus
+    reason: JobEligibilityReason
+    details: dict[str, object] = Field(default_factory=dict)
+
+
 class LifecycleEventSummary(SnapshotModel):
     event_id: int = Field(ge=0, strict=True)
     job_id: int = Field(ge=0, strict=True)
@@ -179,6 +190,7 @@ class SchedulerSnapshot(SnapshotModel):
     capacity: CapacitySummary
     resources: object | None = None
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
+    blocked_jobs: tuple[BlockedJobSummary, ...] = ()
     recent_events: tuple[LifecycleEventSummary, ...] = ()
     alerts: tuple[SchedulerAlert, ...] = ()
     forecast: object | None = None
