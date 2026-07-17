@@ -199,6 +199,29 @@ class ResourceTelemetrySummary(SnapshotModel):
     error: str | None = None
 
 
+class WatchJobDetailsSummary(SnapshotModel):
+    job_id: int = Field(ge=0, strict=True)
+    attempt_number: int | None = Field(default=None, ge=1, strict=True)
+    source_path: str
+    profile_name: str | None = None
+    status: JobStatus
+    stage: JobStage
+    started_at: datetime | None = None
+    plan_path: str | None = None
+    output_path: str | None = None
+    stdout_log: str | None = None
+    stderr_log: str | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+
+
+class WatchLogTailSummary(SnapshotModel):
+    path: str | None = None
+    lines: tuple[str, ...] = ()
+    missing: bool = False
+    truncated: bool = False
+
+
 class SchedulerSnapshot(SnapshotModel):
     captured_at: datetime
     workspace: WorkspaceSummary
@@ -211,6 +234,8 @@ class SchedulerSnapshot(SnapshotModel):
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
     blocked_jobs: tuple[BlockedJobSummary, ...] = ()
     recent_events: tuple[LifecycleEventSummary, ...] = ()
+    watch_details: WatchJobDetailsSummary | None = None
+    watch_log_tail: WatchLogTailSummary | None = None
     alerts: tuple[SchedulerAlert, ...] = ()
     forecast: object | None = None
 

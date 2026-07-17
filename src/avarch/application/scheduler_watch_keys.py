@@ -9,6 +9,8 @@ from typing import Protocol, TextIO
 
 KEY_CTRL_C = "ctrl_c"
 KEY_CANCEL = "c"
+KEY_DETAILS = "enter"
+KEY_LOGS = "l"
 KEY_PAUSE = "p"
 KEY_QUIT = "q"
 
@@ -83,4 +85,6 @@ class PosixKeySource:
             return None
         if key == "\x03":
             return KEY_CTRL_C
+        if key in {"\r", "\n"}:
+            return KEY_DETAILS
         return key or None
