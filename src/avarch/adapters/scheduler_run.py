@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import socket
 from collections.abc import Callable, Iterable
 from datetime import datetime
 
@@ -15,6 +17,7 @@ from avarch.adapters.scheduler_workers import (
     execute_validation_job,
 )
 from avarch.adapters.sqlite import job_transitions as job_transition_adapter
+from avarch.adapters.sqlite import scheduler_sessions as scheduler_session_adapter
 from avarch.adapters.sqlite import scheduler_state as scheduler_state_adapter
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import interrupt_running_job
@@ -66,6 +69,7 @@ class SqliteSchedulerRunStore:
     ) -> None:
         self._engine = create_db_engine(config.database.url)
         self._claimable_stages = claimable_stages
+        self._workspace_id = config.database.url
 
     def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
         try:
@@ -80,6 +84,21 @@ class SqliteSchedulerRunStore:
             raise SchedulerAlreadyRunningError(str(exc)) from exc
         except scheduler_state_adapter.SchedulerControlError as exc:
             raise SchedulerControlError(str(exc)) from exc
+
+    def start_session(self, *, runner_id: str, now: datetime) -> int:
+        with Session(self._engine) as session, session.begin():
+            scheduler_session = scheduler_session_adapter.start_scheduler_session(
+                session,
+                owner_id=runner_id,
+                workspace_id=self._workspace_id,
+                pid=os.getpid(),
+                host=socket.gethostname(),
+                now=now,
+            )
+            session_id = scheduler_session.id
+            if session_id is None:
+                raise RuntimeError("Scheduler session was not persisted.")
+            return session_id
 
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         with Session(self._engine) as session, session.begin():
@@ -145,6 +164,15 @@ class SqliteSchedulerRunStore:
                 session,
                 runner_id=runner_id,
                 now=now,
+            )
+
+    def end_session(self, *, session_id: int, now: datetime, reason: str) -> None:
+        with Session(self._engine) as session, session.begin():
+            scheduler_session_adapter.end_scheduler_session(
+                session,
+                session_id=session_id,
+                now=now,
+                reason=reason,
             )
 
     def terminal_counts(self) -> SchedulerTerminalCounts:
