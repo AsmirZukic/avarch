@@ -31,6 +31,8 @@ def render_scheduler_dashboard(
     width: int,
     mode: DashboardMode,
 ) -> RenderableType:
+    if width < 90:
+        return _compact_dashboard(snapshot, width=width, mode=mode)
     main = Group(
         _header(snapshot, mode=mode),
         _pipeline_panel(snapshot),
@@ -46,6 +48,66 @@ def render_scheduler_dashboard(
     if width >= 120:
         return Group(Columns((main, side), equal=False, expand=True))
     return Group(main, side)
+
+
+def _compact_dashboard(
+    snapshot: SchedulerSnapshot,
+    *,
+    width: int,
+    mode: DashboardMode,
+) -> Text:
+    text = Text()
+    _append_line(text, f"Avarch Scheduler · {snapshot.scheduler.state.value} · {mode.value}", width)
+    _append_line(text, f"Workspace {_fit(snapshot.workspace.root_path, width - 10)}", width)
+    pipeline = snapshot.pipeline
+    _append_line(
+        text,
+        (
+            f"Pipeline queued {pipeline.queued} active {pipeline.active} "
+            f"completed {pipeline.completed} failed {pipeline.failed}"
+        ),
+        width,
+    )
+    if snapshot.active_jobs:
+        _append_line(text, "Active", width)
+        for job in snapshot.active_jobs:
+            _append_line(
+                text,
+                (
+                    f"- {_fit(_display_path(job.source_path), 24)} "
+                    f"{job.profile_name or UNAVAILABLE} {job.stage.value} "
+                    f"{_progress(job.attempt)}"
+                ),
+                width,
+            )
+    else:
+        _append_line(text, "Active none", width)
+    if snapshot.upcoming_jobs:
+        _append_line(text, "Upcoming", width)
+        for job in snapshot.upcoming_jobs:
+            _append_line(
+                text,
+                (
+                    f"#{job.selection_position or '-'} "
+                    f"{_fit(_display_path(job.source_path), 28)} "
+                    f"{job.profile_name or UNAVAILABLE} {job.stage.value}"
+                ),
+                width,
+            )
+    else:
+        _append_line(text, "Upcoming none", width)
+    _append_line(
+        text,
+        (
+            f"Capacity encode slots {snapshot.capacity.av1an_active}/"
+            f"{snapshot.capacity.av1an_jobs} file operations "
+            f"{snapshot.capacity.file_ops_active}/{snapshot.capacity.file_ops}"
+        ),
+        width,
+    )
+    _append_line(text, "Resource telemetry unavailable", width)
+    _append_line(text, "Recent activity unavailable", width)
+    return text
 
 
 def _header(snapshot: SchedulerSnapshot, *, mode: DashboardMode) -> Panel:
@@ -199,3 +261,18 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
 
 def _display_path(path: str) -> str:
     return Path(path).name or path
+
+
+def _append_line(text: Text, value: str, width: int) -> None:
+    text.append(_fit(value, width))
+    text.append("\n")
+
+
+def _fit(value: str, width: int) -> str:
+    if width <= 1:
+        return ""
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return value[:width]
+    return value[: width - 3] + "..."
