@@ -26,6 +26,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0006_job_attempt_progress.py",
         "0007_structured_attempt_progress.py",
         "0008_scheduler_sessions_and_lifecycle_events.py",
+        "0009_scheduler_runtime_capacity.py",
     ]
 
 
@@ -96,10 +97,18 @@ def test_structured_attempt_progress_revision_depends_on_attempt_progress() -> N
 
 def test_scheduler_sessions_revision_depends_on_structured_attempt_progress() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0008_scheduler_sessions_and_lifecycle_events")
 
     assert revision is not None
     assert revision.down_revision == "0007_structured_attempt_progress"
+
+
+def test_scheduler_runtime_capacity_revision_depends_on_scheduler_sessions() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0008_scheduler_sessions_and_lifecycle_events"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -311,6 +320,28 @@ def test_lifecycle_metadata_columns_are_nullable_for_historical_rows(tmp_path: P
     assert event_columns["stage"]["nullable"] is True
     assert event_columns["details_json"]["nullable"] is True
     assert event_columns["dedupe_key"]["nullable"] is True
+
+
+def test_scheduler_runtime_capacity_columns_are_nullable(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(create_db_engine(database_url)).get_columns("schedulerstate")
+    }
+
+    for column_name in (
+        "capacity_cheap_workers",
+        "capacity_cheap_active",
+        "capacity_av1an_jobs",
+        "capacity_av1an_active",
+        "capacity_file_ops",
+        "capacity_file_ops_active",
+        "capacity_observed_at",
+    ):
+        assert columns[column_name]["nullable"] is True
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:

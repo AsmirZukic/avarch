@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from avarch.application.scheduler_run import (
+    SchedulerCapacityUsage,
     SchedulerControlSnapshot,
     SchedulerTerminalCounts,
     run_scheduler,
@@ -45,6 +46,13 @@ def test_run_scheduler_launches_distinct_resource_classes_concurrently(
     assert summary.idle is True
     assert workers.started == [JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE]
     assert workers.peak_active == 3
+    assert store.capacity_usages[0].av1an_active == 0
+    assert any(usage.av1an_active == 1 for usage in store.capacity_usages)
+    assert any(usage.cheap_active == 1 for usage in store.capacity_usages)
+    assert any(usage.file_ops_active == 1 for usage in store.capacity_usages)
+    assert store.capacity_usages[-1].av1an_active == 0
+    assert store.capacity_usages[-1].cheap_active == 0
+    assert store.capacity_usages[-1].file_ops_active == 0
     assert store.session_end_reasons == ["normal"]
     assert store.released is True
 
@@ -111,8 +119,15 @@ class _Store:
         self.session_end_reasons: list[str] = []
         self.released = False
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
-        del runner_id, now, resume
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
+        del runner_id, now, resume, capacity
 
     def start_session(self, *, runner_id: str, now: datetime) -> int:
         del runner_id, now
@@ -121,8 +136,14 @@ class _Store:
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         del now
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None:
-        del runner_id, now
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
+        del runner_id, now, capacity
 
     def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot:
         del now
@@ -196,9 +217,18 @@ class _ConcurrentStore:
         self._claimable_returned = False
         self.released = False
         self.session_end_reasons: list[str] = []
+        self.capacity_usages: list[SchedulerCapacityUsage] = []
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         del runner_id, now, resume
+        self.capacity_usages.append(capacity)
 
     def start_session(self, *, runner_id: str, now: datetime) -> int:
         del runner_id, now
@@ -207,8 +237,15 @@ class _ConcurrentStore:
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         del now
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None:
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         del runner_id, now
+        self.capacity_usages.append(capacity)
 
     def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot:
         del now
@@ -295,8 +332,15 @@ class _HistoricalTerminalCountsStore:
         self.released = False
         self.session_end_reasons: list[str] = []
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
-        del runner_id, now, resume
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
+        del runner_id, now, resume, capacity
 
     def start_session(self, *, runner_id: str, now: datetime) -> int:
         del runner_id, now
@@ -305,8 +349,14 @@ class _HistoricalTerminalCountsStore:
     def recover_abandoned_jobs(self, *, now: datetime) -> None:
         del now
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None:
-        del runner_id, now
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
+        del runner_id, now, capacity
 
     def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot:
         del now
@@ -363,8 +413,15 @@ class _OrderingStore(_HistoricalTerminalCountsStore):
         super().__init__()
         self.calls: list[str] = []
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
-        del runner_id, now, resume
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
+        del runner_id, now, resume, capacity
         self.calls.append("acquire_lease")
 
     def start_session(self, *, runner_id: str, now: datetime) -> int:
