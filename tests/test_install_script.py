@@ -89,7 +89,7 @@ def test_installer_supports_version_tag_without_full_image_override(tmp_path: Pa
         {
             "AVARCH_INSTALL_DIR": str(install_dir),
             "AVARCH_SKIP_PULL": "0",
-            "AVARCH_VERSION": "0.1.0",
+            "AVARCH_VERSION": "0.2.0",
             "AVARCH_WRAPPER_FILE": str(WRAPPER),
         }
     )
@@ -103,7 +103,7 @@ def test_installer_supports_version_tag_without_full_image_override(tmp_path: Pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert "pull docker.io/asmir100/avarch:0.1.0" in log.read_text(encoding="utf-8")
+    assert "pull docker.io/asmir100/avarch:0.2.0" in log.read_text(encoding="utf-8")
 
 
 def test_installer_defaults_to_alpha_channel(tmp_path: Path) -> None:
