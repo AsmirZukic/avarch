@@ -63,6 +63,11 @@ def test_progress_view_for_numeric_encoding_progress() -> None:
                 rate_per_second=12,
                 speed_ratio=1.5,
                 message="48/120 frames",
+                chunks_current=2,
+                chunks_total=6,
+                bitrate_kbps=1500,
+                estimated_output_bytes=2_000_000,
+                written_output_bytes=1_000_000,
             )
         ),
         now=NOW,
@@ -74,6 +79,11 @@ def test_progress_view_for_numeric_encoding_progress() -> None:
     assert view.rate_per_second == 12.0
     assert view.speed_ratio == 1.5
     assert view.message == "48/120 frames"
+    assert view.chunks_current == 2
+    assert view.chunks_total == 6
+    assert view.bitrate_kbps == 1500
+    assert view.estimated_output_bytes == 2_000_000
+    assert view.written_output_bytes == 1_000_000
 
 
 def test_progress_view_for_unknown_total_has_no_percent_or_eta() -> None:
@@ -230,6 +240,11 @@ def _snapshot(
     message: str | None = None,
     heartbeat_at: datetime | None = None,
     advanced_at: datetime | None = None,
+    chunks_current: int | None = None,
+    chunks_total: int | None = None,
+    bitrate_kbps: int | None = None,
+    estimated_output_bytes: int | None = None,
+    written_output_bytes: int | None = None,
 ) -> ProgressSnapshot:
     observed_at = NOW - timedelta(seconds=1)
     phase_started_at = min(
@@ -250,4 +265,9 @@ def _snapshot(
         observed_at=observed_at,
         heartbeat_at=heartbeat_at or observed_at,
         advanced_at=advanced_at or observed_at,
+        chunks_current=chunks_current,
+        chunks_total=chunks_total,
+        bitrate_kbps=bitrate_kbps,
+        estimated_output_bytes=estimated_output_bytes,
+        written_output_bytes=written_output_bytes,
     )

@@ -151,6 +151,33 @@ def test_get_snapshot_returns_domain_snapshot(tmp_path: Path) -> None:
     )
 
 
+def test_progress_store_round_trips_structured_metrics(tmp_path: Path) -> None:
+    engine, _job_id, attempt_id = _stored_running_attempt(tmp_path)
+    observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    snapshot = _snapshot(
+        observed_at=observed,
+        chunks_current=4,
+        chunks_total=12,
+        bitrate_kbps=1500,
+        estimated_output_bytes=2_000_000,
+        written_output_bytes=1_000_000,
+    )
+
+    with Session(engine) as session:
+        store = SqliteProgressStore(session)
+        store.save_snapshot(attempt_id=attempt_id, snapshot=snapshot, persisted_at=observed)
+        session.commit()
+
+        stored = store.get_snapshot(attempt_id=attempt_id)
+
+    assert stored is not None
+    assert stored.chunks_current == 4
+    assert stored.chunks_total == 12
+    assert stored.bitrate_kbps == 1500
+    assert stored.estimated_output_bytes == 2_000_000
+    assert stored.written_output_bytes == 1_000_000
+
+
 def test_save_snapshot_rejects_nonexistent_attempt(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
     create_db_schema(engine)
@@ -622,6 +649,11 @@ def _snapshot(
     unit: ProgressUnit | None = ProgressUnit.FRAMES,
     source: ProgressSource = ProgressSource.AV1AN_OUTPUT,
     message: str | None = "encoding",
+    chunks_current: int | None = None,
+    chunks_total: int | None = None,
+    bitrate_kbps: int | None = None,
+    estimated_output_bytes: int | None = None,
+    written_output_bytes: int | None = None,
 ) -> ProgressSnapshot:
     return ProgressSnapshot(
         phase=phase,
@@ -636,4 +668,9 @@ def _snapshot(
         observed_at=observed_at,
         heartbeat_at=observed_at,
         advanced_at=observed_at if current is not None else None,
+        chunks_current=chunks_current,
+        chunks_total=chunks_total,
+        bitrate_kbps=bitrate_kbps,
+        estimated_output_bytes=estimated_output_bytes,
+        written_output_bytes=written_output_bytes,
     )
