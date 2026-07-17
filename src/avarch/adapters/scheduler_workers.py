@@ -51,6 +51,7 @@ from avarch.adapters.sqlite.rejection_cleanup import (
     RejectedOutputCleanupError,
     cleanup_rejected_output,
 )
+from avarch.adapters.sqlite.stage_events import record_stage_event
 from avarch.adapters.sqlite.validations import latest_validation, persist_validation_result
 from avarch.adapters.validation import ValidationError as OutputValidationError
 from avarch.adapters.validation import (
@@ -77,7 +78,13 @@ from avarch.application.vapoursynth_identity import (
     resolve_vapoursynth_template,
 )
 from avarch.config import AppConfig
-from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus, job_has_passed_validation
+from avarch.domain.jobs import (
+    AttemptStatus,
+    JobEventType,
+    JobStage,
+    JobStatus,
+    job_has_passed_validation,
+)
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.models.execution import (
@@ -564,14 +571,31 @@ async def execute_validation_job(
             failed_checks=failed_checks,
             failed_summary=failed_check_summary(report),
         )
+        size_decision = None
         if report.passed:
-            _apply_size_policy_after_validation(
+            size_decision = _apply_size_policy_after_validation(
                 job=job,
                 plan=plan,
                 report=report,
                 config=config,
                 now=_utc_now(),
             )
+        record_stage_event(
+            session,
+            job_id=job_id,
+            attempt=attempt,
+            event_type=JobEventType.STAGE_COMPLETED
+            if report.passed
+            else JobEventType.STAGE_FAILED,
+            now=report.finished_at,
+            details=_validation_event_details(
+                result_id=result.id,
+                report=report,
+                failed_checks=failed_checks,
+                size_decision=size_decision,
+                source_size_bytes=plan.validation.source_size_bytes,
+            ),
+        )
         if report.passed and job.hold_requested_at is not None:
             clear_hold_fields(job)
         if report.passed:
@@ -660,11 +684,38 @@ async def execute_cleanup_job(
                 attempt.error_type = exc.__class__.__name__
                 attempt.error_message = str(exc)
                 attempt.finished_at = _utc_now()
+                record_stage_event(
+                    session,
+                    job_id=job_id,
+                    attempt=attempt,
+                    event_type=JobEventType.STAGE_FAILED,
+                    now=attempt.finished_at,
+                    details=_cleanup_event_details(
+                        decision=decision,
+                        plan=plan,
+                        report=report,
+                        output_path=validation.output_path,
+                        error_type=attempt.error_type,
+                    ),
+                )
                 session.add(job)
                 session.add(attempt)
                 return
             attempt.status = AttemptStatus.COMPLETED
             attempt.finished_at = _utc_now()
+            record_stage_event(
+                session,
+                job_id=job_id,
+                attempt=attempt,
+                event_type=JobEventType.STAGE_COMPLETED,
+                now=attempt.finished_at,
+                details=_cleanup_event_details(
+                    decision=decision,
+                    plan=plan,
+                    report=report,
+                    output_path=validation.output_path,
+                ),
+            )
             session.add(job)
             session.add(attempt)
         except Exception as exc:
@@ -725,12 +776,13 @@ def _apply_size_policy_after_validation(
     report: Any,
     config: AppConfig,
     now: datetime,
-) -> None:
+) -> SizeDecision:
     profile = require_profile(config, job.profile_name).profile
     decision = _size_policy_decision(profile=profile, plan=plan, report=report)
     if decision == SizeDecision.ACCEPT:
-        return
+        return decision
     job_transition_adapter.queue_rejected_output_cleanup(job, now=now)
+    return decision
 
 
 def _size_policy_decision(
@@ -752,6 +804,60 @@ def _size_policy_decision(
             minimum_savings_percent=profile.promotion.minimum_savings_percent,
         ),
     )
+
+
+def _validation_event_details(
+    *,
+    result_id: int | None,
+    report: ValidationReport,
+    failed_checks: list[str],
+    size_decision: SizeDecision | None,
+    source_size_bytes: int,
+) -> dict[str, object | None]:
+    output_size_bytes = _observed_output_size(report)
+    return {
+        "validation_result_id": result_id,
+        "passed": report.passed,
+        "failed_checks": list(failed_checks),
+        "source_size_bytes": source_size_bytes,
+        "output_size_bytes": output_size_bytes,
+        "saved_bytes": source_size_bytes - output_size_bytes
+        if output_size_bytes is not None
+        else None,
+        "size_decision": size_decision.value if size_decision is not None else None,
+        "source_safety_outcome": "original_retained",
+    }
+
+
+def _cleanup_event_details(
+    *,
+    decision: SizeDecision,
+    plan: TranscodePlan,
+    report: ValidationReport,
+    output_path: str,
+    error_type: str | None = None,
+) -> dict[str, object | None]:
+    output_size_bytes = _observed_output_size(report)
+    return {
+        "size_decision": decision.value,
+        "source_size_bytes": plan.validation.source_size_bytes,
+        "output_size_bytes": output_size_bytes,
+        "saved_bytes": plan.validation.source_size_bytes - output_size_bytes
+        if output_size_bytes is not None
+        else None,
+        "output_path": output_path,
+        "source_safety_outcome": "original_retained",
+        "error_type": error_type,
+    }
+
+
+def _observed_output_size(report: ValidationReport) -> int | None:
+    if report.observed is not None and report.observed.output_size_bytes is not None:
+        return report.observed.output_size_bytes
+    try:
+        return Path(report.output_path).stat().st_size
+    except OSError:
+        return None
 
 
 def _phase_snapshot(
