@@ -39,6 +39,7 @@ _ACTIVE_STATUSES = {
     JobStatus.PROMOTING,
     JobStatus.CLEANING,
 }
+PROGRESS_STALE_AFTER_SECONDS = 10
 
 
 class SqliteSchedulerSnapshotQuery:
@@ -295,6 +296,7 @@ def _attempt_progress_summary(
     speed_ratio: float | None = None
     observed_at: datetime | None = None
     eta_seconds: int | None = None
+    last_update_age_seconds: int | None = None
     if progress is not None:
         if progress.unit == ProgressUnit.FRAMES:
             frames_current = _int_or_none(progress.current_value)
@@ -302,6 +304,7 @@ def _attempt_progress_summary(
         rate_per_second = progress.rate_per_second
         speed_ratio = progress.speed_ratio
         observed_at = progress.observed_at
+        last_update_age_seconds = _elapsed_seconds(started_at=progress.observed_at, now=captured_at)
         eta_seconds = _eta_seconds(
             current=progress.current_value,
             total=progress.total_value,
@@ -318,6 +321,16 @@ def _attempt_progress_summary(
         eta_seconds=eta_seconds,
         elapsed_seconds=_elapsed_seconds(started_at=attempt.started_at, now=captured_at),
         observed_at=observed_at,
+        chunks_current=progress.chunks_current if progress is not None else None,
+        chunks_total=progress.chunks_total if progress is not None else None,
+        bitrate_kbps=progress.bitrate_kbps if progress is not None else None,
+        estimated_output_bytes=progress.estimated_output_bytes if progress is not None else None,
+        written_output_bytes=progress.written_output_bytes if progress is not None else None,
+        stale=(
+            last_update_age_seconds is not None
+            and last_update_age_seconds > PROGRESS_STALE_AFTER_SECONDS
+        ),
+        last_update_age_seconds=last_update_age_seconds,
     )
 
 
