@@ -100,6 +100,7 @@ from avarch.application.queue_control import (
     retry_job,
     retry_queue,
 )
+from avarch.application.resource_telemetry import apply_resource_health, safe_sample_resources
 from avarch.application.scheduler_control import (
     SchedulerControlWorkflowError,
     drain_scheduler,
@@ -125,6 +126,7 @@ from avarch.application.scheduler_run import (
     new_runner_id,
     run_scheduler,
 )
+from avarch.application.scheduler_snapshot import SchedulerSnapshot, resource_telemetry_summary
 from avarch.application.scheduler_status import scheduler_status
 from avarch.application.scheduler_watch import (
     SchedulerWatchLoop,
@@ -810,13 +812,14 @@ async def _render_scheduler_live_progress(database_url: str, *, workspace_root: 
     color = os.environ.get("NO_COLOR") is None
     console = Console(file=sys.stdout, color_system="auto" if color else None)
     query = _LiveSchedulerSnapshotQuery(database_url=database_url, workspace_root=workspace_root)
-    with Live(console=console, refresh_per_second=4, transient=False) as live:
+    with Live(console=console, refresh_per_second=4, transient=False, screen=True) as live:
         while True:
             live.update(
                 render_scheduler_dashboard(
                     query.snapshot(),
                     width=console.width,
                     mode=DashboardMode.OWNER,
+                    height=console.height,
                 )
             )
             await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
@@ -1070,6 +1073,11 @@ def scheduler_watch_command(
         typer.echo(snapshot.to_canonical_json())
         return
 
+    snapshot = _snapshot_with_resource_telemetry(
+        snapshot,
+        database_url=cli_workspace.database_url,
+    )
+
     console = Console(
         file=sys.stdout,
         color_system=None if no_color else "auto",
@@ -1096,13 +1104,14 @@ async def _run_scheduler_watch_live(
         database_url=database_url,
         workspace_root=workspace_root,
     )
-    with Live(console=console, refresh_per_second=4, transient=False) as live:
+    with Live(console=console, refresh_per_second=4, transient=False, screen=True) as live:
         loop = SchedulerWatchLoop(
             snapshot_query=query,
             renderer=lambda snapshot, width: render_scheduler_dashboard(
                 snapshot,
                 width=width,
                 mode=DashboardMode.OBSERVER,
+                height=console.height,
             ),
             sink=_LiveSchedulerWatchSink(live),
             interval_seconds=interval_seconds,
@@ -1136,6 +1145,23 @@ class _LiveSchedulerWatchSink:
 
     def render(self, renderable: RenderableType) -> None:
         self._live.update(renderable)
+
+
+def _snapshot_with_resource_telemetry(
+    snapshot: SchedulerSnapshot, *, database_url: str
+) -> SchedulerSnapshot:
+    sampler = scheduler_resource_sampler(database_url=database_url, clock=_utc_now)
+    sample = safe_sample_resources(sampler, clock=lambda: snapshot.captured_at)
+    sample = apply_resource_health(sample)
+    return snapshot.model_copy(
+        update={
+            "resources": resource_telemetry_summary(
+                sample,
+                captured_at=snapshot.captured_at,
+                stale_after_seconds=10,
+            )
+        }
+    )
 
 
 @scheduler_app.command("status")
