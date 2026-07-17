@@ -17,6 +17,11 @@ _PROGRESS_RE = re.compile(
     r"\(\s*(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
     re.IGNORECASE,
 )
+_SCENE_SPINNER_RE = re.compile(
+    r".*?\b(?P<current>\d[\d,]*)\s+frames\s*"
+    r"\(\s*(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
+    re.IGNORECASE,
+)
 _INPUT_FPS_RE = re.compile(
     r"\bInput:\s+.+?\s+@\s+(?P<fps>\d+(?:\.\d+)?)\s+fps\b",
     re.IGNORECASE,
@@ -29,14 +34,26 @@ _ESTIMATED_SIZE_RE = re.compile(
     r",\s*est\.\s+(?P<size_value>\d+(?:\.\d+)?)\s+(?P<size_unit>[KMGT]?i?B)\b",
     re.IGNORECASE,
 )
+_SCENECUT_RE = re.compile(
+    r"\bscenecut:\s+found\s+(?P<count>\d[\d,]*)\s+scene",
+    re.IGNORECASE,
+)
+_EXTRA_SPLIT_RE = re.compile(
+    r"\bextra_splits\s*\([^)]*\)\s*:\s*(?P<count>\d[\d,]*)\s+scene",
+    re.IGNORECASE,
+)
+_QUEUE_RE = re.compile(
+    r"\bQueue\s+(?P<chunks>\d[\d,]*)\s+Workers\s+(?P<workers>\d[\d,]*)\s+Encoder\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class Av1anTtyProgressSample:
     phase: ProgressPhase
-    current: int
-    total: int
-    unit: ProgressUnit
+    current: int | None
+    total: int | None
+    unit: ProgressUnit | None
     rate_per_second: float | None
     speed_ratio: float | None
     message: str | None
@@ -113,9 +130,50 @@ def _parse_record(
     *,
     source_fps: float | None,
 ) -> Av1anTtyProgressSample | None:
+    queue = _QUEUE_RE.search(record)
+    if queue is not None:
+        chunks = _parse_int(queue.group("chunks"))
+        workers = _parse_int(queue.group("workers"))
+        return Av1anTtyProgressSample(
+            phase=ProgressPhase.ENCODING,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            message=f"{chunks} chunks queued, {workers} workers",
+        )
     match = _PROGRESS_RE.search(record)
     if match is None:
-        return None
+        spinner = _SCENE_SPINNER_RE.search(record)
+        if spinner is not None:
+            try:
+                current = _parse_int(spinner.group("current"))
+                rate = float(spinner.group("fps"))
+            except ValueError:
+                return None
+            return Av1anTtyProgressSample(
+                phase=ProgressPhase.SCENE_DETECTION,
+                current=current,
+                total=None,
+                unit=ProgressUnit.FRAMES,
+                rate_per_second=rate,
+                speed_ratio=_speed_ratio(rate, source_fps=source_fps),
+                message=None,
+            )
+        scene_message = _scene_detection_message(record)
+        if scene_message is None and record.strip() != "Scene detection":
+            return None
+        return Av1anTtyProgressSample(
+            phase=ProgressPhase.SCENE_DETECTION,
+            current=None,
+            total=None,
+            unit=None,
+            rate_per_second=None,
+            speed_ratio=None,
+            message=scene_message,
+            chunks_total=_prepared_chunks(record),
+        )
     try:
         current = _parse_int(match.group("current"))
         total = _parse_int(match.group("total"))
@@ -125,9 +183,9 @@ def _parse_record(
     chunks = _CHUNKS_RE.search(record)
     if chunks is None:
         phase = ProgressPhase.SCENE_DETECTION
-        message = None
+        message = _scene_detection_message(record)
         chunks_current = None
-        chunks_total = None
+        chunks_total = _prepared_chunks(record)
     else:
         phase = ProgressPhase.ENCODING
         message = _encoding_message(record, chunks=chunks)
@@ -175,6 +233,24 @@ def _encoding_message(record: str, *, chunks: re.Match[str]) -> str:
             f"est. {estimated_size.group('size_value')} {estimated_size.group('size_unit')}"
         )
     return ", ".join(parts)
+
+
+def _scene_detection_message(record: str) -> str | None:
+    scenecut = _SCENECUT_RE.search(record)
+    if scenecut is None:
+        return None
+    parts = [f"scenes found: {_parse_int(scenecut.group('count'))}"]
+    extra_split = _EXTRA_SPLIT_RE.search(record)
+    if extra_split is not None:
+        parts.append(f"chunks prepared: {_parse_int(extra_split.group('count'))}")
+    return ", ".join(parts)
+
+
+def _prepared_chunks(record: str) -> int | None:
+    extra_split = _EXTRA_SPLIT_RE.search(record)
+    if extra_split is None:
+        return None
+    return _parse_int(extra_split.group("count"))
 
 
 def _parse_bitrate_kbps(record: str) -> int | None:

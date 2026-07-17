@@ -44,6 +44,7 @@ class QueueRetrySummary:
     requires_requeue: int
     reset_to_probe: int
     reset_to_plan: int
+    reset_to_scene_detect: int
     reset_to_encode: int
     reset_to_validate: int
     return_to_promote: int
@@ -210,6 +211,7 @@ def retry_queue(
     requires_requeue = 0
     reset_to_probe = 0
     reset_to_plan = 0
+    reset_to_scene_detect = 0
     reset_to_encode = 0
     reset_to_validate = 0
     return_to_promote = 0
@@ -229,6 +231,8 @@ def retry_queue(
             reset_to_probe += 1
         elif next_stage == JobStage.PLAN:
             reset_to_plan += 1
+        elif next_stage == JobStage.SCENE_DETECT:
+            reset_to_scene_detect += 1
         elif next_stage == JobStage.ENCODE:
             reset_to_encode += 1
         elif next_stage == JobStage.VALIDATE:
@@ -248,6 +252,7 @@ def retry_queue(
         requires_requeue=requires_requeue,
         reset_to_probe=reset_to_probe,
         reset_to_plan=reset_to_plan,
+        reset_to_scene_detect=reset_to_scene_detect,
         reset_to_encode=reset_to_encode,
         reset_to_validate=reset_to_validate,
         return_to_promote=return_to_promote,

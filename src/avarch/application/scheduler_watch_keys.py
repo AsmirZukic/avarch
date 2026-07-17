@@ -9,6 +9,7 @@ from typing import Protocol, TextIO
 
 KEY_CTRL_C = "ctrl_c"
 KEY_CANCEL = "c"
+KEY_DETACH = "d"
 KEY_DETAILS = "enter"
 KEY_LOGS = "l"
 KEY_PAUSE = "p"
@@ -37,6 +38,7 @@ class PosixKeySource:
         self._input_file = input_file or sys.stdin
         self._termios: object | None = None
         self._tty: object | None = None
+        self._fd: int | None = None
         self._original_attributes: list[object] | None = None
 
     def __enter__(self) -> PosixKeySource:
@@ -50,10 +52,13 @@ class PosixKeySource:
         self._tty = tty
         try:
             fd = self._input_file.fileno()
+            self._fd = fd
             self._original_attributes = termios.tcgetattr(fd)
             tty.setcbreak(fd)
-            os.set_blocking(fd, False)
-        except OSError:
+            attributes = termios.tcgetattr(fd)
+            attributes[3] &= ~(termios.ECHO | termios.ISIG)
+            termios.tcsetattr(fd, termios.TCSADRAIN, attributes)
+        except (AttributeError, OSError):
             self.supported = False
         return self
 
@@ -64,25 +69,26 @@ class PosixKeySource:
         traceback: TracebackType | None,
     ) -> None:
         del exc_type, exc, traceback
-        if self._termios is None or self._original_attributes is None:
+        if self._termios is None or self._original_attributes is None or self._fd is None:
             return
         try:
-            fd = self._input_file.fileno()
-            self._termios.tcsetattr(fd, self._termios.TCSADRAIN, self._original_attributes)
-            os.set_blocking(fd, True)
+            self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._original_attributes)
         except OSError:
             return
 
     def poll_key(self) -> str | None:
-        if not self.supported:
+        if not self.supported or self._fd is None:
             return None
         try:
-            readable, _writable, _error = select.select([self._input_file], [], [], 0)
+            readable, _writable, _error = select.select([self._fd], [], [], 0)
             if not readable:
                 return None
-            key = self._input_file.read(1)
-        except OSError:
+            data = os.read(self._fd, 1)
+        except (BlockingIOError, InterruptedError, OSError):
             return None
+        if not data:
+            return None
+        key = data.decode("utf-8", errors="ignore")
         if key == "\x03":
             return KEY_CTRL_C
         if key in {"\r", "\n"}:

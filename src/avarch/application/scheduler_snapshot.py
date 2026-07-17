@@ -10,6 +10,7 @@ from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth, ResourceSample
 from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
+from avarch.domain.progress import ProgressPhase
 from avarch.domain.scheduler import SchedulerMode
 from avarch.serialization import canonical_json
 
@@ -98,6 +99,8 @@ class AttemptProgressSummary(SnapshotModel):
     attempt_id: int = Field(ge=0, strict=True)
     attempt_number: int = Field(ge=1, strict=True)
     status: AttemptStatus
+    phase: ProgressPhase | None = None
+    message: str | None = None
     frames_current: int | None = Field(default=None, ge=0, strict=True)
     frames_total: int | None = Field(default=None, ge=0, strict=True)
     fps: float | None = Field(default=None, ge=0)
@@ -248,6 +251,8 @@ class SchedulerSnapshot(SnapshotModel):
     recent_events: tuple[LifecycleEventSummary, ...] = ()
     watch_details: WatchJobDetailsSummary | None = None
     watch_log_tail: WatchLogTailSummary | None = None
+    watch_message: str | None = None
+    watch_confirmation_required: bool = False
     alerts: tuple[SchedulerAlert, ...] = ()
     forecast: QueueForecastSummary | None = None
 
@@ -292,6 +297,7 @@ def resource_telemetry_summary(
 _WORKFLOW_STAGES = (
     JobStage.PROBE,
     JobStage.PLAN,
+    JobStage.SCENE_DETECT,
     JobStage.ENCODE,
     JobStage.VALIDATE,
     JobStage.PROMOTE,
@@ -357,6 +363,7 @@ def _active_stage(
     if job_status == JobStatus.ENCODING and job_stage in {
         JobStage.PROBE,
         JobStage.PLAN,
+        JobStage.SCENE_DETECT,
         JobStage.ENCODE,
     }:
         return job_stage
@@ -399,7 +406,13 @@ def _stage_is_complete(stage: JobStage, *, job_status: JobStatus, job_stage: Job
 
 
 def _size_rejected_step_state(stage: JobStage) -> WorkflowStepState:
-    if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.ENCODE, JobStage.VALIDATE}:
+    if stage in {
+        JobStage.PROBE,
+        JobStage.PLAN,
+        JobStage.SCENE_DETECT,
+        JobStage.ENCODE,
+        JobStage.VALIDATE,
+    }:
         return WorkflowStepState.COMPLETE
     if stage == JobStage.PROMOTE:
         return WorkflowStepState.BLOCKED

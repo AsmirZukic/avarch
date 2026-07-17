@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,8 +24,10 @@ from avarch.application.scheduler_watch_controller import WatchLogPaths
 from avarch.application.scheduler_watch_keys import (
     KEY_CANCEL,
     KEY_CTRL_C,
+    KEY_DETACH,
     KEY_DETAILS,
     KEY_LOGS,
+    PosixKeySource,
     UnsupportedKeySource,
 )
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
@@ -46,6 +49,66 @@ def test_ctrl_c_detaches_scheduler_watch() -> None:
     asyncio.run(_run_with_key(KEY_CTRL_C, controller=controller))
 
     assert controller.calls == ["detach"]
+
+
+def test_ctrl_c_stops_scheduler_from_owner_dashboard() -> None:
+    controller = _Controller()
+
+    asyncio.run(
+        _run_with_key_source(
+            _KeySource([KEY_CTRL_C]),
+            controller=controller,
+            sink=_FakeSink(),
+            ctrl_c_stops_scheduler=True,
+        )
+    )
+
+    assert controller.calls == ["stop:owner dashboard"]
+
+
+def test_d_detaches_scheduler_watch() -> None:
+    controller = _Controller()
+
+    asyncio.run(_run_with_key(KEY_DETACH, controller=controller))
+
+    assert controller.calls == ["detach"]
+
+
+def test_posix_key_source_reads_single_byte_from_pty() -> None:
+    master_fd, slave_fd = os.openpty()
+    try:
+        with (
+            os.fdopen(slave_fd, "r", encoding="utf-8", buffering=1) as slave,
+            PosixKeySource(slave) as key_source,
+        ):
+            os.write(master_fd, b"d")
+            assert key_source.poll_key() == KEY_DETACH
+    finally:
+        os.close(master_fd)
+
+
+def test_posix_key_source_keeps_pty_output_blocking() -> None:
+    master_fd, slave_fd = os.openpty()
+    try:
+        with os.fdopen(slave_fd, "r", encoding="utf-8", buffering=1) as slave:
+            assert os.get_blocking(slave.fileno()) is True
+            with PosixKeySource(slave):
+                assert os.get_blocking(slave.fileno()) is True
+    finally:
+        os.close(master_fd)
+
+
+def test_posix_key_source_reads_ctrl_c_instead_of_raising_signal() -> None:
+    master_fd, slave_fd = os.openpty()
+    try:
+        with (
+            os.fdopen(slave_fd, "r", encoding="utf-8", buffering=1) as slave,
+            PosixKeySource(slave) as key_source,
+        ):
+            os.write(master_fd, b"\x03")
+            assert key_source.poll_key() == KEY_CTRL_C
+    finally:
+        os.close(master_fd)
 
 
 def test_p_pauses_when_scheduler_is_running() -> None:
@@ -164,6 +227,7 @@ async def _run_with_key_source(
     snapshots: Sequence[SchedulerSnapshot] | None = None,
     renderer: object | None = None,
     stop_after_iterations: int = 1,
+    ctrl_c_stops_scheduler: bool = False,
 ) -> None:
     renderer = renderer or (lambda snapshot, _width: Text(snapshot.scheduler.state.value))
     loop = SchedulerWatchLoop(
@@ -176,6 +240,7 @@ async def _run_with_key_source(
         stop_after_iterations=stop_after_iterations,
         key_source=key_source,  # type: ignore[arg-type]
         watch_controller=controller,
+        ctrl_c_stops_scheduler=ctrl_c_stops_scheduler,
     )
     await loop.run()
 
@@ -225,6 +290,10 @@ class _Controller:
 
     def detach(self) -> object:
         self.calls.append("detach")
+        return object()
+
+    def stop(self, *, reason: str | None = None) -> object:
+        self.calls.append(f"stop:{reason}")
         return object()
 
 

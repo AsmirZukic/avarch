@@ -15,6 +15,7 @@ from avarch.adapters.sqlite.job_transitions import (
     JobTransitionError,
     claim_job_stage,
     complete_job_stage,
+    complete_scene_detect_stage,
     fail_job_stage,
     interrupt_job_stage,
     queue_rejected_output_cleanup,
@@ -138,6 +139,49 @@ def test_claim_and_completion_record_stage_lifecycle_events(tmp_path: Path) -> N
     ]
     assert {event.attempt_id for event in events} == {attempt_id}
     assert {event.stage for event in events} == {JobStage.PROBE}
+
+
+def test_scene_detect_completion_advances_to_encode_with_scene_events(tmp_path: Path) -> None:
+    engine, job_id = _stored_job(tmp_path, stage=JobStage.SCENE_DETECT)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session:
+        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
+        complete_scene_detect_stage(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id or 0,
+            scenes_found=317,
+            chunks_prepared=321,
+            duration_seconds=4.2,
+            now=now + timedelta(seconds=5),
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+        attempt = session.get(JobAttempt, attempt.id or 0)
+        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+
+    assert job is not None
+    assert job.status == JobStatus.ENCODING
+    assert job.stage == JobStage.ENCODE
+    assert attempt is not None
+    assert attempt.stage == JobStage.ENCODE
+    assert attempt.status == AttemptStatus.RUNNING
+    assert [event.event_type for event in events] == [
+        JobEventType.SCENE_DETECT_STARTED,
+        JobEventType.SCENE_DETECT_COMPLETED,
+        JobEventType.STAGE_STARTED,
+    ]
+    assert [event.stage for event in events] == [
+        JobStage.SCENE_DETECT,
+        JobStage.SCENE_DETECT,
+        JobStage.ENCODE,
+    ]
+    assert json.loads(events[1].details_json or "{}") == {
+        "chunks_prepared": 321,
+        "duration_seconds": 4.2,
+        "scenes_found": 317,
+    }
 
 
 def test_final_completion_marks_job_completed(tmp_path: Path) -> None:

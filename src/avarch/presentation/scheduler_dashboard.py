@@ -25,6 +25,7 @@ from avarch.application.scheduler_snapshot import (
 )
 from avarch.cli_rendering import UNAVAILABLE, format_compact_duration, format_size
 from avarch.domain.jobs import JobStage
+from avarch.domain.progress import ProgressPhase
 
 
 class DashboardMode(StrEnum):
@@ -54,7 +55,7 @@ def render_scheduler_dashboard(
             shortcuts_available=shortcuts_available,
         )
     header = _header(snapshot, mode=mode)
-    footer = _footer(mode, shortcuts_available=shortcuts_available)
+    footer = _footer(snapshot, mode, shortcuts_available=shortcuts_available)
     if width >= 120 and height is not None:
         return _live_layout_dashboard(snapshot, header=header, footer=footer)
     main = _main_group(snapshot)
@@ -212,23 +213,44 @@ def _compact_dashboard(
             _append_line(text, f"- {_event_line(event)}", width)
     else:
         _append_line(text, "Recent activity unavailable", width)
-    _append_line(text, _footer_text(mode, shortcuts_available=shortcuts_available), width)
+    _append_line(
+        text,
+        _footer_text(snapshot, mode, shortcuts_available=shortcuts_available),
+        width,
+    )
     return text
 
 
-def _footer(mode: DashboardMode, *, shortcuts_available: bool) -> Panel:
+def _footer(
+    snapshot: SchedulerSnapshot,
+    mode: DashboardMode,
+    *,
+    shortcuts_available: bool,
+) -> Panel:
     return Panel(
-        _footer_text(mode, shortcuts_available=shortcuts_available),
-        border_style=NEUTRAL_BORDER,
+        _footer_text(snapshot, mode, shortcuts_available=shortcuts_available),
+        border_style=ACTIVE_BORDER if snapshot.watch_confirmation_required else NEUTRAL_BORDER,
     )
 
 
-def _footer_text(mode: DashboardMode, *, shortcuts_available: bool) -> str:
+def _footer_text(
+    snapshot: SchedulerSnapshot,
+    mode: DashboardMode,
+    *,
+    shortcuts_available: bool,
+) -> str:
     if not shortcuts_available:
+        if mode == DashboardMode.OWNER:
+            return "Ctrl+C stop · interactive shortcuts unavailable"
         return "Ctrl+C detach · interactive shortcuts unavailable"
+    shortcuts = "p pause/resume   c cancel   l logs   Enter details   d/q detach"
     if mode == DashboardMode.OWNER:
-        return "p pause/resume   c cancel   l logs   Enter details   q detach   Ctrl+C stop"
-    return "p pause/resume   c cancel   l logs   Enter details   q detach"
+        shortcuts += "   Ctrl+C stop"
+    if snapshot.watch_confirmation_required and snapshot.watch_message:
+        return f"{snapshot.watch_message} Press c again to confirm.   {shortcuts}"
+    if snapshot.watch_message:
+        return f"{snapshot.watch_message}   {shortcuts}"
+    return shortcuts
 
 
 def _header(snapshot: SchedulerSnapshot, *, mode: DashboardMode) -> Panel:
@@ -419,14 +441,16 @@ def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
     table.add_column()
     table.add_column(justify="right")
     table.add_column()
+    table.add_column()
     for metric in resources.metrics:
         table.add_row(
             _resource_label(metric),
             _resource_value(metric),
+            _resource_bar(metric),
             _resource_status(metric),
         )
     if resources.stale:
-        table.add_row("freshness", "stale", "")
+        table.add_row("freshness", "stale", "", "")
     return Panel(table, title="Resources", border_style=_resource_border(resources.health))
 
 
@@ -535,6 +559,8 @@ def _event_label(event: LifecycleEventSummary) -> str:
     labels = {
         "stage_started": f"{stage} started",
         "stage_completed": f"{stage} completed",
+        "scene_detect_started": "scene detection started",
+        "scene_detect_completed": "scene detection completed",
         "stage_failed": f"{stage} failed",
         "stage_cancelled": f"{stage} cancelled",
         "hold_requested": "hold requested",
@@ -562,6 +588,15 @@ def _event_details(event: LifecycleEventSummary) -> str:
     size_decision = event.details.get("size_decision")
     if isinstance(size_decision, str):
         parts.append(size_decision.replace("_", " "))
+    scenes_found = event.details.get("scenes_found")
+    if isinstance(scenes_found, int):
+        parts.append(f"{scenes_found} scenes")
+    chunks_prepared = event.details.get("chunks_prepared")
+    if isinstance(chunks_prepared, int):
+        parts.append(f"{chunks_prepared} chunks")
+    duration_seconds = event.details.get("duration_seconds")
+    if isinstance(duration_seconds, int | float):
+        parts.append(format_compact_duration(timedelta(seconds=float(duration_seconds))))
     return " · ".join(parts) if parts else UNAVAILABLE
 
 
@@ -627,6 +662,36 @@ def _resource_status(metric: ResourceMetricSummary) -> str:
     if metric.health != ResourceHealth.OK:
         return metric.health.value
     return ""
+
+
+def _resource_bar(metric: ResourceMetricSummary) -> Text:
+    ratio = _resource_bar_ratio(metric)
+    if ratio is None:
+        return Text("")
+    width = 12
+    completed = max(0, min(width, round(width * ratio)))
+    bar = Text()
+    bar.append("━" * completed, style=_resource_bar_style(metric.health))
+    bar.append("─" * (width - completed), style="grey35")
+    return bar
+
+
+def _resource_bar_ratio(metric: ResourceMetricSummary) -> float | None:
+    if not metric.available or metric.value is None:
+        return None
+    if metric.unit == "percent":
+        return max(0.0, min(1.0, float(metric.value) / 100.0))
+    if metric.total is not None and metric.total > 0:
+        return max(0.0, min(1.0, float(metric.value) / float(metric.total)))
+    return None
+
+
+def _resource_bar_style(health: ResourceHealth) -> str:
+    if health == ResourceHealth.CRITICAL:
+        return "red"
+    if health == ResourceHealth.WARNING:
+        return "yellow"
+    return "green"
 
 
 def _resource_border(health: ResourceHealth) -> str:
@@ -697,7 +762,19 @@ def _progress_bar(current: int, total: int) -> Progress:
 def _progress_text(progress: AttemptProgressSummary | None) -> str:
     if progress is None:
         return UNAVAILABLE
+    if progress.phase == ProgressPhase.SCENE_DETECTION:
+        return _scene_detection_progress_text(progress)
     parts: list[str] = []
+    if progress.phase == ProgressPhase.ENCODING and (
+        progress.frames_current is None and progress.chunks_current is None
+    ):
+        parts.append("encoding")
+    if (
+        progress.message
+        and progress.message not in parts
+        and (progress.frames_current is None and progress.chunks_current is None)
+    ):
+        parts.append(progress.message)
     if progress.stale and progress.last_update_age_seconds is not None:
         age = format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))
         parts.append(f"last update {age} ago")
@@ -731,6 +808,33 @@ def _progress_text(progress: AttemptProgressSummary | None) -> str:
         return UNAVAILABLE
     if len(parts) > 5:
         return f"{' · '.join(parts[:5])}\n{' · '.join(parts[5:])}"
+    return " · ".join(parts)
+
+
+def _scene_detection_progress_text(progress: AttemptProgressSummary) -> str:
+    parts: list[str] = ["scene detection"]
+    if progress.message:
+        parts.append(progress.message)
+    if progress.frames_current is not None:
+        if progress.frames_total is not None:
+            parts.append(f"scene scan {progress.frames_current}/{progress.frames_total} frames")
+        else:
+            parts.append(f"scene scan {progress.frames_current} frames")
+    if progress.rate_per_second is not None:
+        parts.append(f"{progress.rate_per_second:.1f} fps scan")
+    if progress.speed_ratio is not None:
+        parts.append(f"{progress.speed_ratio:.2f}x")
+    if progress.chunks_total is not None:
+        parts.append(f"{progress.chunks_total} chunks prepared")
+    else:
+        parts.append("chunks pending")
+    if progress.elapsed_seconds is not None:
+        parts.append(
+            f"elapsed {format_compact_duration(timedelta(seconds=progress.elapsed_seconds))}"
+        )
+    if progress.stale and progress.last_update_age_seconds is not None:
+        age = format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))
+        parts.append(f"last update {age} ago")
     return " · ".join(parts)
 
 

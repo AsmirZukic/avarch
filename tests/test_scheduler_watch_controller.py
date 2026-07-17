@@ -89,6 +89,16 @@ def test_watch_controller_detach_has_no_scheduler_side_call() -> None:
     assert job_store.cancelled == []
 
 
+def test_watch_controller_stops_scheduler_in_owner_mode() -> None:
+    scheduler = _SchedulerStore()
+    controller = _controller(scheduler_store=scheduler)
+
+    result = controller.stop(reason="owner dashboard")
+
+    assert result.action == "stop"
+    assert scheduler.calls == [("stop", _NOW, "owner dashboard")]
+
+
 _NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 

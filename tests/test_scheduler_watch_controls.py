@@ -188,6 +188,10 @@ class _Controller:
     def detach(self) -> object:
         return object()
 
+    def stop(self, *, reason: str | None = None) -> object:
+        del reason
+        return object()
+
 
 def _snapshot(*, active_jobs: tuple[ActiveJobSummary, ...]) -> SchedulerSnapshot:
     return SchedulerSnapshot(

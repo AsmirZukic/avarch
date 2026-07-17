@@ -31,6 +31,32 @@ def test_run_scheduler_reraises_worker_cancellation_after_cleanup(
     assert store.released is True
 
 
+def test_run_scheduler_cancels_active_worker_on_outer_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("avarch.application.scheduler_run.SCHEDULER_CONTROL_POLL_SECONDS", 10)
+    store = _Store()
+
+    async def scenario() -> _SlowWorkers:
+        workers = _SlowWorkers()
+        runtime = _SlowRuntime(store, workers)
+        task = asyncio.create_task(
+            run_scheduler(runtime, config=AppConfig(), runner_id="runner")
+        )
+        await asyncio.wait_for(workers.started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return workers
+
+    workers = asyncio.run(scenario())
+
+    assert workers.cancelled is True
+    assert store.interrupted_job_ids == [1]
+    assert store.session_end_reasons == ["interrupted"]
+    assert store.released is True
+
+
 def test_run_scheduler_launches_distinct_resource_classes_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,6 +125,25 @@ def test_run_scheduler_records_drain_completion_reason(
 
     assert store.session_end_reasons == ["drained"]
     assert store.released is True
+
+
+def test_run_scheduler_pauses_and_resumes_active_managed_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("avarch.application.scheduler_run.SCHEDULER_CONTROL_POLL_SECONDS", 0)
+    store = _PauseStore()
+    workers = _PauseWorkers()
+
+    asyncio.run(
+        run_scheduler(
+            _PauseRuntime(store, workers),
+            config=AppConfig(),
+            runner_id="runner",
+        )
+    )
+
+    assert workers.control_calls == ["pause", "resume"]
+    assert store.session_end_reasons == ["stopped"]
 
 
 def test_run_scheduler_releases_lease_when_session_start_fails() -> None:
@@ -187,6 +232,65 @@ class _Store:
         return SchedulerTerminalCounts(completed=0, failed=0, skipped=0)
 
 
+class _PauseStore(_Store):
+    def __init__(self) -> None:
+        super().__init__()
+        self._modes = [
+            SchedulerMode.RUNNING,
+            SchedulerMode.PAUSED,
+            SchedulerMode.RUNNING,
+            SchedulerMode.STOPPING,
+        ]
+
+    def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot:
+        del now
+        mode = self._modes.pop(0) if self._modes else SchedulerMode.STOPPING
+        return SchedulerControlSnapshot(
+            mode=mode,
+            control_generation=0,
+            acknowledged_generation=0,
+            runner_id="runner",
+        )
+
+
+class _PauseWorkers:
+    def __init__(self) -> None:
+        self.control_calls: list[str] = []
+
+    async def run_job(
+        self,
+        *,
+        stage: JobStage,
+        job_id: int,
+        runner_id: str,
+        config: AppConfig,
+    ) -> None:
+        del stage, job_id, runner_id, config
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return
+
+    def pause_active_jobs(self) -> None:
+        self.control_calls.append("pause")
+
+    def resume_active_jobs(self) -> None:
+        self.control_calls.append("resume")
+
+
+class _PauseRuntime:
+    def __init__(self, store: _PauseStore, workers: _PauseWorkers) -> None:
+        self._store = store
+        self._workers = workers
+
+    def store(self, *, config: AppConfig) -> _PauseStore:
+        del config
+        return self._store
+
+    def workers(self) -> _PauseWorkers:
+        return self._workers
+
+
 class _Workers:
     async def run_job(
         self,
@@ -210,6 +314,41 @@ class _Runtime:
 
     def workers(self) -> _Workers:
         return _Workers()
+
+
+class _SlowWorkers:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def run_job(
+        self,
+        *,
+        stage: JobStage,
+        job_id: int,
+        runner_id: str,
+        config: AppConfig,
+    ) -> None:
+        del stage, job_id, runner_id, config
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+class _SlowRuntime:
+    def __init__(self, store: _Store, workers: _SlowWorkers) -> None:
+        self._store = store
+        self._workers = workers
+
+    def store(self, *, config: AppConfig) -> _Store:
+        del config
+        return self._store
+
+    def workers(self) -> _SlowWorkers:
+        return self._workers
 
 
 class _ConcurrentStore:

@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from avarch.adapters import execution as execution_module
 from avarch.adapters.execution import (
     ProcessOutputRecord,
+    _Av1anProgressCollector,  # pyright: ignore[reportPrivateUsage]
     _process_heartbeat_callback,  # pyright: ignore[reportPrivateUsage]
     _validate_mux_temporary_path,  # pyright: ignore[reportPrivateUsage]
     build_av1an_command,
@@ -21,6 +23,7 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser
 from avarch.application.progress import NoopProgressSink, RecordingProgressSink
 from avarch.domain.progress import ProgressPhase, ProgressSource
 from avarch.models.execution import (
@@ -117,7 +120,7 @@ def test_build_av1an_command_uses_fixed_contract_order(tmp_path: Path) -> None:
     ]
 
 
-def test_should_resume_av1an_uses_nonempty_temp_dir(tmp_path: Path) -> None:
+def test_should_resume_av1an_requires_av1an_resume_manifests(tmp_path: Path) -> None:
     spec = Av1anCommandSpec(
         input_path=tmp_path / "movie.vpy",
         video_output_path=tmp_path / "video-only.mkv",
@@ -131,7 +134,11 @@ def test_should_resume_av1an_uses_nonempty_temp_dir(tmp_path: Path) -> None:
     assert should_resume_av1an(spec) is False
     spec.temp_dir.mkdir()
     assert should_resume_av1an(spec) is False
-    (spec.temp_dir / "state.json").write_text("{}", encoding="utf-8")
+    (spec.temp_dir / "scenes.json").write_text("{}", encoding="utf-8")
+    assert should_resume_av1an(spec) is False
+    (spec.temp_dir / "chunks.json").write_text("{}", encoding="utf-8")
+    assert should_resume_av1an(spec) is False
+    (spec.temp_dir / "done.json").write_text("{}", encoding="utf-8")
     assert should_resume_av1an(spec) is True
 
 
@@ -291,7 +298,7 @@ def test_execute_plan_accepts_progress_sink_without_requiring_adapter(
     assert execute_plan(plan, progress_sink=NoopProgressSink()) == "already_complete"
 
 
-def test_execute_plan_reports_encoding_before_av1an_execution(
+def test_execute_plan_reports_scene_detection_before_av1an_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,7 +309,7 @@ def test_execute_plan_reports_encoding_before_av1an_execution(
     assert execute_plan(plan, progress_sink=sink) == "completed"
 
     assert [snapshot.phase for snapshot in sink.snapshots] == [
-        ProgressPhase.ENCODING,
+        ProgressPhase.SCENE_DETECTION,
         ProgressPhase.MUXING,
     ]
 
@@ -322,6 +329,51 @@ def test_process_output_callback_publishes_heartbeat_without_advancement() -> No
     assert snapshot.heartbeat_at == snapshot.observed_at
 
 
+def test_av1an_collector_is_stderr_only_and_never_regresses_after_encoding() -> None:
+    sink = RecordingProgressSink()
+    collector = _Av1anProgressCollector(sink, Av1anTtyProgressParser())
+
+    collector.callback(
+        ProcessOutputRecord(
+            stream="stdout",
+            data=b"Queue 99 Workers 4 Encoder svt-av1 Passes 1\n",
+            text="Queue 99 Workers 4 Encoder svt-av1 Passes 1\n",
+        )
+    )
+    collector.callback(
+        ProcessOutputRecord(
+            stream="stderr",
+            data=b"00:00:01 20/100 (200 fps, eta 1s)\r",
+            text="00:00:01 20/100 (200 fps, eta 1s)\r",
+        )
+    )
+    collector.callback(
+        ProcessOutputRecord(
+            stream="stderr",
+            data=b"Queue 99 Workers 4 Encoder svt-av1 Passes 1\n",
+            text="Queue 99 Workers 4 Encoder svt-av1 Passes 1\n",
+        )
+    )
+    collector.callback(
+        ProcessOutputRecord(
+            stream="stderr",
+            data=b"00:00:02 40/100 (220 fps, eta 1s)\r",
+            text="00:00:02 40/100 (220 fps, eta 1s)\r",
+        )
+    )
+    heartbeat = _process_heartbeat_callback(sink, collector.current_phase)
+    heartbeat(ProcessOutputRecord(stream="stderr", data=b"tick\n", text="tick\n"))
+
+    assert [snapshot.phase for snapshot in sink.snapshots] == [
+        ProgressPhase.SCENE_DETECTION,
+        ProgressPhase.ENCODING,
+        ProgressPhase.ENCODING,
+    ]
+    assert sink.snapshots[0].current == 20
+    assert sink.snapshots[1].message == "99 chunks queued, 4 workers"
+    assert sink.snapshots[-1].source == ProgressSource.PROCESS_HEARTBEAT
+
+
 def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,8 +388,8 @@ def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
     heartbeats = [
         snapshot
         for snapshot in sink.snapshots
-        if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
-        and snapshot.phase == ProgressPhase.ENCODING
+            if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+            and snapshot.phase == ProgressPhase.SCENE_DETECTION
     ]
     assert heartbeats
     assert all(snapshot.current is None for snapshot in heartbeats)
@@ -395,7 +447,7 @@ def test_execute_plan_falls_back_to_phase_progress_when_av1an_parser_disabled(
 
     assert execute_plan(plan, progress_sink=sink) == "completed"
 
-    assert ProgressPhase.ENCODING in [snapshot.phase for snapshot in sink.snapshots]
+    assert ProgressPhase.SCENE_DETECTION in [snapshot.phase for snapshot in sink.snapshots]
     assert not [
         snapshot
         for snapshot in sink.snapshots
@@ -437,6 +489,36 @@ def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
     assert completed.is_set()
     assert any(isinstance(exc, ExecutionInterruptedError) for exc in error_holder)
     assert "terminated" in plan.runtime.av1an_stdout_log.read_text(encoding="utf-8")
+
+
+def test_managed_process_registry_sends_pause_and_resume_to_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[object] = []
+    process = _FakeManagedProcess(pid=4242)
+    registry = execution_module._ManagedProcessRegistry()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(
+        execution_module,
+        "_signal_process_group",
+        lambda observed, signum: signals.append((observed.pid, signum)),
+    )
+
+    registry.register(process)  # type: ignore[arg-type]
+    registry.pause()
+    registry.resume()
+
+    assert signals == [
+        (4242, execution_module.signal.SIGSTOP),
+        (4242, execution_module.signal.SIGCONT),
+    ]
+
+
+class _FakeManagedProcess:
+    def __init__(self, *, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self) -> None:
+        return None
 
 
 def test_preflight_rejects_panicking_av1an_version_output(

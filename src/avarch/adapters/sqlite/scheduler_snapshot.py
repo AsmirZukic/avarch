@@ -39,7 +39,7 @@ from avarch.application.scheduler_snapshot import (
     project_workflow_steps,
 )
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
-from avarch.domain.progress import ProgressUnit
+from avarch.domain.progress import ProgressPhase, ProgressUnit
 from avarch.domain.scheduler import ActiveJob, ResourceCapacity, SchedulerMode, resource_for_stage
 
 _ACTIVE_STATUSES = {
@@ -153,7 +153,7 @@ class SqliteSchedulerSnapshotQuery:
     def _active_av1an_workers_configured(self) -> int | None:
         rows = self._session.exec(
             select(JobAttempt.command_json)
-            .where(JobAttempt.stage == JobStage.ENCODE)
+            .where(col(JobAttempt.stage).in_([JobStage.SCENE_DETECT, JobStage.ENCODE]))
             .where(JobAttempt.status == AttemptStatus.RUNNING)
         ).all()
         workers = tuple(
@@ -390,28 +390,47 @@ def _active_job_summary(
     captured_at: datetime,
 ) -> ActiveJobSummary:
     attempt_status = AttemptStatus(attempt.status) if attempt is not None else None
+    job_stage = JobStage(job.stage)
+    progress = _progress_for_active_stage(job_stage, progress)
+    attempt_progress = (
+        _attempt_progress_summary(
+            attempt=attempt,
+            progress=progress,
+            captured_at=captured_at,
+            job_stage=job_stage,
+        )
+        if attempt is not None
+        else None
+    )
     return ActiveJobSummary(
         job_id=_required_id(job.id),
         source_path=media_file.path,
         profile_name=job.profile_name,
         status=JobStatus(job.status),
-        stage=JobStage(job.stage),
+        stage=job_stage,
         priority=job.priority,
         queued_at=job.created_at,
         started_at=job.started_at,
-        attempt=_attempt_progress_summary(
-            attempt=attempt,
-            progress=progress,
-            captured_at=captured_at,
-        )
-        if attempt is not None
-        else None,
+        attempt=attempt_progress,
         workflow_steps=project_workflow_steps(
             job_status=JobStatus(job.status),
-            job_stage=JobStage(job.stage),
+            job_stage=job_stage,
             attempt_status=attempt_status,
         ),
     )
+
+
+def _progress_for_active_stage(
+    job_stage: JobStage,
+    progress: JobAttemptProgress | None,
+) -> JobAttemptProgress | None:
+    if (
+        job_stage == JobStage.ENCODE
+        and progress is not None
+        and ProgressPhase(progress.phase) == ProgressPhase.SCENE_DETECTION
+    ):
+        return None
+    return progress
 
 
 def _session_run_summary(session: SchedulerSession) -> SchedulerSessionRunSummary:
@@ -451,7 +470,8 @@ def _blocked_reason(job: Job, media_file: MediaFile) -> JobEligibilityReason | N
     if MediaFileStatus(media_file.status) == MediaFileStatus.MISSING:
         return JobEligibilityReason.SOURCE_MISSING
     if (
-        JobStage(job.stage) in {JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE}
+        JobStage(job.stage)
+        in {JobStage.SCENE_DETECT, JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE}
         and job.plan_path is None
     ):
         return JobEligibilityReason.PLAN_MISSING
@@ -532,6 +552,7 @@ def _attempt_progress_summary(
     attempt: JobAttempt,
     progress: JobAttemptProgress | None,
     captured_at: datetime,
+    job_stage: JobStage | None = None,
 ) -> AttemptProgressSummary:
     frames_current: int | None = None
     frames_total: int | None = None
@@ -557,6 +578,8 @@ def _attempt_progress_summary(
         attempt_id=_required_id(attempt.id),
         attempt_number=attempt.attempt_number,
         status=AttemptStatus(attempt.status),
+        phase=_attempt_phase(progress=progress, job_stage=job_stage),
+        message=_attempt_progress_message(progress=progress, job_stage=job_stage),
         frames_current=frames_current,
         frames_total=frames_total,
         rate_per_second=rate_per_second,
@@ -575,6 +598,30 @@ def _attempt_progress_summary(
         ),
         last_update_age_seconds=last_update_age_seconds,
     )
+
+
+def _attempt_phase(
+    *,
+    progress: JobAttemptProgress | None,
+    job_stage: JobStage | None,
+) -> ProgressPhase | None:
+    if progress is not None:
+        return ProgressPhase(progress.phase)
+    if job_stage == JobStage.ENCODE:
+        return ProgressPhase.ENCODING
+    return None
+
+
+def _attempt_progress_message(
+    *,
+    progress: JobAttemptProgress | None,
+    job_stage: JobStage | None,
+) -> str | None:
+    if progress is not None:
+        return progress.message
+    if job_stage == JobStage.ENCODE:
+        return "telemetry pending"
+    return None
 
 
 def _eta_seconds(

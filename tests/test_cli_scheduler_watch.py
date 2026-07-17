@@ -135,6 +135,20 @@ def test_scheduler_watch_live_uses_alternate_screen(monkeypatch, tmp_path: Path)
     assert seen["ran"] is True
 
 
+def test_live_scheduler_watch_sink_flushes_each_render() -> None:
+    seen: dict[str, object] = {}
+
+    class FakeLive:
+        def update(self, renderable, *, refresh: bool) -> None:  # type: ignore[no-untyped-def]
+            seen["renderable"] = renderable
+            seen["refresh"] = refresh
+
+    sink = cli_module._LiveSchedulerWatchSink(FakeLive())
+    sink.render("frame")
+
+    assert seen == {"renderable": "frame", "refresh": True}
+
+
 def test_scheduler_watch_missing_workspace_uses_normal_workspace_error(tmp_path: Path) -> None:
     result = runner.invoke(app, ["scheduler", "watch", "--once"])
 

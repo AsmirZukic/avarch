@@ -7,6 +7,7 @@ from datetime import datetime
 
 from sqlmodel import Session
 
+from avarch.adapters.execution import pause_managed_processes, resume_managed_processes
 from avarch.adapters.job_preparation import encoded_output_exists, require_id
 from avarch.adapters.scheduler_workers import (
     execute_cleanup_job,
@@ -224,11 +225,18 @@ class SchedulerWorkerAdapter:
         worker = {
             JobStage.PROBE: execute_probe_job,
             JobStage.PLAN: execute_plan_job,
+            JobStage.SCENE_DETECT: execute_encode_job,
             JobStage.ENCODE: execute_encode_job,
             JobStage.VALIDATE: execute_validation_job,
             JobStage.CLEANUP: execute_cleanup_job,
         }[stage]
         await worker(job_id=job_id, runner_id=runner_id, config=config)
+
+    def pause_active_jobs(self) -> None:
+        pause_managed_processes()
+
+    def resume_active_jobs(self) -> None:
+        resume_managed_processes()
 
 
 def _capacity_usage(

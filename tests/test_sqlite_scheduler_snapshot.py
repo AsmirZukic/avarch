@@ -169,8 +169,63 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.written_output_bytes == 800_000
     assert snapshot.active_jobs[0].attempt.stale is True
     assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
-    assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
+    assert snapshot.active_jobs[0].workflow_steps[3].state.value == "active"
     assert query_count <= 13
+
+
+def test_scheduler_snapshot_does_not_rewind_encode_job_to_scene_detect_for_stale_scene_progress(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+    with Session(engine) as session:
+        job = _job(
+            session,
+            path="/media/active-scene-detect.mkv",
+            status=JobStatus.ENCODING,
+            stage=JobStage.ENCODE,
+            started_at=now,
+        )
+        attempt = _attempt(
+            job,
+            attempt_number=1,
+            status=AttemptStatus.RUNNING,
+            started_at=now,
+            stage=JobStage.ENCODE,
+            resource_class=ResourceClass.HEAVY_AV1AN,
+        )
+        session.add(attempt)
+        session.flush()
+        SqliteProgressStore(session).save_snapshot(
+            attempt_id=attempt.id or 0,
+            snapshot=_progress(
+                now=now,
+                current=40,
+                total=100,
+                phase=ProgressPhase.SCENE_DETECTION,
+            ),
+            persisted_at=now,
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        snapshot = SqliteSchedulerSnapshotQuery(
+            session,
+            workspace_root=str(tmp_path),
+            now=lambda: now,
+        ).snapshot()
+
+    active = snapshot.active_jobs[0]
+    assert active.stage == JobStage.ENCODE
+    assert active.attempt is not None
+    assert active.attempt.phase == ProgressPhase.ENCODING
+    assert active.attempt.message == "telemetry pending"
+    assert active.attempt.frames_current is None
+    assert active.workflow_steps[2].stage == JobStage.SCENE_DETECT
+    assert active.workflow_steps[2].state.value == "complete"
+    assert active.workflow_steps[3].stage == JobStage.ENCODE
+    assert active.workflow_steps[3].state.value == "active"
 
 
 def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligible(
@@ -631,6 +686,7 @@ def _progress(
     now: datetime,
     current: int,
     total: int,
+    phase: ProgressPhase = ProgressPhase.ENCODING,
     chunks_current: int | None = None,
     chunks_total: int | None = None,
     bitrate_kbps: int | None = None,
@@ -638,7 +694,7 @@ def _progress(
     written_output_bytes: int | None = None,
 ) -> ProgressSnapshot:
     return ProgressSnapshot(
-        phase=ProgressPhase.ENCODING,
+        phase=phase,
         current=current,
         total=total,
         unit=ProgressUnit.FRAMES,
