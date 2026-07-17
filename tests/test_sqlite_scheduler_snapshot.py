@@ -107,7 +107,16 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
         )
         progress_store.save_snapshot(
             attempt_id=current_attempt.id or 0,
-            snapshot=_progress(now=now, current=40, total=100),
+            snapshot=_progress(
+                now=now - timedelta(seconds=18),
+                current=40,
+                total=100,
+                chunks_current=2,
+                chunks_total=5,
+                bitrate_kbps=1500,
+                estimated_output_bytes=2_000_000,
+                written_output_bytes=800_000,
+            ),
             persisted_at=now,
         )
         session.commit()
@@ -149,6 +158,13 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.frames_current == 40
     assert snapshot.active_jobs[0].attempt.frames_total == 100
     assert snapshot.active_jobs[0].attempt.eta_seconds == 30
+    assert snapshot.active_jobs[0].attempt.chunks_current == 2
+    assert snapshot.active_jobs[0].attempt.chunks_total == 5
+    assert snapshot.active_jobs[0].attempt.bitrate_kbps == 1500
+    assert snapshot.active_jobs[0].attempt.estimated_output_bytes == 2_000_000
+    assert snapshot.active_jobs[0].attempt.written_output_bytes == 800_000
+    assert snapshot.active_jobs[0].attempt.stale is True
+    assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
     assert snapshot.active_jobs[0].workflow_steps[2].state.value == "active"
     assert query_count <= 9
 
@@ -377,7 +393,17 @@ def _attempt(
     )
 
 
-def _progress(*, now: datetime, current: int, total: int) -> ProgressSnapshot:
+def _progress(
+    *,
+    now: datetime,
+    current: int,
+    total: int,
+    chunks_current: int | None = None,
+    chunks_total: int | None = None,
+    bitrate_kbps: int | None = None,
+    estimated_output_bytes: int | None = None,
+    written_output_bytes: int | None = None,
+) -> ProgressSnapshot:
     return ProgressSnapshot(
         phase=ProgressPhase.ENCODING,
         current=current,
@@ -391,4 +417,9 @@ def _progress(*, now: datetime, current: int, total: int) -> ProgressSnapshot:
         observed_at=now.replace(tzinfo=None),
         heartbeat_at=now.replace(tzinfo=None),
         advanced_at=now.replace(tzinfo=None),
+        chunks_current=chunks_current,
+        chunks_total=chunks_total,
+        bitrate_kbps=bitrate_kbps,
+        estimated_output_bytes=estimated_output_bytes,
+        written_output_bytes=written_output_bytes,
     )

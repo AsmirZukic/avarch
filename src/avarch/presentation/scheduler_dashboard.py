@@ -17,7 +17,7 @@ from avarch.application.scheduler_snapshot import (
     WorkflowStepState,
     WorkflowStepSummary,
 )
-from avarch.cli_rendering import UNAVAILABLE, format_compact_duration
+from avarch.cli_rendering import UNAVAILABLE, format_compact_duration, format_size
 
 
 class DashboardMode(StrEnum):
@@ -157,18 +157,16 @@ def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.active_jobs:
         return Panel("No active jobs", title="Active Jobs", border_style="grey50")
 
-    table = Table(expand=True, show_lines=False)
-    table.add_column("File", overflow="fold")
-    table.add_column("Profile")
-    table.add_column("Workflow")
-    table.add_column("Progress")
+    table = Table.grid(expand=True, padding=(0, 2))
+    table.add_column(style="bold", width=10)
+    table.add_column(ratio=1)
     for job in snapshot.active_jobs:
-        table.add_row(
-            _display_path(job.source_path),
-            job.profile_name or UNAVAILABLE,
-            _workflow_steps(job.workflow_steps),
-            _progress(job.attempt),
-        )
+        table.add_row("File", _display_path(job.source_path))
+        table.add_row("Profile", job.profile_name or UNAVAILABLE)
+        table.add_row("Workflow", _workflow_steps(job.workflow_steps))
+        table.add_row("Progress", _progress(job.attempt))
+        if job != snapshot.active_jobs[-1]:
+            table.add_row("", "")
     return Panel(table, title="Active Jobs", border_style="yellow")
 
 
@@ -253,6 +251,10 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
     if progress is None:
         return UNAVAILABLE
     parts: list[str] = []
+    if progress.stale and progress.last_update_age_seconds is not None:
+        parts.append(
+            f"last update {format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))} ago"
+        )
     if progress.frames_current is not None:
         if progress.frames_total is not None:
             parts.append(f"{progress.frames_current}/{progress.frames_total} frames")
@@ -262,13 +264,28 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
         parts.append(f"{progress.rate_per_second:.1f} fps")
     if progress.speed_ratio is not None:
         parts.append(f"{progress.speed_ratio:.2f}x")
+    if progress.chunks_current is not None:
+        if progress.chunks_total is not None:
+            parts.append(f"{progress.chunks_current}/{progress.chunks_total} chunks")
+        else:
+            parts.append(f"{progress.chunks_current} chunks")
+    if progress.bitrate_kbps is not None:
+        parts.append(f"{progress.bitrate_kbps} Kbps")
+    if progress.estimated_output_bytes is not None:
+        parts.append(f"est. {format_size(progress.estimated_output_bytes)}")
+    if progress.written_output_bytes is not None:
+        parts.append(f"written {format_size(progress.written_output_bytes)}")
     if progress.eta_seconds is not None:
         parts.append(f"ETA {format_compact_duration(timedelta(seconds=progress.eta_seconds))}")
     if progress.elapsed_seconds is not None:
         parts.append(
             f"elapsed {format_compact_duration(timedelta(seconds=progress.elapsed_seconds))}"
         )
-    return " · ".join(parts) if parts else UNAVAILABLE
+    if not parts:
+        return UNAVAILABLE
+    if len(parts) > 5:
+        return f"{' · '.join(parts[:5])}\n{' · '.join(parts[5:])}"
+    return " · ".join(parts)
 
 
 def _display_path(path: str) -> str:

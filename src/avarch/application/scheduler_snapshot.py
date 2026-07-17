@@ -86,6 +86,13 @@ class AttemptProgressSummary(SnapshotModel):
     eta_seconds: int | None = Field(default=None, ge=0, strict=True)
     elapsed_seconds: int | None = Field(default=None, ge=0, strict=True)
     observed_at: datetime | None = None
+    chunks_current: int | None = Field(default=None, ge=0, strict=True)
+    chunks_total: int | None = Field(default=None, ge=0, strict=True)
+    bitrate_kbps: int | None = Field(default=None, ge=0, strict=True)
+    estimated_output_bytes: int | None = Field(default=None, ge=0, strict=True)
+    written_output_bytes: int | None = Field(default=None, ge=0, strict=True)
+    stale: bool = False
+    last_update_age_seconds: int | None = Field(default=None, ge=0, strict=True)
 
 
 class ActiveJobSummary(SnapshotModel):

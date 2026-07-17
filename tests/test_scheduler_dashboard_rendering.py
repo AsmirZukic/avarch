@@ -37,8 +37,15 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "encode" in output
     assert "100/200 frames" in output
     assert "12.5 fps" in output
+    assert "2/5 chunks" in output
+    assert "1500 Kbps" in output
+    assert "est." in output
+    assert "1.9 MiB" in output
+    assert "written 781.2 KiB" in output
     assert "ETA 8s" in output
     assert "elapsed 1m 30s" in output
+    assert "last update" in output
+    assert "18s ago" in output
     assert "next.mkv" in output
     assert "Capacity" in output
     assert "encode slots" in output
@@ -155,8 +162,15 @@ def _active_job(job_id: int, source_path: str) -> ActiveJobSummary:
             frames_total=200,
             rate_per_second=12.5,
             speed_ratio=1.2,
+            chunks_current=2,
+            chunks_total=5,
+            bitrate_kbps=1500,
+            estimated_output_bytes=2_000_000,
+            written_output_bytes=800_000,
             eta_seconds=8,
             elapsed_seconds=90,
+            stale=True,
+            last_update_age_seconds=18,
         ),
         workflow_steps=(
             WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),
