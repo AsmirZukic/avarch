@@ -74,7 +74,7 @@ class SqliteSchedulerSnapshotQuery:
             pipeline=self._pipeline_summary(),
             session=self._session_summary(),
             active_jobs=self._active_jobs(captured_at=captured_at),
-            capacity=CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0),
+            capacity=self._capacity_summary(now=captured_at),
             upcoming_jobs=self._upcoming_jobs(),
             recent_events=self._recent_events(),
             alerts=self._alerts(now=captured_at),
@@ -127,6 +127,22 @@ class SqliteSchedulerSnapshotQuery:
             size_rejected=counts[JobStatus.SIZE_REJECTED],
             cancelled=counts[JobStatus.CANCELLED],
             held=counts[JobStatus.HELD],
+        )
+
+    def _capacity_summary(self, *, now: datetime) -> CapacitySummary:
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.capacity_cheap_workers is None:
+            return CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0)
+        stale = state.runner_id is not None and not lease_active(state, now=now)
+        return CapacitySummary(
+            cheap_workers=state.capacity_cheap_workers,
+            cheap_active=state.capacity_cheap_active or 0,
+            av1an_jobs=state.capacity_av1an_jobs or 0,
+            av1an_active=state.capacity_av1an_active or 0,
+            file_ops=state.capacity_file_ops or 0,
+            file_ops_active=state.capacity_file_ops_active or 0,
+            observed_at=state.capacity_observed_at,
+            stale=stale,
         )
 
     def _active_jobs(self, *, captured_at: datetime) -> tuple[ActiveJobSummary, ...]:

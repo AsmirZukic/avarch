@@ -31,6 +31,16 @@ class TerminalJobCounts:
     skipped: int
 
 
+@dataclass(frozen=True, slots=True)
+class SchedulerCapacityUsage:
+    cheap_workers: int
+    cheap_active: int
+    av1an_jobs: int
+    av1an_active: int
+    file_ops: int
+    file_ops_active: int
+
+
 def get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:
     state = session.get(SchedulerState, 1)
     if state is None:
@@ -46,6 +56,7 @@ def acquire_scheduler_lease(
     runner_id: str,
     now: datetime,
     resume: bool = False,
+    capacity: SchedulerCapacityUsage | None = None,
 ) -> SchedulerState:
     state = get_or_create_scheduler_state(session, now=now)
     if (
@@ -79,6 +90,8 @@ def acquire_scheduler_lease(
     state.runner_id = runner_id
     state.heartbeat_at = now
     state.lease_expires_at = now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)
+    if capacity is not None:
+        apply_scheduler_capacity(state, capacity=capacity, now=now)
     state.updated_at = now
     session.add(state)
     return state
@@ -89,12 +102,15 @@ def renew_scheduler_lease(
     *,
     runner_id: str,
     now: datetime,
+    capacity: SchedulerCapacityUsage | None = None,
 ) -> None:
     state = get_or_create_scheduler_state(session, now=now)
     if state.runner_id != runner_id:
         raise SchedulerLeaseLostError("Scheduler lease belongs to another runner.")
     state.heartbeat_at = now
     state.lease_expires_at = now + timedelta(seconds=SCHEDULER_LEASE_SECONDS)
+    if capacity is not None:
+        apply_scheduler_capacity(state, capacity=capacity, now=now)
     state.updated_at = now
     session.add(state)
 
@@ -111,6 +127,18 @@ def release_scheduler_lease(
     state.runner_id = None
     state.lease_expires_at = None
     state.heartbeat_at = now
+    if state.capacity_cheap_workers is not None:
+        state.capacity_cheap_active = 0
+    if state.capacity_av1an_jobs is not None:
+        state.capacity_av1an_active = 0
+    if state.capacity_file_ops is not None:
+        state.capacity_file_ops_active = 0
+    if (
+        state.capacity_cheap_workers is not None
+        or state.capacity_av1an_jobs is not None
+        or state.capacity_file_ops is not None
+    ):
+        state.capacity_observed_at = now
     if state.mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING}:
         state.mode = SchedulerMode.RUNNING
         state.control_requested_at = None
@@ -118,6 +146,21 @@ def release_scheduler_lease(
         state.control_reason = None
     state.updated_at = now
     session.add(state)
+
+
+def apply_scheduler_capacity(
+    state: SchedulerState,
+    *,
+    capacity: SchedulerCapacityUsage,
+    now: datetime,
+) -> None:
+    state.capacity_cheap_workers = capacity.cheap_workers
+    state.capacity_cheap_active = capacity.cheap_active
+    state.capacity_av1an_jobs = capacity.av1an_jobs
+    state.capacity_av1an_active = capacity.av1an_active
+    state.capacity_file_ops = capacity.file_ops
+    state.capacity_file_ops_active = capacity.file_ops_active
+    state.capacity_observed_at = now
 
 
 def acknowledge_scheduler_control(

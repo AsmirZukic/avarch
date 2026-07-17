@@ -133,6 +133,8 @@ class CapacitySummary(SnapshotModel):
     file_ops: int = Field(ge=0, strict=True)
     file_ops_active: int = Field(default=0, ge=0, strict=True)
     av1an_workers_configured: int | None = Field(default=None, ge=0, strict=True)
+    observed_at: datetime | None = None
+    stale: bool = False
 
 
 class UpcomingJobSummary(SnapshotModel):

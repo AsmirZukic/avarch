@@ -16,6 +16,7 @@ from avarch.domain.scheduler import (
     ResourceCapacity,
     SchedulerMode,
     jobs_to_cancel,
+    resource_for_stage,
     scheduler_can_launch_jobs,
     select_launchable_jobs,
 )
@@ -50,14 +51,37 @@ class SchedulerTerminalCounts:
     skipped: int
 
 
+@dataclass(frozen=True, slots=True)
+class SchedulerCapacityUsage:
+    cheap_workers: int
+    cheap_active: int
+    av1an_jobs: int
+    av1an_active: int
+    file_ops: int
+    file_ops_active: int
+
+
 class SchedulerRunStore(Protocol):
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None: ...
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None: ...
 
     def start_session(self, *, runner_id: str, now: datetime) -> int: ...
 
     def recover_abandoned_jobs(self, *, now: datetime) -> None: ...
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None: ...
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None: ...
 
     def load_control_snapshot(self, *, now: datetime) -> SchedulerControlSnapshot: ...
 
@@ -123,7 +147,15 @@ async def run_scheduler(
     resume: bool = False,
 ) -> SchedulerRunSummary:
     store = runtime.store(config=config)
-    store.acquire_lease(runner_id=runner_id, now=utc_now(), resume=resume)
+    resource_capacity = _resource_capacity(config)
+    active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
+    active_job_ids: set[int] = set()
+    store.acquire_lease(
+        runner_id=runner_id,
+        now=utc_now(),
+        resume=resume,
+        capacity=_capacity_usage(resource_capacity, _active_jobs(active)),
+    )
     session_id: int | None = None
     end_reason = "normal"
 
@@ -133,17 +165,18 @@ async def run_scheduler(
         store.recover_abandoned_jobs(now=utc_now())
 
         workers = runtime.workers()
-        active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
-        active_job_ids: set[int] = set()
         last_heartbeat = utc_now()
         idle_since: datetime | None = None
         current_mode = SchedulerMode.RUNNING
-        resource_capacity = _resource_capacity(config)
 
         while True:
             now = utc_now()
             if (now - last_heartbeat).total_seconds() >= SCHEDULER_HEARTBEAT_SECONDS:
-                store.renew_lease(runner_id=runner_id, now=now)
+                store.renew_lease(
+                    runner_id=runner_id,
+                    now=now,
+                    capacity=_capacity_usage(resource_capacity, _active_jobs(active)),
+                )
                 last_heartbeat = now
 
             done = [task for task in active if task.done()]
@@ -155,6 +188,13 @@ async def run_scheduler(
                 except asyncio.CancelledError:
                     store.interrupt_running_job(job_id=job_id, now=utc_now())
                     raise
+            if done:
+                store.renew_lease(
+                    runner_id=runner_id,
+                    now=utc_now(),
+                    capacity=_capacity_usage(resource_capacity, _active_jobs(active)),
+                )
+                last_heartbeat = utc_now()
 
             snapshot = store.load_control_snapshot(now=now)
             if snapshot.runner_id != runner_id:
@@ -173,6 +213,7 @@ async def run_scheduler(
                 _cancel_active_tasks(active, cancel_ids)
 
             if scheduler_can_launch_jobs(current_mode):
+                before_launch = len(active)
                 _launch_claimable_jobs(
                     active=active,
                     active_job_ids=active_job_ids,
@@ -183,6 +224,13 @@ async def run_scheduler(
                     active_jobs_snapshot=active_jobs_snapshot,
                     claimable=store.claimable_jobs(active_job_ids=active_job_ids),
                 )
+                if len(active) != before_launch:
+                    store.renew_lease(
+                        runner_id=runner_id,
+                        now=utc_now(),
+                        capacity=_capacity_usage(resource_capacity, _active_jobs(active)),
+                    )
+                    last_heartbeat = utc_now()
 
             if active:
                 await asyncio.sleep(SCHEDULER_CONTROL_POLL_SECONDS)
@@ -238,6 +286,31 @@ def _resource_capacity(config: AppConfig) -> ResourceCapacity:
 
 def _active_jobs(active: dict[asyncio.Task[Any], tuple[int, JobStage]]) -> list[ActiveJob]:
     return [ActiveJob(job_id=job_id, stage=stage) for job_id, stage in active.values()]
+
+
+def _capacity_usage(
+    capacity: ResourceCapacity,
+    active_jobs: list[ActiveJob],
+) -> SchedulerCapacityUsage:
+    cheap_active = 0
+    av1an_active = 0
+    file_ops_active = 0
+    for job in active_jobs:
+        resource_class = resource_for_stage(job.stage)
+        if resource_class.value == "cheap":
+            cheap_active += 1
+        elif resource_class.value == "heavy_av1an":
+            av1an_active += 1
+        elif resource_class.value == "file_op":
+            file_ops_active += 1
+    return SchedulerCapacityUsage(
+        cheap_workers=capacity.cheap_workers,
+        cheap_active=cheap_active,
+        av1an_jobs=capacity.av1an_jobs,
+        av1an_active=av1an_active,
+        file_ops=capacity.file_ops,
+        file_ops_active=file_ops_active,
+    )
 
 
 def _cancel_active_tasks(

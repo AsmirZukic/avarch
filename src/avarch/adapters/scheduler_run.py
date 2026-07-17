@@ -30,6 +30,7 @@ from avarch.adapters.sqlite.scheduler_state import (
 from avarch.application.promotion import PromotionWorkflow
 from avarch.application.scheduler_run import (
     SchedulerAlreadyRunningError,
+    SchedulerCapacityUsage,
     SchedulerControlError,
     SchedulerControlSnapshot,
     SchedulerLeaseLostError,
@@ -71,7 +72,14 @@ class SqliteSchedulerRunStore:
         self._claimable_stages = claimable_stages
         self._workspace_id = config.database.url
 
-    def acquire_lease(self, *, runner_id: str, now: datetime, resume: bool) -> None:
+    def acquire_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        resume: bool,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         try:
             with Session(self._engine) as session, session.begin():
                 scheduler_state_adapter.acquire_scheduler_lease(
@@ -79,6 +87,7 @@ class SqliteSchedulerRunStore:
                     runner_id=runner_id,
                     now=now,
                     resume=resume,
+                    capacity=_capacity_usage(capacity),
                 )
         except scheduler_state_adapter.SchedulerAlreadyRunningError as exc:
             raise SchedulerAlreadyRunningError(str(exc)) from exc
@@ -108,13 +117,20 @@ class SqliteSchedulerRunStore:
                 encoded_output_exists=encoded_output_exists,
             )
 
-    def renew_lease(self, *, runner_id: str, now: datetime) -> None:
+    def renew_lease(
+        self,
+        *,
+        runner_id: str,
+        now: datetime,
+        capacity: SchedulerCapacityUsage,
+    ) -> None:
         try:
             with Session(self._engine) as session, session.begin():
                 scheduler_state_adapter.renew_scheduler_lease(
                     session,
                     runner_id=runner_id,
                     now=now,
+                    capacity=_capacity_usage(capacity),
                 )
         except scheduler_state_adapter.SchedulerLeaseLostError as exc:
             raise SchedulerLeaseLostError(str(exc)) from exc
@@ -213,3 +229,16 @@ class SchedulerWorkerAdapter:
             JobStage.CLEANUP: execute_cleanup_job,
         }[stage]
         await worker(job_id=job_id, runner_id=runner_id, config=config)
+
+
+def _capacity_usage(
+    capacity: SchedulerCapacityUsage,
+) -> scheduler_state_adapter.SchedulerCapacityUsage:
+    return scheduler_state_adapter.SchedulerCapacityUsage(
+        cheap_workers=capacity.cheap_workers,
+        cheap_active=capacity.cheap_active,
+        av1an_jobs=capacity.av1an_jobs,
+        av1an_active=capacity.av1an_active,
+        file_ops=capacity.file_ops,
+        file_ops_active=capacity.file_ops_active,
+    )

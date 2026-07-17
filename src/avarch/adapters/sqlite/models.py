@@ -355,4 +355,12 @@ class SchedulerState(SQLModel, table=True):
     heartbeat_at: datetime | None = None
     lease_expires_at: datetime | None = None
 
+    capacity_cheap_workers: int | None = None
+    capacity_cheap_active: int | None = None
+    capacity_av1an_jobs: int | None = None
+    capacity_av1an_active: int | None = None
+    capacity_file_ops: int | None = None
+    capacity_file_ops_active: int | None = None
+    capacity_observed_at: datetime | None = None
+
     updated_at: datetime
