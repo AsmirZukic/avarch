@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -34,7 +35,7 @@ def test_byte_and_frame_values_are_strict_integers_not_formatted_strings() -> No
             attempt_id=1,
             attempt_number=1,
             status=AttemptStatus.RUNNING,
-            frames_current="1,024",
+            frames_current=cast(Any, "1,024"),
         )
 
     with pytest.raises(ValidationError):
@@ -42,7 +43,7 @@ def test_byte_and_frame_values_are_strict_integers_not_formatted_strings() -> No
             attempt_id=1,
             attempt_number=1,
             status=AttemptStatus.RUNNING,
-            eta_seconds="11.8/15.6G",
+            eta_seconds=cast(Any, "11.8/15.6G"),
         )
 
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import func
+from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.models import (
@@ -169,7 +171,7 @@ class SqliteSchedulerSnapshotQuery:
         rows = list(
             self._session.exec(
                 select(Job, MediaFile)
-                .join(MediaFile, MediaFile.id == Job.media_file_id)
+                .join(MediaFile, cast(ColumnElement[bool], MediaFile.id == Job.media_file_id))
                 .where(col(Job.status).in_(_ACTIVE_STATUSES))
                 .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
             ).all()
@@ -188,7 +190,7 @@ class SqliteSchedulerSnapshotQuery:
                 job=job,
                 media_file=media_file,
                 attempt=attempts_by_job.get(job.id),
-                progress=progress_by_attempt.get(attempts_by_job[job.id].id)
+                progress=progress_by_attempt.get(_required_id(attempts_by_job[job.id].id))
                 if job.id in attempts_by_job and attempts_by_job[job.id].id is not None
                 else None,
                 captured_at=captured_at,
@@ -286,7 +288,7 @@ class SqliteSchedulerSnapshotQuery:
     def _blocked_jobs(self) -> tuple[BlockedJobSummary, ...]:
         rows = self._session.exec(
             select(Job, MediaFile)
-            .join(MediaFile, MediaFile.id == Job.media_file_id)
+            .join(MediaFile, cast(ColumnElement[bool], MediaFile.id == Job.media_file_id))
             .where(
                 col(Job.status).not_in(
                     [JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED]
@@ -524,15 +526,16 @@ def _av1an_workers_from_command(command_json: str | None) -> int | None:
     if command_json is None:
         return None
     try:
-        value = json.loads(command_json)
+        value: object = json.loads(command_json)
     except json.JSONDecodeError:
         return None
     if not isinstance(value, dict):
         return None
-    argv = value.get("av1an_argv")
+    payload = cast(dict[str, object], value)
+    argv = payload.get("av1an_argv")
     if not isinstance(argv, list):
         return None
-    args = [str(arg) for arg in argv]
+    args = [str(arg) for arg in cast(list[object], argv)]
     try:
         index = args.index("--workers")
     except ValueError:
@@ -656,7 +659,8 @@ def _required_id(value: int | None) -> int:
 def _event_details(details_json: str | None) -> dict[str, object]:
     if details_json is None:
         return {}
-    value = json.loads(details_json)
+    value: object = json.loads(details_json)
     if isinstance(value, dict):
-        return value
+        details = cast(dict[object, object], value)
+        return {str(key): item for key, item in details.items()}
     return {"value": value}

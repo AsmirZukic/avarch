@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import structlog
 import typer
@@ -46,6 +46,7 @@ from avarch.application.job_control import (
 )
 from avarch.application.job_views import (
     CurrentJobProgressView,
+    JobDetails,
     WorkflowJobItem,
     current_job_progress,
     job_details,
@@ -136,7 +137,11 @@ from avarch.application.scheduler_watch import (
     SchedulerWatchLoop,
     validate_live_watch_terminal,
 )
-from avarch.application.scheduler_watch_controller import SchedulerWatchController, WatchLogPaths
+from avarch.application.scheduler_watch_controller import (
+    SchedulerWatchController,
+    WatchControlResult,
+    WatchLogPaths,
+)
 from avarch.application.scheduler_watch_keys import PosixKeySource
 from avarch.application.validation_summary import format_validation_report_summary
 from avarch.application.vapoursynth_environment import (
@@ -259,12 +264,6 @@ class CliWorkspace:
     runtime_config: AppConfig
     workspace: WorkspaceContext
     workspace_root: Path
-
-
-@dataclass(frozen=True, slots=True)
-class SchedulerProgressRow:
-    label: str
-    view: JobProgressView
 
 
 app = typer.Typer(
@@ -874,42 +873,6 @@ async def _render_scheduler_live_progress(database_url: str, *, workspace_root: 
             await asyncio.sleep(DEFAULT_PROGRESS_WATCH_POLL_INTERVAL)
 
 
-def _active_scheduler_progress_rows(database_url: str) -> list[SchedulerProgressRow]:
-    active_statuses = {
-        JobStatus.ENCODING,
-        JobStatus.VALIDATING,
-        JobStatus.PROMOTING,
-        JobStatus.CLEANING,
-    }
-    now = datetime.now(UTC)
-    with db_session(database_url) as session:
-        store = job_view_store(session)
-        jobs = list_jobs(
-            store,
-            statuses=active_statuses,
-            stages=None,
-            profile=None,
-            limit=None,
-        )
-        rows: list[SchedulerProgressRow] = []
-        for job in jobs:
-            if job.id is None:
-                continue
-            view = job_progress_view(current_job_progress(store, job_id=job.id), now=now)
-            if view is not None:
-                rows.append(SchedulerProgressRow(label=job.file_name, view=view))
-        return rows
-
-
-def _scheduler_progress_renderable(rows: list[SchedulerProgressRow]) -> Group:
-    if not rows:
-        return Group(Text("Scheduler running", style="bold"), Text("Waiting for active jobs..."))
-    renderables: list[RenderableType] = [Text("Scheduler running", style="bold")]
-    for row in rows:
-        renderables.append(_rich_progress_renderable(row.view, label=row.label))
-    return Group(*renderables)
-
-
 @queue_app.command("retry")
 def queue_retry_command(
     status: Annotated[
@@ -1218,19 +1181,19 @@ class _LiveSchedulerWatchController:
         self._database_url = database_url
         self._actor = cli_actor()
 
-    def pause(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+    def pause(self, *, reason: str | None = None) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
             return self._controller(session).pause(reason=reason)
 
-    def resume(self):  # type: ignore[no-untyped-def]
+    def resume(self) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
             return self._controller(session).resume()
 
-    def cancel(self, *, job_id: int, reason: str | None = None):  # type: ignore[no-untyped-def]
+    def cancel(self, *, job_id: int, reason: str | None = None) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
             return self._controller(session).cancel(job_id=job_id, reason=reason)
 
-    def details(self, *, job_id: int):  # type: ignore[no-untyped-def]
+    def details(self, *, job_id: int) -> JobDetails | None:
         with db_session(self._database_url) as session:
             return self._controller(session).details(job_id=job_id)
 
@@ -1241,15 +1204,15 @@ class _LiveSchedulerWatchController:
                 attempt_number=attempt_number,
             )
 
-    def detach(self):  # type: ignore[no-untyped-def]
+    def detach(self) -> WatchControlResult:
         with db_session(self._database_url) as session:
             return self._controller(session).detach()
 
-    def stop(self, *, reason: str | None = None):  # type: ignore[no-untyped-def]
+    def stop(self, *, reason: str | None = None) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
             return self._controller(session).stop(reason=reason)
 
-    def _controller(self, session):  # type: ignore[no-untyped-def]
+    def _controller(self, session: Any) -> SchedulerWatchController:
         return SchedulerWatchController(
             scheduler_store=scheduler_control_store(session),
             job_store=job_control_store(session),

@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.promotion_service import (
@@ -122,7 +122,7 @@ def test_completed_promotion_records_actual_savings_and_source_safety(tmp_path: 
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
         events = session.exec(
-            select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            select(JobEvent).where(JobEvent.job_id == job_id).order_by(col(JobEvent.id))
         ).all()
 
     promotion_completion = [
