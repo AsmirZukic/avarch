@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from avarch.application.queue_forecast import ForecastConfidence
@@ -366,7 +367,9 @@ def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
     assert "stale" in stale
 
 
-def test_dashboard_renders_job_details_and_bounded_log_tail(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_dashboard_renders_job_details_and_bounded_log_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("AVARCH_SECRET_TOKEN", "should-not-appear")
     snapshot = _snapshot(
         watch_details=WatchJobDetailsSummary(

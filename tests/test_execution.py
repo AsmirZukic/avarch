@@ -494,13 +494,17 @@ def test_execute_plan_interrupts_managed_process_when_token_is_cancelled(
 def test_managed_process_registry_sends_pause_and_resume_to_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    signals: list[object] = []
+    signals: list[tuple[int, int]] = []
     process = _FakeManagedProcess(pid=4242)
     registry = execution_module._ManagedProcessRegistry()  # pyright: ignore[reportPrivateUsage]
+
+    def record_signal(observed: _FakeManagedProcess, signum: int) -> None:
+        signals.append((observed.pid, signum))
+
     monkeypatch.setattr(
         execution_module,
         "_signal_process_group",
-        lambda observed, signum: signals.append((observed.pid, signum)),
+        record_signal,
     )
 
     registry.register(process)  # type: ignore[arg-type]

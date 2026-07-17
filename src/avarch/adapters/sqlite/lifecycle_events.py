@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import datetime
+from typing import cast
 
 from sqlmodel import Session, col, select
 
@@ -86,7 +87,8 @@ def _record(event: JobEvent) -> LifecycleEventRecord:
 def _details(details_json: str | None) -> Mapping[str, object]:
     if details_json is None:
         return {}
-    value = json.loads(details_json)
+    value: object = json.loads(details_json)
     if isinstance(value, dict):
-        return value
+        details = cast(dict[object, object], value)
+        return {str(key): item for key, item in details.items()}
     return {"value": value}
