@@ -9,7 +9,12 @@ from avarch.adapters.sqlite.inventory import PathResolver, select_inventory_file
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, MediaPlan
 from avarch.adapters.sqlite.planning import current_plan_for_file, find_plan
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
-from avarch.domain.scheduler import ActiveJob, ClaimableJob, ResourceCapacity, select_launchable_jobs
+from avarch.domain.scheduler import (
+    ActiveJob,
+    ClaimableJob,
+    ResourceCapacity,
+    select_launchable_jobs,
+)
 
 
 class QueueSelectionError(ValueError):
