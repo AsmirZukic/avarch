@@ -42,6 +42,8 @@ def render_scheduler_dashboard(
         _header(snapshot, mode=mode),
         _pipeline_panel(snapshot),
         _active_jobs_panel(snapshot),
+        _details_panel(snapshot) if snapshot.watch_details is not None else "",
+        _log_tail_panel(snapshot) if snapshot.watch_log_tail is not None else "",
         _upcoming_panel(snapshot),
         _blocked_panel(snapshot),
         _footer(mode),
@@ -247,6 +249,46 @@ def _blocked_panel(snapshot: SchedulerSnapshot) -> Panel:
             ", ".join(_display_path(job.source_path) for job in jobs[:3]),
         )
     return Panel(table, title=f"Blocked {len(snapshot.blocked_jobs)}", border_style="yellow")
+
+
+def _details_panel(snapshot: SchedulerSnapshot) -> Panel:
+    details = snapshot.watch_details
+    if details is None:
+        return Panel("No selected job", title="Details", border_style="grey50")
+    table = Table.grid(padding=(0, 2))
+    table.add_column()
+    table.add_column()
+    table.add_row("job ID", str(details.job_id))
+    table.add_row("attempt", str(details.attempt_number or UNAVAILABLE))
+    table.add_row("source", details.source_path)
+    table.add_row("profile", details.profile_name or UNAVAILABLE)
+    table.add_row("stage", details.stage.value)
+    if details.started_at is not None:
+        table.add_row("start time", details.started_at.isoformat(sep=" ", timespec="seconds"))
+    table.add_row("plan", details.plan_path or UNAVAILABLE)
+    table.add_row("output", details.output_path or UNAVAILABLE)
+    if details.last_error_type or details.last_error_message:
+        error = " ".join(
+            part for part in (details.last_error_type, details.last_error_message) if part
+        )
+        table.add_row(
+            "last error",
+            error,
+        )
+    return Panel(table, title="Details", border_style="blue")
+
+
+def _log_tail_panel(snapshot: SchedulerSnapshot) -> Panel:
+    tail = snapshot.watch_log_tail
+    if tail is None:
+        return Panel("No log selected", title="Logs", border_style="grey50")
+    if tail.missing:
+        return Panel("Log unavailable", title="Logs", border_style="grey50")
+    text = Text()
+    for line in tail.lines:
+        text.append(line)
+        text.append("\n")
+    return Panel(text, title="Logs", border_style="magenta")
 
 
 def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:

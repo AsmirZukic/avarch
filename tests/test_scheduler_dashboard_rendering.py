@@ -22,6 +22,8 @@ from avarch.application.scheduler_snapshot import (
     SchedulerSnapshot,
     SessionSummary,
     UpcomingJobSummary,
+    WatchJobDetailsSummary,
+    WatchLogTailSummary,
     WorkflowStepState,
     WorkflowStepSummary,
     WorkspaceSummary,
@@ -271,6 +273,49 @@ def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
     assert "stale" in stale
 
 
+def test_dashboard_renders_job_details_and_bounded_log_tail(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("AVARCH_SECRET_TOKEN", "should-not-appear")
+    snapshot = _snapshot(
+        watch_details=WatchJobDetailsSummary(
+            job_id=42,
+            attempt_number=2,
+            source_path="/media/movie.mkv",
+            profile_name="default",
+            status=JobStatus.ENCODING,
+            stage=JobStage.ENCODE,
+            started_at=datetime(2026, 7, 17, 11, 59, tzinfo=UTC),
+            plan_path="/plans/plan.json",
+            output_path="/work/movie.av1.mkv",
+            stdout_log="/logs/stdout.log",
+            stderr_log="/logs/stderr.log",
+            last_error_type="ExecutionError",
+            last_error_message="encoder failed",
+        ),
+        watch_log_tail=WatchLogTailSummary(
+            path="/logs/stderr.log",
+            lines=("last line", "wrapped safely..."),
+            truncated=True,
+        ),
+    )
+
+    output = _render(snapshot, width=150)
+
+    assert "Details" in output
+    assert "job ID" in output
+    assert "42" in output
+    assert "attempt" in output
+    assert "2" in output
+    assert "movie.mkv" in output
+    assert "default" in output
+    assert "encode" in output
+    assert "/work/movie.av1.mkv" in output
+    assert "ExecutionError encoder failed" in output
+    assert "Logs" in output
+    assert "last line" in output
+    assert "wrapped safely..." in output
+    assert "should-not-appear" not in output
+
+
 def _render(
     snapshot: SchedulerSnapshot,
     *,
@@ -290,6 +335,8 @@ def _snapshot(
     recent_events: tuple[LifecycleEventSummary, ...] = (),
     blocked_jobs: tuple[BlockedJobSummary, ...] = (),
     resources: ResourceTelemetrySummary | None = None,
+    watch_details: WatchJobDetailsSummary | None = None,
+    watch_log_tail: WatchLogTailSummary | None = None,
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -334,6 +381,8 @@ def _snapshot(
         session=session,
         recent_events=recent_events,
         resources=resources,
+        watch_details=watch_details,
+        watch_log_tail=watch_log_tail,
         forecast=None,
     )
 
