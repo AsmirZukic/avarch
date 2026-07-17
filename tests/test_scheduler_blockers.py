@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from avarch.application.scheduler_blockers import (
@@ -27,7 +29,7 @@ from avarch.domain.scheduler import SchedulerMode
         ({"retry_backoff": True}, JobEligibilityReason.RETRY_BACKOFF),
     ],
 )
-def test_known_blocker_reasons(kwargs: dict[str, object], reason: JobEligibilityReason) -> None:
+def test_known_blocker_reasons(kwargs: dict[str, Any], reason: JobEligibilityReason) -> None:
     scheduler_mode = kwargs.pop("scheduler_mode", SchedulerMode.RUNNING)
     decision = decide_job_eligibility(
         scheduler_mode=scheduler_mode,

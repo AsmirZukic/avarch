@@ -63,6 +63,7 @@ __all__ = [
     "require_job",
     "recover_abandoned_jobs",
     "reset_job_for_retry",
+    "restore_missing_scene_detect_stage",
     "skip_claimed_job",
     "transition_job",
 ]
@@ -193,6 +194,18 @@ def complete_scene_detect_stage(
     )
     session.add(job)
     session.add(attempt)
+
+
+def restore_missing_scene_detect_stage(session: Session, *, job: Job) -> bool:
+    if JobStage(job.stage) != JobStage.ENCODE:
+        return False
+    job_id = _require_id(job)
+    if _scene_detection_completed(session, job_id=job_id):
+        return True
+    job.stage = JobStage.SCENE_DETECT
+    session.add(job)
+    session.flush()
+    return False
 
 
 def complete_job_stage(
@@ -736,6 +749,18 @@ def _latest_running_attempt(session: Session, *, job_id: int) -> JobAttempt | No
         .where(SQLiteJobAttempt.job_id == job_id, SQLiteJobAttempt.status == AttemptStatus.RUNNING)
         .order_by(col(SQLiteJobAttempt.attempt_number).desc())
     ).first()
+
+
+def _scene_detection_completed(session: Session, *, job_id: int) -> bool:
+    return (
+        session.exec(
+            select(JobEvent.id)
+            .where(JobEvent.job_id == job_id)
+            .where(JobEvent.event_type == JobEventType.SCENE_DETECT_COMPLETED)
+            .limit(1)
+        ).first()
+        is not None
+    )
 
 
 def _require_id(value: object) -> int:

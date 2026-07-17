@@ -450,6 +450,7 @@ def test_stale_capacity_usage_remains_persisted_for_watchers(tmp_path: Path) -> 
         state = session.get(SchedulerState, 1)
 
     assert state is not None
+    assert state.lease_expires_at is not None
     assert state.lease_expires_at < now.replace(tzinfo=None)
     assert state.capacity_cheap_active == 1
     assert state.capacity_av1an_active == 1

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import cast
 
 import pytest
 
 from avarch.application.scheduler_run import (
     SchedulerCapacityUsage,
     SchedulerControlSnapshot,
+    SchedulerRuntime,
     SchedulerTerminalCounts,
     run_scheduler,
 )
@@ -24,7 +26,9 @@ def test_run_scheduler_reraises_worker_cancellation_after_cleanup(
     runtime = _Runtime(store)
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+        asyncio.run(
+            run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+        )
 
     assert store.interrupted_job_ids == [1]
     assert store.session_end_reasons == ["interrupted"]
@@ -41,7 +45,7 @@ def test_run_scheduler_cancels_active_worker_on_outer_cancellation(
         workers = _SlowWorkers()
         runtime = _SlowRuntime(store, workers)
         task = asyncio.create_task(
-            run_scheduler(runtime, config=AppConfig(), runner_id="runner")
+            run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
         )
         await asyncio.wait_for(workers.started.wait(), timeout=1)
         task.cancel()
@@ -67,7 +71,9 @@ def test_run_scheduler_launches_distinct_resource_classes_concurrently(
     workers = _RecordingWorkers()
     runtime = _ConcurrentRuntime(store, workers)
 
-    summary = asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+    summary = asyncio.run(
+        run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+    )
 
     assert summary.idle is True
     assert workers.started == [JobStage.ENCODE, JobStage.VALIDATE, JobStage.PROMOTE]
@@ -91,7 +97,9 @@ def test_run_scheduler_reports_terminal_count_deltas(
     store = _HistoricalTerminalCountsStore()
     runtime = _HistoricalTerminalCountsRuntime(store)
 
-    summary = asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+    summary = asyncio.run(
+        run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+    )
 
     assert summary.completed == 0
     assert summary.failed == 0
@@ -108,7 +116,9 @@ def test_run_scheduler_starts_session_after_acquiring_lease(
     store = _OrderingStore()
     runtime = _OrderingRuntime(store)
 
-    asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+    asyncio.run(
+        run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+    )
 
     assert store.calls[:2] == ["acquire_lease", "start_session"]
     assert store.calls[-2:] == ["end_session:normal", "release_lease"]
@@ -121,7 +131,9 @@ def test_run_scheduler_records_drain_completion_reason(
     store = _DrainStore()
     runtime = _DrainRuntime(store)
 
-    asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+    asyncio.run(
+        run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+    )
 
     assert store.session_end_reasons == ["drained"]
     assert store.released is True
@@ -151,7 +163,9 @@ def test_run_scheduler_releases_lease_when_session_start_fails() -> None:
     runtime = _FailingSessionStartRuntime(store)
 
     with pytest.raises(RuntimeError, match="session failed"):
-        asyncio.run(run_scheduler(runtime, config=AppConfig(), runner_id="runner"))
+        asyncio.run(
+            run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
+        )
 
     assert store.released is True
     assert store.session_end_reasons == []

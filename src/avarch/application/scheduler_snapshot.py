@@ -339,7 +339,7 @@ def project_workflow_steps(
     for index, stage in enumerate(_WORKFLOW_STAGES):
         if active_stage == stage:
             state = WorkflowStepState.ACTIVE
-        elif failed_stage == stage:
+        elif failed_stage == stage and terminal_failure_state is not None:
             state = terminal_failure_state
         elif failed_stage is not None and index > stage_index:
             state = WorkflowStepState.BLOCKED

@@ -6,6 +6,7 @@ import pytest
 
 from avarch.application.scheduler_snapshot import (
     WorkflowStepState,
+    WorkflowStepSummary,
     project_workflow_steps,
 )
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
@@ -170,11 +171,11 @@ def test_active_probe_and_plan_are_not_labeled_as_encoding() -> None:
     assert _state_for(scene_detect, JobStage.ENCODE) is WorkflowStepState.PENDING
 
 
-def _compact(steps: tuple[object, ...]) -> str:
+def _compact(steps: tuple[WorkflowStepSummary, ...]) -> str:
     return " ".join(f"{step.stage.value}:{step.state.value}" for step in steps)
 
 
-def _state_for(steps: tuple[object, ...], stage: JobStage) -> WorkflowStepState:
+def _state_for(steps: tuple[WorkflowStepSummary, ...], stage: JobStage) -> WorkflowStepState:
     for step in steps:
         if step.stage == stage:
             return step.state

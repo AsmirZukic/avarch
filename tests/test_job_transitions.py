@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm.exc import StaleDataError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import (
@@ -131,7 +131,7 @@ def test_claim_and_completion_record_stage_lifecycle_events(tmp_path: Path) -> N
         )
         attempt_id = attempt.id
         session.commit()
-        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+        events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert [event.event_type for event in events] == [
         JobEventType.STAGE_STARTED,
@@ -159,7 +159,7 @@ def test_scene_detect_completion_advances_to_encode_with_scene_events(tmp_path: 
         session.commit()
         job = session.get(Job, job_id)
         attempt = session.get(JobAttempt, attempt.id or 0)
-        events = session.exec(select(JobEvent).order_by(JobEvent.id)).all()
+        events = session.exec(select(JobEvent).order_by(col(JobEvent.id))).all()
 
     assert job is not None
     assert job.status == JobStatus.ENCODING
