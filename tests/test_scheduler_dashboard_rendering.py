@@ -196,9 +196,16 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
 def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
     observer = _render(_snapshot(), width=120, mode=DashboardMode.OBSERVER)
     owner = _render(_snapshot(), width=120, mode=DashboardMode.OWNER)
+    unsupported = _render(
+        _snapshot(),
+        width=120,
+        mode=DashboardMode.OBSERVER,
+        shortcuts_available=False,
+    )
 
-    assert "Ctrl+C detaches; scheduler remains running" in observer
-    assert "Ctrl+C stops the scheduler" in owner
+    assert "p pause   c cancel   l logs   Enter details   q detach" in observer
+    assert "Ctrl+C stop scheduler" in owner
+    assert "Ctrl+C detach · interactive shortcuts unavailable" in unsupported
 
 
 def test_dashboard_renders_resource_telemetry() -> None:
@@ -321,9 +328,17 @@ def _render(
     *,
     width: int,
     mode: DashboardMode = DashboardMode.OBSERVER,
+    shortcuts_available: bool = True,
 ) -> str:
     console = Console(record=True, width=width, color_system=None, file=StringIO())
-    console.print(render_scheduler_dashboard(snapshot, width=width, mode=mode))
+    console.print(
+        render_scheduler_dashboard(
+            snapshot,
+            width=width,
+            mode=mode,
+            shortcuts_available=shortcuts_available,
+        )
+    )
     return console.export_text()
 
 

@@ -35,9 +35,15 @@ def render_scheduler_dashboard(
     *,
     width: int,
     mode: DashboardMode,
+    shortcuts_available: bool = True,
 ) -> RenderableType:
     if width < 90:
-        return _compact_dashboard(snapshot, width=width, mode=mode)
+        return _compact_dashboard(
+            snapshot,
+            width=width,
+            mode=mode,
+            shortcuts_available=shortcuts_available,
+        )
     main = Group(
         _header(snapshot, mode=mode),
         _pipeline_panel(snapshot),
@@ -46,7 +52,7 @@ def render_scheduler_dashboard(
         _log_tail_panel(snapshot) if snapshot.watch_log_tail is not None else "",
         _upcoming_panel(snapshot),
         _blocked_panel(snapshot),
-        _footer(mode),
+        _footer(mode, shortcuts_available=shortcuts_available),
     )
     side = Group(
         _capacity_panel(snapshot),
@@ -65,6 +71,7 @@ def _compact_dashboard(
     *,
     width: int,
     mode: DashboardMode,
+    shortcuts_available: bool,
 ) -> Text:
     text = Text()
     _append_line(text, f"Avarch Scheduler · {snapshot.scheduler.state.value} · {mode.value}", width)
@@ -133,18 +140,24 @@ def _compact_dashboard(
             _append_line(text, f"- {_event_line(event)}", width)
     else:
         _append_line(text, "Recent activity unavailable", width)
-    _append_line(text, _footer_text(mode), width)
+    _append_line(text, _footer_text(mode, shortcuts_available=shortcuts_available), width)
     return text
 
 
-def _footer(mode: DashboardMode) -> Panel:
-    return Panel(_footer_text(mode), title="Controls", border_style="grey50")
+def _footer(mode: DashboardMode, *, shortcuts_available: bool) -> Panel:
+    return Panel(
+        _footer_text(mode, shortcuts_available=shortcuts_available),
+        title="Controls",
+        border_style="grey50",
+    )
 
 
-def _footer_text(mode: DashboardMode) -> str:
+def _footer_text(mode: DashboardMode, *, shortcuts_available: bool) -> str:
     if mode == DashboardMode.OWNER:
-        return "Ctrl+C stops the scheduler"
-    return "Ctrl+C detaches; scheduler remains running"
+        return "Ctrl+C stop scheduler"
+    if not shortcuts_available:
+        return "Ctrl+C detach · interactive shortcuts unavailable"
+    return "p pause   c cancel   l logs   Enter details   q detach"
 
 
 def _header(snapshot: SchedulerSnapshot, *, mode: DashboardMode) -> Panel:
