@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import StringIO
 
 from rich.console import Console
 
@@ -45,15 +46,46 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "Resource telemetry unavailable" in output
 
 
+def test_dashboard_respects_requested_widths() -> None:
+    snapshot = _snapshot(
+        active_jobs=(
+            _active_job(1, "/media/movie-with-a-very-long-name-Život-日本語.mkv"),
+            _active_job(2, "/media/second-active-job.mkv"),
+        )
+    )
+
+    for width in (160, 120, 90, 70):
+        output = _render(snapshot, width=width)
+
+        assert "movie-with" in output
+        assert "second-active-job.mkv" in output
+        assert "Resource telemetry unavailable" in output
+        assert "Recent activity unavailable" in output
+        assert all(len(line) <= width for line in output.splitlines())
+
+
+def test_narrow_dashboard_uses_compact_text_layout() -> None:
+    output = _render(_snapshot(), width=70)
+
+    assert "Avarch Scheduler" in output
+    assert "Pipeline queued" in output
+    assert "Capacity encode slots" in output
+    assert "─" not in output
+    assert "│" not in output
+
+
 def _render(snapshot: SchedulerSnapshot, *, width: int) -> str:
-    console = Console(record=True, width=width, color_system=None)
+    console = Console(record=True, width=width, color_system=None, file=StringIO())
     console.print(
         render_scheduler_dashboard(snapshot, width=width, mode=DashboardMode.OBSERVER)
     )
     return console.export_text()
 
 
-def _snapshot() -> SchedulerSnapshot:
+def _snapshot(
+    *,
+    active_jobs: tuple[ActiveJobSummary, ...] | None = None,
+) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
         captured_at=captured_at,
@@ -68,35 +100,7 @@ def _snapshot() -> SchedulerSnapshot:
             size_rejected=0,
             cancelled=0,
         ),
-        active_jobs=(
-            ActiveJobSummary(
-                job_id=1,
-                source_path="/media/movie.mkv",
-                profile_name="default",
-                status=JobStatus.ENCODING,
-                stage=JobStage.ENCODE,
-                priority=10,
-                attempt=AttemptProgressSummary(
-                    attempt_id=10,
-                    attempt_number=1,
-                    status=AttemptStatus.RUNNING,
-                    frames_current=100,
-                    frames_total=200,
-                    rate_per_second=12.5,
-                    speed_ratio=1.2,
-                    eta_seconds=8,
-                    elapsed_seconds=90,
-                ),
-                workflow_steps=(
-                    WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),
-                    WorkflowStepSummary(stage=JobStage.PLAN, state=WorkflowStepState.COMPLETE),
-                    WorkflowStepSummary(stage=JobStage.ENCODE, state=WorkflowStepState.ACTIVE),
-                    WorkflowStepSummary(stage=JobStage.VALIDATE, state=WorkflowStepState.PENDING),
-                    WorkflowStepSummary(stage=JobStage.PROMOTE, state=WorkflowStepState.PENDING),
-                    WorkflowStepSummary(stage=JobStage.CLEANUP, state=WorkflowStepState.SKIPPED),
-                ),
-            ),
-        ),
+        active_jobs=active_jobs if active_jobs is not None else (_active_job(1, "/media/movie.mkv"),),
         capacity=CapacitySummary(
             cheap_workers=2,
             cheap_active=1,
@@ -121,4 +125,34 @@ def _snapshot() -> SchedulerSnapshot:
         recent_events=(),
         resources=None,
         forecast=None,
+    )
+
+
+def _active_job(job_id: int, source_path: str) -> ActiveJobSummary:
+    return ActiveJobSummary(
+        job_id=job_id,
+        source_path=source_path,
+        profile_name="default",
+        status=JobStatus.ENCODING,
+        stage=JobStage.ENCODE,
+        priority=10,
+        attempt=AttemptProgressSummary(
+            attempt_id=job_id * 10,
+            attempt_number=1,
+            status=AttemptStatus.RUNNING,
+            frames_current=100,
+            frames_total=200,
+            rate_per_second=12.5,
+            speed_ratio=1.2,
+            eta_seconds=8,
+            elapsed_seconds=90,
+        ),
+        workflow_steps=(
+            WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),
+            WorkflowStepSummary(stage=JobStage.PLAN, state=WorkflowStepState.COMPLETE),
+            WorkflowStepSummary(stage=JobStage.ENCODE, state=WorkflowStepState.ACTIVE),
+            WorkflowStepSummary(stage=JobStage.VALIDATE, state=WorkflowStepState.PENDING),
+            WorkflowStepSummary(stage=JobStage.PROMOTE, state=WorkflowStepState.PENDING),
+            WorkflowStepSummary(stage=JobStage.CLEANUP, state=WorkflowStepState.SKIPPED),
+        ),
     )
