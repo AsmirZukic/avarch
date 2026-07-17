@@ -4,8 +4,8 @@ from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
 
-from rich.columns import Columns
 from rich.console import Group, RenderableType
+from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -36,6 +36,7 @@ def render_scheduler_dashboard(
     width: int,
     mode: DashboardMode,
     shortcuts_available: bool = True,
+    height: int | None = None,
 ) -> RenderableType:
     if width < 90:
         return _compact_dashboard(
@@ -45,14 +46,12 @@ def render_scheduler_dashboard(
             shortcuts_available=shortcuts_available,
         )
     main = Group(
-        _header(snapshot, mode=mode),
         _pipeline_panel(snapshot),
         _active_jobs_panel(snapshot),
         _details_panel(snapshot) if snapshot.watch_details is not None else "",
         _log_tail_panel(snapshot) if snapshot.watch_log_tail is not None else "",
         _upcoming_panel(snapshot),
         _blocked_panel(snapshot),
-        _footer(mode, shortcuts_available=shortcuts_available),
     )
     side = Group(
         _capacity_panel(snapshot),
@@ -61,9 +60,41 @@ def render_scheduler_dashboard(
         _activity_panel(snapshot),
         _alerts_panel(snapshot),
     )
+    header = _header(snapshot, mode=mode)
+    footer = _footer(mode, shortcuts_available=shortcuts_available)
+    if width >= 120 and height is not None:
+        return _layout_dashboard(header=header, main=main, side=side, footer=footer)
     if width >= 120:
-        return Group(Columns((main, side), equal=False, expand=True))
-    return Group(main, side)
+        return Group(header, _grid_body(main, side), footer)
+    return Group(header, main, side, footer)
+
+
+def _layout_dashboard(
+    *,
+    header: RenderableType,
+    main: RenderableType,
+    side: RenderableType,
+    footer: RenderableType,
+) -> Layout:
+    layout = Layout()
+    layout.split_column(
+        Layout(header, name="header", size=6),
+        Layout(name="body"),
+        Layout(footer, name="footer", size=3),
+    )
+    layout["body"].split_row(
+        Layout(main, name="main", ratio=3, minimum_size=72),
+        Layout(side, name="side", ratio=2, minimum_size=44),
+    )
+    return layout
+
+
+def _grid_body(main: RenderableType, side: RenderableType) -> Table:
+    grid = Table.grid(expand=True, padding=(0, 1))
+    grid.add_column(ratio=3)
+    grid.add_column(ratio=2)
+    grid.add_row(main, side)
+    return grid
 
 
 def _compact_dashboard(
@@ -126,12 +157,16 @@ def _compact_dashboard(
     if snapshot.blocked_jobs:
         _append_line(text, f"Blocked {len(snapshot.blocked_jobs)}", width)
         for job in snapshot.blocked_jobs[:3]:
-            _append_line(text, f"- {_display_path(job.source_path)} {job.reason.value}", width)
+            _append_line(
+                text,
+                f"- {_display_path(job.source_path)} {job.reason.value.replace('_', ' ')}",
+                width,
+            )
     if snapshot.session is not None and snapshot.session.current is not None:
         session = snapshot.session.current
         _append_line(
             text,
-            f"Session {session.owner_id} on {session.host} pid {session.pid or UNAVAILABLE}",
+            f"Session {_session_line(session)}",
             width,
         )
     if snapshot.recent_events:
@@ -169,7 +204,7 @@ def _header(snapshot: SchedulerSnapshot, *, mode: DashboardMode) -> Panel:
     body.add_row("Scheduler", snapshot.scheduler.state.value)
     body.add_row("Captured", snapshot.captured_at.isoformat(sep=" ", timespec="seconds"))
     body.add_row("Mode", mode.value)
-    return Panel(Group(title, body), title="Overview", border_style="blue")
+    return Panel(Group(title, body), title="Overview", border_style="grey50")
 
 
 def _pipeline_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -188,7 +223,7 @@ def _pipeline_panel(snapshot: SchedulerSnapshot) -> Panel:
         ("held", pipeline.held),
     ):
         table.add_row(label, str(value))
-    return Panel(table, title="Pipeline", border_style="green")
+    return Panel(table, title="Pipeline", border_style="grey50")
 
 
 def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -211,14 +246,15 @@ def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
 def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.upcoming_jobs:
         return Panel("No upcoming jobs", title="Upcoming", border_style="grey50")
+    renderables: list[RenderableType] = []
+    if snapshot.forecast is not None:
+        renderables.append(Text(_forecast_line(snapshot)))
     table = Table(expand=True)
     table.add_column("#", justify="right")
     table.add_column("File", overflow="fold")
     table.add_column("Profile")
     table.add_column("Stage")
     table.add_column("Estimate")
-    if snapshot.forecast is not None:
-        table.add_row("", _forecast_line(snapshot), "", "", "")
     for job in snapshot.upcoming_jobs:
         table.add_row(
             str(job.selection_position or ""),
@@ -227,7 +263,8 @@ def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
             f"{job.stage.value} · {job.selection_confidence or UNAVAILABLE}",
             _upcoming_start(job),
         )
-    return Panel(table, title="Upcoming Jobs", border_style="blue")
+    renderables.append(table)
+    return Panel(Group(*renderables), title="Upcoming Jobs", border_style="grey50")
 
 
 def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -235,7 +272,7 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
     table = Table.grid(padding=(0, 2))
     table.add_column()
     table.add_column(justify="right")
-    table.add_row("cheap workers", f"{capacity.cheap_active}/{capacity.cheap_workers}")
+    table.add_row("light workers", f"{capacity.cheap_active}/{capacity.cheap_workers}")
     table.add_row("encode slots", f"{capacity.av1an_active}/{capacity.av1an_jobs}")
     table.add_row("file operations", f"{capacity.file_ops_active}/{capacity.file_ops}")
     if capacity.stale:
@@ -246,12 +283,12 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
         else UNAVAILABLE
     )
     table.add_row("Av1an workers", workers)
-    return Panel(table, title="Capacity", border_style="blue")
+    return Panel(table, title="Capacity", border_style="grey50")
 
 
 def _blocked_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.blocked_jobs:
-        return Panel("No blocked jobs", title="Blocked", border_style="green")
+        return Panel("No blocked jobs", title="Blocked", border_style="grey50")
     grouped: dict[str, list[BlockedJobSummary]] = {}
     for job in snapshot.blocked_jobs:
         grouped.setdefault(job.reason.value, []).append(job)
@@ -292,7 +329,7 @@ def _details_panel(snapshot: SchedulerSnapshot) -> Panel:
             "last error",
             error,
         )
-    return Panel(table, title="Details", border_style="blue")
+    return Panel(table, title="Details", border_style="grey50")
 
 
 def _log_tail_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -305,7 +342,7 @@ def _log_tail_panel(snapshot: SchedulerSnapshot) -> Panel:
     for line in tail.lines:
         text.append(line)
         text.append("\n")
-    return Panel(text, title="Logs", border_style="magenta")
+    return Panel(text, title="Logs", border_style="grey50")
 
 
 def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -398,38 +435,50 @@ def _session_panel(snapshot: SchedulerSnapshot) -> Panel:
     ]
     if previous:
         table.add_row("previous", "\n".join(previous[:3]))
-    return Panel(table, title="Session", border_style="blue")
+    return Panel(table, title="Session", border_style="grey50")
 
 
 def _activity_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.recent_events:
         return Panel("Recent activity unavailable", title="Recent Activity", border_style="grey50")
-    table = Table(expand=True)
-    table.add_column("Time", no_wrap=True)
-    table.add_column("Job", justify="right", no_wrap=True)
-    table.add_column("Stage", no_wrap=True)
-    table.add_column("Event")
-    table.add_column("Details", overflow="fold")
+    text = Text()
     for event in snapshot.recent_events:
-        table.add_row(
-            event.created_at.strftime("%H:%M:%S"),
-            str(event.job_id),
-            event.stage.value if event.stage is not None else UNAVAILABLE,
-            event.event_type.value,
-            _event_details(event),
-        )
-    return Panel(table, title="Recent Activity", border_style="magenta")
+        details = _event_details(event)
+        line = f"{event.created_at.strftime('%H:%M:%S')}  job {event.job_id} {_event_label(event)}"
+        if details != UNAVAILABLE:
+            line = f"{line}  {details}"
+        text.append(line)
+        text.append("\n")
+    return Panel(text, title="Recent Activity", border_style="grey50")
 
 
 def _session_line(session: SchedulerSessionRunSummary) -> str:
     state = "active" if session.active else session.end_reason or "ended"
     pid = str(session.pid) if session.pid is not None else UNAVAILABLE
-    return f"{session.owner_id} on {session.host} pid {pid} ({state})"
+    return f"{_short_id(session.owner_id)} on {_short_id(session.host)} pid {pid} ({state})"
 
 
 def _event_line(event: LifecycleEventSummary) -> str:
-    stage = event.stage.value if event.stage is not None else UNAVAILABLE
-    return f"job {event.job_id} {stage} {event.event_type.value} {_event_details(event)}".rstrip()
+    return f"job {event.job_id} {_event_label(event)} {_event_details(event)}".rstrip()
+
+
+def _event_label(event: LifecycleEventSummary) -> str:
+    stage = event.stage.value if event.stage is not None else "stage"
+    labels = {
+        "stage_started": f"{stage} started",
+        "stage_completed": f"{stage} completed",
+        "stage_failed": f"{stage} failed",
+        "stage_cancelled": f"{stage} cancelled",
+        "hold_requested": "hold requested",
+        "held": "held",
+        "hold_released": "hold released",
+        "cancel_requested": "cancel requested",
+        "canceled": "cancelled",
+        "retry_requested": "retry requested",
+        "priority_changed": "priority changed",
+        "queue_cleared": "queue cleared",
+    }
+    return labels.get(event.event_type.value, event.event_type.value.replace("_", " "))
 
 
 def _event_details(event: LifecycleEventSummary) -> str:
@@ -450,7 +499,7 @@ def _event_details(event: LifecycleEventSummary) -> str:
 
 def _alerts_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.alerts:
-        return Panel("No alerts", title="Alerts", border_style="green")
+        return Panel("No alerts", title="Alerts", border_style="grey50")
     text = Text()
     for alert in snapshot.alerts:
         style = "red" if alert.severity.value == "error" else "yellow"
@@ -519,9 +568,21 @@ def _workflow_steps(steps: tuple[WorkflowStepSummary, ...]) -> Text:
     text = Text()
     for index, step in enumerate(steps):
         if index:
-            text.append(" > ", style="grey50")
-        text.append(step.stage.value, style=_step_style(step.state))
+            text.append("  ", style="grey50")
+        text.append(_step_glyph(step.state), style=_step_style(step.state))
+        text.append(f" {step.stage.value}", style=_step_style(step.state))
     return text
+
+
+def _step_glyph(state: WorkflowStepState) -> str:
+    return {
+        WorkflowStepState.PENDING: "○",
+        WorkflowStepState.ACTIVE: "●",
+        WorkflowStepState.COMPLETE: "✓",
+        WorkflowStepState.FAILED: "✕",
+        WorkflowStepState.BLOCKED: "!",
+        WorkflowStepState.SKIPPED: "○",
+    }[state]
 
 
 def _step_style(state: WorkflowStepState) -> str:
@@ -539,11 +600,12 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
     if progress is None:
         return UNAVAILABLE
     parts: list[str] = []
+    if progress.frames_current is not None and progress.frames_total:
+        percent = min(1.0, max(0.0, progress.frames_current / progress.frames_total))
+        parts.append(f"{_gauge(percent)} {percent * 100:.0f}%")
     if progress.stale and progress.last_update_age_seconds is not None:
         age = format_compact_duration(timedelta(seconds=progress.last_update_age_seconds))
-        parts.append(
-            f"last update {age} ago"
-        )
+        parts.append(f"last update {age} ago")
     if progress.frames_current is not None:
         if progress.frames_total is not None:
             parts.append(f"{progress.frames_current}/{progress.frames_total} frames")
@@ -579,6 +641,17 @@ def _progress(progress: AttemptProgressSummary | None) -> str:
 
 def _display_path(path: str) -> str:
     return Path(path).name or path
+
+
+def _gauge(percent: float, *, width: int = 18) -> str:
+    filled = round(percent * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _short_id(value: str, *, width: int = 8) -> str:
+    if len(value) <= width:
+        return value
+    return f"{value[:width]}…"
 
 
 def _append_line(text: Text, value: str, width: int) -> None:

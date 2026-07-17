@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+from avarch import cli as cli_module
 from avarch.cli import app
 
 runner = CliRunner()
@@ -75,6 +77,45 @@ def test_scheduler_watch_live_rejects_non_tty_with_guidance(tmp_path: Path) -> N
 
     assert result.exit_code == 1
     assert "Use --once or --json" in result.output
+
+
+def test_scheduler_watch_live_uses_alternate_screen(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    seen: dict[str, object] = {}
+
+    class FakeLive:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            seen["screen"] = kwargs.get("screen")
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    class FakeLoop:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            seen["resource_sampler"] = kwargs["resource_sampler"]
+
+        async def run(self) -> None:
+            seen["ran"] = True
+
+    monkeypatch.setattr(cli_module, "Live", FakeLive)
+    monkeypatch.setattr(cli_module, "_LiveSchedulerSnapshotQuery", lambda **kwargs: object())
+    monkeypatch.setattr(cli_module, "SchedulerWatchLoop", FakeLoop)
+    monkeypatch.setattr(cli_module, "scheduler_resource_sampler", lambda **kwargs: "sampler")
+
+    asyncio.run(
+        cli_module._run_scheduler_watch_live(
+            database_url="sqlite:///watch.db",
+            workspace_root=tmp_path,
+            interval_seconds=0.1,
+            no_color=True,
+        )
+    )
+
+    assert seen["screen"] is True
+    assert seen["resource_sampler"] == "sampler"
+    assert seen["ran"] is True
 
 
 def test_scheduler_watch_missing_workspace_uses_normal_workspace_error(tmp_path: Path) -> None:

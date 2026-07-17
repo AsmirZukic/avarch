@@ -47,6 +47,11 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "default" in output
     assert "probe" in output
     assert "encode" in output
+    assert "✓ probe" in output
+    assert "● encode" in output
+    assert "○ validate" in output
+    assert "████" in output
+    assert "50%" in output
     assert "100/200 frames" in output
     assert "12.5 fps" in output
     assert "2/5 chunks" in output
@@ -98,20 +103,20 @@ def test_dashboard_renders_session_and_recent_activity() -> None:
         session=SessionSummary(
             current=SchedulerSessionRunSummary(
                 session_id=1,
-                owner_id="runner-1",
+                owner_id="0807de6e6f364f7ba904bb888c91e60a",
                 workspace_id="workspace",
                 pid=1234,
-                host="host",
+                host="a9a9396a1e22",
                 started_at=datetime(2026, 7, 17, 11, 55, tzinfo=UTC),
                 active=True,
             ),
             recent=(
                 SchedulerSessionRunSummary(
                     session_id=1,
-                    owner_id="runner-1",
+                    owner_id="0807de6e6f364f7ba904bb888c91e60a",
                     workspace_id="workspace",
                     pid=1234,
-                    host="host",
+                    host="a9a9396a1e22",
                     started_at=datetime(2026, 7, 17, 11, 55, tzinfo=UTC),
                     active=True,
                 ),
@@ -136,12 +141,14 @@ def test_dashboard_renders_session_and_recent_activity() -> None:
     narrow = _render(snapshot, width=70)
 
     assert "Session" in wide
-    assert "runner-1 on host pid 1234" in wide
+    assert "0807de6e… on a9a9396a… pid 1234" in wide
+    assert "0807de6e6f364f7ba904bb888c91e60a" not in wide
     assert "Recent Activity" in wide
-    assert "stage_completed" in wide
+    assert "promote completed" in wide
+    assert "stage_completed" not in wide
     assert "saved 2.0 KiB" in wide
-    assert "Session runner-1 on host pid 1234" in narrow
-    assert "job 42 promote stage_completed saved 2.0 KiB" in narrow
+    assert "Session 0807de6e… on a9a9396a… pid 1234" in narrow
+    assert "job 42 promote completed saved 2.0 KiB" in narrow
 
 
 def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
@@ -181,6 +188,8 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
 
     assert "encode slots" in wide
     assert "1/2" in wide
+    assert "light workers" in wide
+    assert "cheap workers" not in wide
     assert "file operations" in wide
     assert "0/1" in wide
     assert "Av1an workers" in wide
@@ -192,7 +201,7 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
     assert "job held" in wide
     assert "source missing" in wide
     assert "Blocked 2" in narrow
-    assert "held.mkv job_held" in narrow
+    assert "held.mkv job held" in narrow
 
 
 def test_dashboard_footer_distinguishes_observer_and_owner_modes() -> None:
