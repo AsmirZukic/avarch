@@ -19,9 +19,12 @@ from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     CapacitySummary,
     PipelineSummary,
+    SchedulerAlert,
+    SchedulerAlertSeverity,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
     SchedulerSnapshot,
+    UpcomingJobSummary,
     WorkspaceSummary,
     project_workflow_steps,
 )
@@ -64,14 +67,28 @@ class SqliteSchedulerSnapshotQuery:
             pipeline=self._pipeline_summary(),
             active_jobs=self._active_jobs(captured_at=captured_at),
             capacity=CapacitySummary(cheap_workers=0, av1an_jobs=0, file_ops=0),
+            upcoming_jobs=self._upcoming_jobs(),
+            recent_events=(),
+            alerts=self._alerts(now=captured_at),
+            resources=None,
+            forecast=None,
         )
 
     def _scheduler_summary(self, *, now: datetime) -> SchedulerRuntimeSummary:
         state = self._session.get(SchedulerState, 1)
-        if state is None or state.runner_id is None:
+        if state is None:
             return SchedulerRuntimeSummary(state=SchedulerRuntimeState.STOPPED)
 
         mode = SchedulerMode(state.mode)
+        if state.runner_id is None:
+            if mode == SchedulerMode.PAUSED:
+                return SchedulerRuntimeSummary(state=SchedulerRuntimeState.PAUSED, mode=mode)
+            if mode == SchedulerMode.DRAINING:
+                return SchedulerRuntimeSummary(state=SchedulerRuntimeState.DRAINING, mode=mode)
+            if mode == SchedulerMode.STOPPING:
+                return SchedulerRuntimeSummary(state=SchedulerRuntimeState.STOPPING, mode=mode)
+            return SchedulerRuntimeSummary(state=SchedulerRuntimeState.STOPPED, mode=mode)
+
         stale = not lease_active(state, now=now)
         runtime_state = SchedulerRuntimeState.STALE if stale else SchedulerRuntimeState(mode.value)
         return SchedulerRuntimeSummary(
@@ -135,6 +152,70 @@ class SqliteSchedulerSnapshotQuery:
             for job, media_file in rows
             if job.id is not None
         )
+
+    def _upcoming_jobs(self) -> tuple[UpcomingJobSummary, ...]:
+        rows = list(
+            self._session.exec(
+                select(Job, MediaFile)
+                .join(MediaFile, MediaFile.id == Job.media_file_id)
+                .where(
+                    Job.status == JobStatus.QUEUED,
+                    col(Job.hold_requested_at).is_(None),
+                    col(Job.cancel_requested_at).is_(None),
+                )
+                .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
+                .limit(3)
+            ).all()
+        )
+        return tuple(
+            UpcomingJobSummary(
+                job_id=_required_id(job.id),
+                source_path=media_file.path,
+                profile_name=job.profile_name,
+                stage=JobStage(job.stage),
+                status=JobStatus(job.status),
+                priority=job.priority,
+                queued_at=job.created_at,
+                selection_position=index,
+                selection_confidence="current_snapshot",
+            )
+            for index, (job, media_file) in enumerate(rows, start=1)
+        )
+
+    def _alerts(self, *, now: datetime) -> tuple[SchedulerAlert, ...]:
+        state = self._session.get(SchedulerState, 1)
+        if state is None:
+            return ()
+        mode = SchedulerMode(state.mode)
+        alerts: list[SchedulerAlert] = []
+        if state.runner_id is not None and not lease_active(state, now=now):
+            alerts.append(
+                SchedulerAlert(
+                    severity=SchedulerAlertSeverity.WARNING,
+                    code="stale_scheduler_lease",
+                    message="Scheduler lease is stale.",
+                    observed_at=now,
+                )
+            )
+        if mode == SchedulerMode.PAUSED:
+            alerts.append(
+                SchedulerAlert(
+                    severity=SchedulerAlertSeverity.INFO,
+                    code="scheduler_paused",
+                    message="Scheduler is paused.",
+                    observed_at=now,
+                )
+            )
+        if mode == SchedulerMode.DRAINING:
+            alerts.append(
+                SchedulerAlert(
+                    severity=SchedulerAlertSeverity.INFO,
+                    code="scheduler_draining",
+                    message="Scheduler is draining.",
+                    observed_at=now,
+                )
+            )
+        return tuple(alerts)
 
     def _latest_attempts_by_job(self, job_ids: tuple[int, ...]) -> dict[int, JobAttempt]:
         if not job_ids:
