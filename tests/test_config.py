@@ -31,6 +31,19 @@ def test_default_resource_limits() -> None:
     assert config.resources.cheap_workers == 4
     assert config.resources.av1an_jobs == 1
     assert config.resources.file_ops == 1
+    assert config.resources.cpu_reserve == 1.0
+    assert config.resources.memory_reserve == "10%"
+    assert config.resources.reservation_allocator is True
+
+
+def test_default_performance_calibration_limits() -> None:
+    config = AppConfig()
+
+    assert config.performance.calibration_enabled is True
+    assert config.performance.calibration_max_seconds == 120.0
+    assert config.performance.calibration_max_predicted_fraction == 0.01
+    assert config.performance.calibration_min_predicted_seconds == 300.0
+    assert config.performance.calibration_max_candidates == 8
 
 
 def test_load_config_from_toml(tmp_path: Path) -> None:
@@ -59,15 +72,18 @@ format = "json"
     assert config.logging.format == "json"
 
 
-def test_config_loads_resource_limits(tmp_path: Path) -> None:
+def test_config_loads_non_av1an_resource_limits(tmp_path: Path) -> None:
     config_file = tmp_path / ".avarch" / "config.toml"
     config_file.parent.mkdir()
     config_file.write_text(
         """
 [resources]
 cheap_workers = 8
-av1an_jobs = 2
+av1an_jobs = 1
 file_ops = 3
+cpu_reserve = 2.0
+memory_reserve = "2GiB"
+reservation_allocator = true
 """.strip(),
         encoding="utf-8",
     )
@@ -75,13 +91,65 @@ file_ops = 3
     config = load_config(config_file)
 
     assert config.resources.cheap_workers == 8
-    assert config.resources.av1an_jobs == 2
+    assert config.resources.av1an_jobs == 1
     assert config.resources.file_ops == 3
+    assert config.resources.cpu_reserve == 2.0
+    assert config.resources.memory_reserve == "2GiB"
+    assert config.resources.reservation_allocator is True
+
+
+def test_config_allows_reserved_parallel_av1an_jobs(tmp_path: Path) -> None:
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("[resources]\nav1an_jobs = 2\n", encoding="utf-8")
+
+    config = load_config(config_file)
+
+    assert config.resources.av1an_jobs == 2
+
+
+def test_config_loads_performance_calibration_limits(tmp_path: Path) -> None:
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text(
+        """
+[performance]
+calibration_enabled = false
+calibration_max_seconds = 30
+calibration_max_predicted_fraction = 0.005
+calibration_min_predicted_seconds = 600
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.performance.calibration_enabled is False
+    assert config.performance.calibration_max_seconds == 30
+    assert config.performance.calibration_max_predicted_fraction == 0.005
+    assert config.performance.calibration_min_predicted_seconds == 600
+
+
+def test_config_rejects_unreserved_parallel_av1an_jobs(tmp_path: Path) -> None:
+    config_file = tmp_path / ".avarch" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text(
+        "[resources]\nav1an_jobs = 2\nreservation_allocator = false\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="resource reservations"):
+        load_config(config_file)
 
 
 def test_resource_limits_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         AppConfig.model_validate({"resources": {"cheap_workers": 0}})
+
+
+def test_resource_memory_reserve_must_be_valid() -> None:
+    with pytest.raises(ValidationError, match="memory reserve"):
+        AppConfig.model_validate({"resources": {"memory_reserve": "more"}})
 
 
 def test_existing_config_without_resources_still_loads(tmp_path: Path) -> None:

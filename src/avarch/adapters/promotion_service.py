@@ -7,6 +7,7 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Thread
 from typing import BinaryIO
 
 from sqlalchemy.engine import Engine
@@ -150,14 +151,32 @@ async def stage_validated_output(
     expected_mode: int,
     heartbeat: PromotionHeartbeat,
 ) -> StagedOutput:
-    return await asyncio.to_thread(
-        _stage_validated_output_sync,
-        source_output=source_output,
-        staging_path=staging_path,
-        expected_fingerprint=expected_fingerprint,
-        expected_mode=expected_mode,
-        heartbeat=heartbeat,
-    )
+    results: list[StagedOutput] = []
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            results.append(
+                _stage_validated_output_sync(
+                    source_output=source_output,
+                    staging_path=staging_path,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_mode=expected_mode,
+                    heartbeat=heartbeat,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = Thread(target=target, name="avarch-promotion-stage", daemon=True)
+    thread.start()
+    while thread.is_alive():
+        await asyncio.sleep(0.05)
+    if errors:
+        raise errors[0]
+    if not results:
+        raise PromotionFilesystemError("Promotion staging exited without a result.")
+    return results[0]
 
 
 def _stage_validated_output_sync(

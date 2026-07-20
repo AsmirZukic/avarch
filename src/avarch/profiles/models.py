@@ -4,7 +4,13 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+
+from avarch.domain.encoder_args import (
+    EncoderArgumentError,
+    normalize_svt_operational_args,
+    parse_encoder_args,
+)
 
 
 class ProfileMatchSettings(BaseModel):
@@ -37,8 +43,9 @@ class ProfileAv1anSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     encoder: Literal["svt-av1"]
-    workers: int | Literal["auto"] = "auto"
+    workers: StrictInt | Literal["auto"] = "auto"
     video_args: str
+    svt_lp: StrictInt | Literal["native"] | None = None
 
     @field_validator("workers")
     @classmethod
@@ -48,6 +55,29 @@ class ProfileAv1anSettings(BaseModel):
         if value <= 0:
             raise ValueError("workers must be positive or 'auto'")
         return value
+
+    @field_validator("svt_lp")
+    @classmethod
+    def validate_svt_lp(
+        cls,
+        value: int | Literal["native"] | None,
+    ) -> int | Literal["native"] | None:
+        if value is None or value == "native":
+            return value
+        if value <= 0:
+            raise ValueError("svt_lp must be positive or 'native'")
+        return value
+
+    @model_validator(mode="after")
+    def validate_svt_operational_ownership(self) -> ProfileAv1anSettings:
+        try:
+            normalize_svt_operational_args(
+                parse_encoder_args(self.video_args),
+                structured_svt_lp=self.svt_lp,
+            )
+        except (EncoderArgumentError, ValueError) as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 class ProfileAudioSettings(BaseModel):
@@ -145,6 +175,7 @@ class EncodingProfile(BaseModel):
     subtitles: ProfileSubtitleSettings
     validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
     promotion: ProfilePromotionSettings = Field(default_factory=ProfilePromotionSettings)
+
 
 class ProfileDocument(EncodingProfile):
     name: str

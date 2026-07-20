@@ -27,6 +27,11 @@ def test_repository_contains_migration_revisions() -> None:
         "0007_structured_attempt_progress.py",
         "0008_scheduler_sessions_and_lifecycle_events.py",
         "0009_scheduler_runtime_capacity.py",
+        "0010_performance_observations.py",
+        "0011_performance_environment_signature.py",
+        "0012_performance_workload_signature.py",
+        "0013_resource_reservations.py",
+        "0014_calibration_observations.py",
     ]
 
 
@@ -105,10 +110,50 @@ def test_scheduler_sessions_revision_depends_on_structured_attempt_progress() ->
 
 def test_scheduler_runtime_capacity_revision_depends_on_scheduler_sessions() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0009_scheduler_runtime_capacity")
 
     assert revision is not None
     assert revision.down_revision == "0008_scheduler_sessions_and_lifecycle_events"
+
+
+def test_performance_observations_revision_depends_on_scheduler_runtime_capacity() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0010_performance_observations")
+
+    assert revision is not None
+    assert revision.down_revision == "0009_scheduler_runtime_capacity"
+
+
+def test_performance_environment_revision_depends_on_performance_observations() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0011_performance_environment_signature")
+
+    assert revision is not None
+    assert revision.down_revision == "0010_performance_observations"
+
+
+def test_performance_workload_revision_depends_on_performance_environment() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0012_performance_workload_signature")
+
+    assert revision is not None
+    assert revision.down_revision == "0011_performance_environment_signature"
+
+
+def test_resource_reservations_revision_depends_on_performance_workload() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision("0013_resource_reservations")
+
+    assert revision is not None
+    assert revision.down_revision == "0012_performance_workload_signature"
+
+
+def test_calibration_observations_revision_depends_on_resource_reservations() -> None:
+    script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
+    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+
+    assert revision is not None
+    assert revision.down_revision == "0013_resource_reservations"
 
 
 def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
@@ -121,6 +166,7 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
     assert {
         "alembic_version",
         "appmeta",
+        "calibration_observation",
         "mediafile",
         "proberesult",
         "job",
@@ -128,7 +174,9 @@ def test_fresh_upgrade_creates_all_tables(tmp_path: Path) -> None:
         "scheduler_session",
         "job_attempt_progress",
         "mediaplan",
+        "performance_observation",
         "promotionrecord",
+        "resource_reservation",
         "schedulerstate",
         "validationresult",
     } <= tables
@@ -240,6 +288,36 @@ def test_initial_revision_creates_foreign_keys(tmp_path: Path) -> None:
         columns=["scheduler_session_id"],
         referred_table="scheduler_session",
     )
+    assert _has_foreign_key(
+        inspector,
+        table="performance_observation",
+        columns=["job_id"],
+        referred_table="job",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="performance_observation",
+        columns=["attempt_id"],
+        referred_table="jobattempt",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="resource_reservation",
+        columns=["job_id"],
+        referred_table="job",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="resource_reservation",
+        columns=["attempt_id"],
+        referred_table="jobattempt",
+    )
+    assert _has_foreign_key(
+        inspector,
+        table="resource_reservation",
+        columns=["scheduler_session_id"],
+        referred_table="scheduler_session",
+    )
 
 
 def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
@@ -342,6 +420,76 @@ def test_scheduler_runtime_capacity_columns_are_nullable(tmp_path: Path) -> None
         "capacity_observed_at",
     ):
         assert columns[column_name]["nullable"] is True
+
+
+def test_performance_observation_columns_match_contract(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    columns = {
+        column["name"]: column
+        for column in inspector.get_columns("performance_observation")
+    }
+    primary_key = inspector.get_pk_constraint("performance_observation")
+
+    assert primary_key["constrained_columns"] == ["id"]
+    assert columns["schema_version"]["nullable"] is False
+    assert columns["job_id"]["nullable"] is False
+    assert columns["attempt_id"]["nullable"] is False
+    assert columns["plan_hash"]["nullable"] is True
+    assert columns["semantic_hash"]["nullable"] is True
+    assert columns["resource_policy_hash"]["nullable"] is True
+    assert columns["resource_decision_json"]["nullable"] is True
+    assert columns["tool_versions_json"]["nullable"] is True
+    assert columns["environment_signature_hash"]["nullable"] is True
+    assert columns["environment_signature_json"]["nullable"] is True
+    assert columns["workload_signature_hash"]["nullable"] is True
+    assert columns["workload_signature_json"]["nullable"] is True
+    assert columns["total_frames"]["nullable"] is True
+    assert columns["observation_duration_seconds"]["nullable"] is True
+    assert columns["aggregate_fps"]["nullable"] is True
+    assert columns["peak_rss_bytes"]["nullable"] is True
+    assert columns["peak_cgroup_memory_bytes"]["nullable"] is True
+    assert columns["average_cpu_utilization_percent"]["nullable"] is True
+    assert columns["swap_current_bytes_delta"]["nullable"] is True
+    assert columns["cpu_throttled_events_delta"]["nullable"] is True
+    assert columns["cpu_throttled_usec_delta"]["nullable"] is True
+    assert columns["memory_oom_events_delta"]["nullable"] is True
+    assert columns["memory_oom_kill_events_delta"]["nullable"] is True
+    assert columns["resource_attribution_available"]["nullable"] is False
+    assert columns["incomplete"]["nullable"] is False
+    assert columns["progress_samples_observed"]["nullable"] is False
+    assert columns["resource_samples_observed"]["nullable"] is False
+    assert columns["warmup_seconds"]["nullable"] is False
+    assert columns["created_at"]["nullable"] is False
+
+
+def test_resource_reservation_columns_match_contract(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}"
+
+    upgrade_database(database_url)
+
+    inspector = inspect(create_db_engine(database_url))
+    columns = {
+        column["name"]: column
+        for column in inspector.get_columns("resource_reservation")
+    }
+    primary_key = inspector.get_pk_constraint("resource_reservation")
+
+    assert primary_key["constrained_columns"] == ["id"]
+    assert columns["job_id"]["nullable"] is False
+    assert columns["attempt_id"]["nullable"] is False
+    assert columns["scheduler_session_id"]["nullable"] is True
+    assert columns["resource_class"]["nullable"] is False
+    assert columns["cpu_reserved"]["nullable"] is True
+    assert columns["memory_bytes_reserved"]["nullable"] is True
+    assert columns["exclusive"]["nullable"] is False
+    assert columns["status"]["nullable"] is False
+    assert columns["release_reason"]["nullable"] is True
+    assert columns["created_at"]["nullable"] is False
+    assert columns["released_at"]["nullable"] is True
 
 
 def test_probe_fingerprint_is_nonnullable(tmp_path: Path) -> None:
