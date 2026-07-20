@@ -30,7 +30,7 @@ find_workspace() {
 
 workspace_required() {
   case "${1:-}" in
-    "" | "-h" | "--help" | "--version" | "version" | "init")
+    "" | "-h" | "--help" | "--version" | "version" | "init" | "system")
       return 1
       ;;
     *)
@@ -78,22 +78,65 @@ security_option() {
   fi
 }
 
+validate_resource_limit_options() {
+  if [ "${AVARCH_DOCKER_CPUS:-}" ]; then
+    case "$AVARCH_DOCKER_CPUS" in
+      *[!0123456789.]* | "" | "." | *.*.*)
+        die "Invalid AVARCH_DOCKER_CPUS value: $AVARCH_DOCKER_CPUS"
+        ;;
+    esac
+  fi
+
+  if [ "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
+    case "$AVARCH_DOCKER_CPUSET_CPUS" in
+      *[!0123456789,-]* | "" | *,,* | *, | ,*)
+        die "Invalid AVARCH_DOCKER_CPUSET_CPUS value: $AVARCH_DOCKER_CPUSET_CPUS"
+        ;;
+    esac
+  fi
+
+  if [ "${AVARCH_DOCKER_MEMORY:-}" ]; then
+    case "$AVARCH_DOCKER_MEMORY" in
+      *[!0123456789bkmgBKMG.]* | "" | "." | *.*.*)
+        die "Invalid AVARCH_DOCKER_MEMORY value: $AVARCH_DOCKER_MEMORY"
+        ;;
+    esac
+  fi
+}
+
 exec_docker_run() {
   security_opt=$(security_option)
   if [ -n "$security_opt" ]; then
-    exec docker run --rm --user "$uid:$gid" --security-opt "$security_opt" "$@"
+    set -- --security-opt "$security_opt" "$@"
   fi
-
+  validate_resource_limit_options
+  if [ "${AVARCH_DOCKER_MEMORY:-}" ]; then
+    set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
+  fi
+  if [ "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
+    set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
+  fi
+  if [ "${AVARCH_DOCKER_CPUS:-}" ]; then
+    set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
+  fi
   exec docker run --rm --user "$uid:$gid" "$@"
 }
 
 docker_run() {
   security_opt=$(security_option)
   if [ -n "$security_opt" ]; then
-    docker run --rm --user "$uid:$gid" --security-opt "$security_opt" "$@"
-    return
+    set -- --security-opt "$security_opt" "$@"
   fi
-
+  validate_resource_limit_options
+  if [ "${AVARCH_DOCKER_MEMORY:-}" ]; then
+    set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
+  fi
+  if [ "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
+    set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
+  fi
+  if [ "${AVARCH_DOCKER_CPUS:-}" ]; then
+    set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
+  fi
   docker run --rm --user "$uid:$gid" "$@"
 }
 
@@ -147,6 +190,7 @@ set -- "$@"
 workspace=""
 mount_workspace=0
 scheduler_container=0
+detached_scheduler=0
 if workspace=$(find_workspace); then
   mount_workspace=1
 elif workspace_required "${1:-}"; then
@@ -162,6 +206,14 @@ else
 fi
 
 if [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
+  for arg do
+    case "$arg" in
+      -d | --detached)
+        detached_scheduler=1
+        ;;
+    esac
+  done
+
   existing=$(docker ps -aq --filter "name=^/${ENCODER_CONTAINER_NAME}$" | head -n 1 || true)
   if [ -n "$existing" ]; then
     inspected=$(docker inspect \
@@ -196,6 +248,22 @@ fi
 owner_dashboard=0
 if [ "$allocate_tty" = "1" ] && [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
   owner_dashboard=1
+fi
+
+if [ "$scheduler_container" = "1" ] && [ "$detached_scheduler" = "1" ]; then
+  volume=$(workspace_volume "$workspace")
+  docker_run \
+    -d \
+    --name "$ENCODER_CONTAINER_NAME" \
+    --label "$AVARCH_LABEL=encoder" \
+    --label "$WORKSPACE_LABEL=$workspace" \
+    -v "$volume" \
+    -w "$CONTAINER_WORKSPACE" \
+    "$IMAGE" \
+    "$@" \
+    --managed-child \
+    --mode detached
+  exit 0
 fi
 
 if [ "$owner_dashboard" = "1" ]; then

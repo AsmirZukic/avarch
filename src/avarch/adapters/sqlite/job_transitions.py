@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
+from avarch.adapters.sqlite.resource_reservations import (
+    acquire_attempt_reservation,
+    reconcile_stale_reservations,
+    release_attempt_reservation,
+)
 from avarch.adapters.sqlite.stage_events import (
     current_scheduler_session_id,
     record_stage_event,
@@ -31,7 +36,8 @@ from avarch.domain.jobs import (
     plan_skipped_transition,
     plan_validation_result_transition,
 )
-from avarch.domain.scheduler import resource_for_stage
+from avarch.domain.scheduler import JobResourceReservation, resource_for_stage
+from avarch.models.execution import ProcessFailureReason, ProcessResourceSummary
 from avarch.serialization import canonical_json
 
 if TYPE_CHECKING:
@@ -103,6 +109,7 @@ def claim_job_stage(
     job_id: int,
     runner_id: str,
     now: datetime,
+    reservation: JobResourceReservation | None = None,
 ) -> JobAttempt:
     job = require_job(session, job_id)
     if not job_can_be_claimed_for_stage(job.status, job.stage):
@@ -114,12 +121,14 @@ def claim_job_stage(
     job.attempts += 1
     job.started_at = job.started_at or now
     job.updated_at = now
+    scheduler_session_id = current_scheduler_session_id(session, runner_id=runner_id)
+    resource_class = resource_for_stage(job.stage)
     attempt = SQLiteJobAttempt(
         job_id=job_id,
-        scheduler_session_id=current_scheduler_session_id(session, runner_id=runner_id),
+        scheduler_session_id=scheduler_session_id,
         attempt_number=job.attempts,
         stage=job.stage,
-        resource_class=resource_for_stage(job.stage),
+        resource_class=resource_class,
         status=AttemptStatus.RUNNING,
         runner_id=runner_id,
         started_at=now,
@@ -129,6 +138,17 @@ def claim_job_stage(
     session.flush()
     if attempt.id is None:
         raise JobClaimError("Attempt id was not assigned after claim.")
+    effective_reservation = reservation or _default_reservation_for_resource(resource_class)
+    if effective_reservation is not None:
+        acquire_attempt_reservation(
+            session,
+            job_id=job_id,
+            attempt_id=attempt.id,
+            scheduler_session_id=scheduler_session_id,
+            resource_class=resource_class,
+            reservation=effective_reservation,
+            now=now,
+        )
     record_stage_event(
         session,
         job_id=job_id,
@@ -224,6 +244,7 @@ def complete_job_stage(
 
     attempt.status = AttemptStatus.COMPLETED
     attempt.finished_at = now
+    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="completed")
     job.last_error_type = None
     job.last_error_message = None
     job.claimed_by = None
@@ -289,6 +310,7 @@ def fail_job_stage(
     attempt.error_message = str(error)
     attempt.exit_code = exit_code
     attempt.finished_at = now
+    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="failed")
     transition = plan_failed_stage_transition(job.status, now=now)
     job.status = transition.status
     job.claimed_by = None
@@ -303,13 +325,42 @@ def fail_job_stage(
         attempt=attempt,
         event_type=JobEventType.STAGE_FAILED,
         now=now,
-        details={
-            "error_type": attempt.error_type,
-            "exit_code": exit_code,
-        },
+        details=_failure_event_details(
+            error=error,
+            error_type=attempt.error_type,
+            exit_code=exit_code,
+        ),
     )
     session.add(job)
     session.add(attempt)
+
+
+def _failure_event_details(
+    *,
+    error: Exception,
+    error_type: str,
+    exit_code: int | None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "error_type": error_type,
+        "exit_code": exit_code,
+    }
+    failure_reason = getattr(error, "failure_reason", None)
+    if isinstance(failure_reason, ProcessFailureReason):
+        details["failure_reason"] = failure_reason.value
+    resource_summary = getattr(error, "resource_summary", None)
+    if isinstance(resource_summary, ProcessResourceSummary):
+        details["resource_summary"] = {
+            "peak_rss_bytes": resource_summary.peak_rss_bytes,
+            "peak_swap_bytes": resource_summary.peak_swap_bytes,
+            "memory_oom_events_delta": resource_summary.memory_oom_events_delta,
+            "memory_oom_kill_events_delta": resource_summary.memory_oom_kill_events_delta,
+            "swap_current_bytes_delta": resource_summary.swap_current_bytes_delta,
+            "cpu_throttled_events_delta": resource_summary.cpu_throttled_events_delta,
+            "cpu_throttled_usec_delta": resource_summary.cpu_throttled_usec_delta,
+            "attribution_available": resource_summary.attribution_available,
+        }
+    return details
 
 
 def interrupt_job_stage(
@@ -328,6 +379,7 @@ def interrupt_job_stage(
     attempt.status = AttemptStatus.INTERRUPTED
     attempt.finished_at = now
     attempt.exit_code = 130
+    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="interrupted")
     transition = plan_interrupted_stage_transition(
         job.status,
         hold_requested=job.hold_requested_at is not None,
@@ -501,6 +553,7 @@ def recover_abandoned_jobs(
     now: datetime,
     encoded_output_exists: Callable[[Job], bool],
 ) -> RecoverySummary:
+    reconcile_stale_reservations(session, now=now)
     recovered_jobs = 0
     interrupted_attempts = 0
     jobs = list(session.exec(select(SQLiteJob).where(SQLiteJob.status == JobStatus.ENCODING)).all())
@@ -675,6 +728,12 @@ def cancel_claimed_job(
     attempt.status = AttemptStatus.CANCELED
     attempt.finished_at = now
     attempt.exit_code = 130
+    release_attempt_reservation(
+        session,
+        attempt_id=_require_id(attempt),
+        now=now,
+        reason="cancelled",
+    )
     transition = plan_canceled_transition(job.status, now=now)
     job.status = transition.status
     job.claimed_by = None
@@ -749,6 +808,14 @@ def _latest_running_attempt(session: Session, *, job_id: int) -> JobAttempt | No
         .where(SQLiteJobAttempt.job_id == job_id, SQLiteJobAttempt.status == AttemptStatus.RUNNING)
         .order_by(col(SQLiteJobAttempt.attempt_number).desc())
     ).first()
+
+
+def _default_reservation_for_resource(
+    resource_class: object,
+) -> JobResourceReservation | None:
+    if resource_class == resource_for_stage(JobStage.ENCODE):
+        return JobResourceReservation(exclusive=True)
+    return None
 
 
 def _scene_detection_completed(session: Session, *, job_id: int) -> bool:

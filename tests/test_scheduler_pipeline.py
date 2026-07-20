@@ -21,21 +21,27 @@ from avarch.adapters.scheduler_workers import (
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import (
     Job,
+    JobAttempt,
     JobAttemptProgress,
     JobEvent,
     MediaFile,
     MediaFileStatus,
+    PerformanceObservation,
 )
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.validation import ValidationExecutionError
+from avarch.application.environment_signature import build_execution_environment_signature
 from avarch.application.progress import ProgressSink
 from avarch.application.promotion import (
     PromotionPreflightView,
     PromotionRecordView,
     PromotionResultView,
 )
+from avarch.application.resource_decision import RESOURCE_DECISION_ALGORITHM_VERSION
+from avarch.application.resources import ResourceConfidence, ResourceSnapshot, ResourceValue
+from avarch.application.workload_signature import build_workload_signature
 from avarch.config import AppConfig, DatabaseSettings
-from avarch.domain.jobs import JobEventType, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.models.promotion import PromotionMode, PromotionStatus
@@ -293,7 +299,11 @@ def test_encode_worker_requests_process_token_when_cancelled(
         task = asyncio.create_task(
             execute_encode_job(job_id=1, runner_id="runner", config=config)
         )
-        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while not started.is_set():
+            if time.monotonic() > deadline:
+                raise AssertionError("worker did not start fake encode")
+            await asyncio.sleep(0.01)
         task.cancel()
         await asyncio.wait_for(task, timeout=3.0)
 
@@ -337,6 +347,322 @@ def test_encode_worker_records_failed_progress_on_execution_error(
     assert ProgressPhase(progress.phase) == ProgressPhase.FAILED
     assert progress.message == "encoder failed full diagnostics stay in logs"
     assert len(progress.message) <= 500
+
+
+def test_encode_worker_persists_resource_decision_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, _plan = _stored_encode_job(tmp_path)
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers.effective_resource_snapshot",
+        lambda: ResourceSnapshot(
+            effective_cpu_count=4,
+            effective_cpu_quota=4.0,
+            effective_memory_bytes=8 * 1024**3,
+            cpu_values=(ResourceValue("cgroup_v2", 4.0, ResourceConfidence.HIGH),),
+            memory_values=(
+                ResourceValue("cgroup_v2", 8 * 1024**3, ResourceConfidence.HIGH),
+            ),
+        ),
+    )
+
+    def fake_execute_plan(
+        _plan: object,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token, progress_sink
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        attempt = session.get(JobAttempt, 1)
+
+    assert attempt is not None
+    assert attempt.command_json is not None
+    command = json.loads(attempt.command_json)
+    assert command["resource_decision"] == {
+        "algorithm_version": 2,
+        "confidence": 1.0,
+        "effective_svt_lp": "native",
+        "effective_workers": 2,
+        "evidence_count": None,
+        "fallback": False,
+        "mode": "manual",
+        "reason": "manual_override",
+        "schema_version": 1,
+    }
+    assert command["resource_snapshot"]["effective_cpu_count"] == 4
+    assert command["resource_snapshot"]["effective_memory_bytes"] == 8 * 1024**3
+
+
+def test_encode_worker_uses_compatible_history_for_auto_resource_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, plan = _stored_encode_job(tmp_path)
+    config = config.model_copy(
+        update={"resources": config.resources.model_copy(update={"cpu_reserve": 0.0})}
+    )
+    plan = plan.model_copy(
+        update={
+            "av1an": plan.av1an.model_copy(
+                update={
+                    "workers": "auto",
+                    "encoder_args": ["--preset", "6", "--crf", "28"],
+                }
+            ),
+            "semantic_hash": "semantic-history",
+            "resource_policy_hash": "resource-policy-history",
+        }
+    )
+    plan.artifacts.plan_json.write_text(canonical_json(plan), encoding="utf-8")
+    snapshot = ResourceSnapshot(
+        effective_cpu_count=8,
+        effective_cpu_quota=8.0,
+        effective_memory_bytes=16 * 1024**3,
+        cpu_values=(ResourceValue("cgroup_v2", 8.0, ResourceConfidence.HIGH),),
+        memory_values=(ResourceValue("cgroup_v2", 16 * 1024**3, ResourceConfidence.HIGH),),
+    )
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers.effective_resource_snapshot",
+        lambda: snapshot,
+    )
+    _add_resource_history(config=config, plan=plan, snapshot=snapshot)
+
+    def fake_execute_plan(
+        selected_plan: Any,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token, progress_sink
+        assert selected_plan.av1an.workers == 4
+        assert selected_plan.av1an.encoder_args[-2:] == ["--lp", "2"]
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        attempt = session.exec(
+            select(JobAttempt).where(JobAttempt.runner_id == "runner")
+        ).one()
+
+    assert attempt.command_json is not None
+    command = json.loads(attempt.command_json)
+    assert command["resource_decision"]["mode"] == "auto"
+    assert command["resource_decision"]["effective_workers"] == 4
+    assert command["resource_decision"]["effective_svt_lp"] == 2
+    assert command["resource_decision"]["reason"] == "historical_estimate"
+    assert command["resource_decision"]["evidence_count"] == 3
+    assert command["av1an_argv"][command["av1an_argv"].index("--workers") + 1] == "4"
+    assert "--lp 2" in command["av1an_argv"][command["av1an_argv"].index("--video-params") + 1]
+
+
+def test_encode_worker_calibrates_auto_plan_before_starting_production_encode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from avarch.application.benchmark_samples import BenchmarkSample
+    from avarch.application.calibration_orchestrator import (
+        CalibrationExecutionResult,
+        MeasuredResourceSelection,
+    )
+    from avarch.application.performance_candidates import generate_safe_concurrency_candidates
+    from avarch.domain.resource_policy import parse_resource_intent
+
+    config, plan = _stored_encode_job(tmp_path)
+    plan = plan.model_copy(
+        update={
+            "av1an": plan.av1an.model_copy(
+                update={"workers": "auto", "encoder_args": ["--preset", "6", "--crf", "28"]}
+            )
+        }
+    )
+    plan.artifacts.plan_json.write_text(canonical_json(plan), encoding="utf-8")
+    snapshot = ResourceSnapshot(
+        effective_cpu_count=8,
+        effective_cpu_quota=8.0,
+        effective_memory_bytes=16 * 1024**3,
+        cpu_values=(ResourceValue("cgroup_v2", 8.0, ResourceConfidence.HIGH),),
+        memory_values=(ResourceValue("cgroup_v2", 16 * 1024**3, ResourceConfidence.HIGH),),
+    )
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers.effective_resource_snapshot",
+        lambda: snapshot,
+    )
+    def fake_source_frame_rate(
+        _session: Session,
+        *,
+        media_file: MediaFile,
+        stream_index: int,
+    ) -> float:
+        del media_file, stream_index
+        return 24.0
+
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers._source_frame_rate",
+        fake_source_frame_rate,
+    )
+    candidates = generate_safe_concurrency_candidates(
+        intent=parse_resource_intent(workers="auto"),
+        capacity=ResourceCapacity(
+            cheap_workers=1,
+            av1an_jobs=1,
+            file_ops=1,
+            cpu_budget=8,
+            memory_budget_bytes=16 * 1024**3,
+        ),
+    )
+    winner = next(candidate for candidate in candidates if candidate.workers != "auto")
+    order: list[str] = []
+
+    def fake_run_calibration(**_kwargs: object) -> CalibrationExecutionResult:
+        order.append("calibration")
+        return CalibrationExecutionResult(
+            status="completed",
+            reason="winner",
+            budget_seconds=6.0,
+            sample=BenchmarkSample(0.0, 10.0, 240, 10),
+            candidates=candidates,
+            measurements=(),
+            tournament=None,
+            selection=MeasuredResourceSelection(
+                candidate=winner,
+                confidence=0.8,
+                reason="calibration_measurement",
+                evidence_count=2,
+            ),
+        )
+
+    def fake_execute_plan(
+        selected_plan: Any,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        del cancellation_token, progress_sink
+        order.append("encode")
+        assert selected_plan.av1an.workers == winner.workers
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.run_calibration", fake_run_calibration)
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        attempt = session.get(JobAttempt, 1)
+    assert order == ["calibration", "encode"]
+    assert attempt is not None and attempt.command_json is not None
+    command = json.loads(attempt.command_json)
+    assert command["calibration"]["status"] == "completed"
+    assert command["resource_decision"]["reason"] == "calibration_measurement"
+
+
+def test_encode_worker_does_not_start_when_calibration_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from avarch.application.benchmark_samples import BenchmarkSample
+    from avarch.application.calibration_orchestrator import CalibrationExecutionResult
+    from avarch.application.performance_candidates import generate_safe_concurrency_candidates
+    from avarch.domain.resource_policy import parse_resource_intent
+
+    config, plan = _stored_encode_job(tmp_path)
+    plan = plan.model_copy(
+        update={
+            "av1an": plan.av1an.model_copy(
+                update={"workers": "auto", "encoder_args": ["--preset", "6", "--crf", "28"]}
+            )
+        }
+    )
+    plan.artifacts.plan_json.write_text(canonical_json(plan), encoding="utf-8")
+    snapshot = ResourceSnapshot(
+        effective_cpu_count=8,
+        effective_cpu_quota=8.0,
+        effective_memory_bytes=16 * 1024**3,
+        cpu_values=(ResourceValue("cgroup_v2", 8.0, ResourceConfidence.HIGH),),
+        memory_values=(ResourceValue("cgroup_v2", 16 * 1024**3, ResourceConfidence.HIGH),),
+    )
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers.effective_resource_snapshot",
+        lambda: snapshot,
+    )
+
+    def fake_source_frame_rate(
+        _session: Session,
+        *,
+        media_file: MediaFile,
+        stream_index: int,
+    ) -> float:
+        del media_file, stream_index
+        return 24.0
+
+    monkeypatch.setattr(
+        "avarch.adapters.scheduler_workers._source_frame_rate",
+        fake_source_frame_rate,
+    )
+    candidates = generate_safe_concurrency_candidates(
+        intent=parse_resource_intent(workers="auto"),
+        capacity=ResourceCapacity(
+            cheap_workers=1,
+            av1an_jobs=1,
+            file_ops=1,
+            cpu_budget=7,
+            memory_budget_bytes=14 * 1024**3,
+        ),
+    )
+    execute_called = False
+
+    def fake_run_calibration(**_kwargs: object) -> CalibrationExecutionResult:
+        return CalibrationExecutionResult(
+            status="incomplete",
+            reason="candidate_set_incomplete",
+            budget_seconds=120.0,
+            sample=BenchmarkSample(0.0, 10.0, 240, 10),
+            candidates=candidates,
+            measurements=(),
+            tournament=None,
+            selection=None,
+        )
+
+    def fake_execute_plan(
+        _plan: Any,
+        *,
+        cancellation_token: object | None = None,
+        progress_sink: ProgressSink | None = None,
+    ) -> object:
+        nonlocal execute_called
+        del cancellation_token, progress_sink
+        execute_called = True
+        return "completed"
+
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.run_calibration", fake_run_calibration)
+    monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
+
+    asyncio.run(execute_encode_job(job_id=1, runner_id="runner", config=config))
+
+    engine = create_db_engine(config.database.url)
+    with Session(engine) as session:
+        job = session.get(Job, 1)
+        attempt = session.get(JobAttempt, 1)
+        progress = session.get(JobAttemptProgress, 1)
+    assert execute_called is False
+    assert job is not None and job.status == JobStatus.FAILED
+    assert attempt is not None and attempt.command_json is not None
+    assert progress is not None and ProgressPhase(progress.phase) == ProgressPhase.FAILED
+    assert "Production encode was not started" in (progress.message or "")
 
 
 def test_encode_worker_persists_preparing_then_encoding_progress(
@@ -405,12 +731,22 @@ def test_encode_worker_persists_numeric_av1an_progress(
     engine = create_db_engine(config.database.url)
     with Session(engine) as session:
         progress = session.get(JobAttemptProgress, 1)
+        observation = session.exec(select(PerformanceObservation)).one()
 
     assert progress is not None
     assert ProgressPhase(progress.phase) == ProgressPhase.COMPLETED
     assert progress.current_value == 48.0
     assert progress.total_value == 120.0
     assert progress.advanced_at is not None
+    assert observation.attempt_id == 1
+    assert observation.total_frames == 48
+    assert observation.incomplete is False
+    assert observation.plan_hash is not None
+    assert observation.resource_decision_json is not None
+    assert observation.environment_signature_hash is not None
+    assert observation.environment_signature_json is not None
+    assert observation.workload_signature_hash is not None
+    assert observation.workload_signature_json is not None
 
 
 def test_encode_worker_ignores_external_progress_sink_failure(
@@ -759,6 +1095,85 @@ def _stored_validation_job(tmp_path: Path) -> tuple[AppConfig, Any]:
         job.updated_at = datetime.now(UTC)
         session.add(job)
     return config, plan
+
+
+def _add_resource_history(
+    *,
+    config: AppConfig,
+    plan: Any,
+    snapshot: ResourceSnapshot,
+) -> None:
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+    environment = build_execution_environment_signature(
+        snapshot=snapshot,
+        tool_versions={
+            "av1an_version_family": plan.execution_identity.av1an_version_family,
+            "vapoursynth_version": plan.vapoursynth.vapoursynth_version,
+        },
+    )
+    workload = build_workload_signature(plan)
+    with Session(engine) as session, session.begin():
+        for number, workers, svt_lp, fps in (
+            (10, "auto", "native", 10.0),
+            (11, "auto", "native", 10.0),
+            (12, "auto", "native", 10.0),
+            (13, 4, 2, 20.0),
+            (14, 4, 2, 20.0),
+            (15, 4, 2, 20.0),
+        ):
+            attempt = JobAttempt(
+                job_id=1,
+                attempt_number=number,
+                stage=JobStage.ENCODE,
+                resource_class=ResourceClass.HEAVY_AV1AN,
+                status=AttemptStatus.COMPLETED,
+                runner_id=f"history-{number}",
+                started_at=now,
+                finished_at=now,
+            )
+            session.add(attempt)
+            session.flush()
+            assert attempt.id is not None
+            session.add(
+                PerformanceObservation(
+                    schema_version=1,
+                    job_id=1,
+                    attempt_id=attempt.id,
+                    plan_hash=plan.plan_hash,
+                    semantic_hash=plan.semantic_hash,
+                    resource_policy_hash=plan.resource_policy_hash,
+                    resource_decision_json=canonical_json(
+                        {
+                            "algorithm_version": RESOURCE_DECISION_ALGORITHM_VERSION,
+                            "effective_workers": workers,
+                            "effective_svt_lp": svt_lp,
+                        }
+                    ),
+                    tool_versions_json=None,
+                    environment_signature_hash=environment.signature_hash,
+                    environment_signature_json=canonical_json(environment.to_payload()),
+                    workload_signature_hash=workload.signature_hash,
+                    workload_signature_json=canonical_json(workload.to_payload()),
+                    total_frames=1200,
+                    observation_duration_seconds=60.0,
+                    aggregate_fps=fps,
+                    peak_rss_bytes=1024,
+                    peak_cgroup_memory_bytes=1024,
+                    average_cpu_utilization_percent=80.0,
+                    swap_current_bytes_delta=0,
+                    cpu_throttled_events_delta=0,
+                    cpu_throttled_usec_delta=0,
+                    memory_oom_events_delta=0,
+                    memory_oom_kill_events_delta=0,
+                    resource_attribution_available=True,
+                    incomplete=False,
+                    progress_samples_observed=2,
+                    resource_samples_observed=0,
+                    warmup_seconds=0.0,
+                    created_at=now,
+                )
+            )
 
 
 def _validation_report(

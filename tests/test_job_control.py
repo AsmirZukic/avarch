@@ -22,7 +22,14 @@ from avarch.adapters.sqlite.job_transitions import (
     interrupt_job_stage,
     recover_abandoned_jobs,
 )
-from avarch.adapters.sqlite.models import Job, JobAttempt, JobEvent, MediaFile, MediaFileStatus
+from avarch.adapters.sqlite.models import (
+    Job,
+    JobAttempt,
+    JobEvent,
+    MediaFile,
+    MediaFileStatus,
+    ResourceReservation,
+)
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
@@ -404,6 +411,31 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
     assert job is not None
     assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.ENCODE
+
+
+def test_recovery_releases_stale_resource_reservation(tmp_path: Path) -> None:
+    engine, _job_id = _running_job_with_attempt(tmp_path)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        attempt = session.exec(select(JobAttempt)).one()
+        attempt.status = AttemptStatus.FAILED
+        attempt.finished_at = now
+        session.add(attempt)
+
+    with Session(engine) as session, session.begin():
+        recover_abandoned_jobs(
+            session,
+            now=now,
+            encoded_output_exists=_encoded_output_exists,
+        )
+
+    with Session(engine) as session:
+        reservation = session.exec(select(ResourceReservation)).one()
+
+    assert reservation.status == "released"
+    assert reservation.release_reason == "reconciled_stale_attempt"
+    assert reservation.released_at == now.replace(tzinfo=None)
 
 
 def test_recovery_recovers_running_promotion_jobs(tmp_path: Path) -> None:
