@@ -34,6 +34,11 @@ include = ["src", "tests"]
 venvPath = "."
 venv = ".venv"
 
+[tool.pytest.ini_options]
+markers = [
+  "encoder_integration: opt-in tests that run real encoder resume compatibility checks",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

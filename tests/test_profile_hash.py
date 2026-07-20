@@ -103,14 +103,14 @@ def test_profile_hash_changes_when_encoder_args_change() -> None:
     assert build_profile_hash(left) != build_profile_hash(right)
 
 
-def test_profile_hash_resolves_auto_workers_from_cpu_budget() -> None:
+def test_profile_hash_keeps_auto_workers_independent_from_cpu_budget() -> None:
     profile = _profile({"av1an": {"workers": "auto"}})
 
     assert build_profile_hash(
         profile,
         available_cpu_count=8,
         available_memory_bytes=64 * 1024**3,
-    ) != build_profile_hash(
+    ) == build_profile_hash(
         profile,
         available_cpu_count=16,
         available_memory_bytes=64 * 1024**3,
@@ -125,9 +125,7 @@ def test_profile_hash_changes_when_stream_policy_changes() -> None:
 
 
 def test_same_template_content_at_different_paths_has_same_profile_hash() -> None:
-    left = _profile(
-        {"vapoursynth": {"mode": "custom_template", "template": "/templates/left.vpy"}}
-    )
+    left = _profile({"vapoursynth": {"mode": "custom_template", "template": "/templates/left.vpy"}})
     right = _profile(
         {"vapoursynth": {"mode": "custom_template", "template": "/templates/right.vpy"}}
     )

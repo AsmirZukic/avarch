@@ -2,7 +2,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from avarch.models.execution import ProcessResult, ProcessTerminationReason
+from avarch.models.execution import (
+    ProcessFailureReason,
+    ProcessResourceSummary,
+    ProcessResult,
+    ProcessTerminationReason,
+)
 
 
 def test_process_result_records_successful_exit() -> None:
@@ -66,6 +71,40 @@ def test_process_result_distinguishes_cancellation_and_forced_kill() -> None:
     assert killed.termination_requested_at == termination_requested_at
     assert cancelled.succeeded is False
     assert killed.succeeded is False
+
+
+def test_process_result_classifies_cgroup_oom_kill() -> None:
+    started_at = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
+    finished_at = started_at + timedelta(seconds=2)
+
+    result = ProcessResult.exited(
+        command=("av1an",),
+        return_code=-9,
+        started_at=started_at,
+        finished_at=finished_at,
+        resource_summary=ProcessResourceSummary(memory_oom_kill_events_delta=1),
+    )
+
+    assert result.failure_reason is ProcessFailureReason.RESOURCE_OOM
+    assert result.resource_summary is not None
+    assert result.resource_summary.memory_oom_kill_events_delta == 1
+
+
+def test_cancelled_process_is_not_reclassified_as_oom() -> None:
+    started_at = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
+    termination_requested_at = started_at + timedelta(seconds=1)
+    finished_at = started_at + timedelta(seconds=2)
+
+    result = ProcessResult.cancelled(
+        command=("av1an",),
+        return_code=-9,
+        started_at=started_at,
+        finished_at=finished_at,
+        termination_requested_at=termination_requested_at,
+        resource_summary=ProcessResourceSummary(memory_oom_kill_events_delta=1),
+    )
+
+    assert result.failure_reason is ProcessFailureReason.CANCELLED
 
 
 def test_process_result_rejects_termination_request_outside_lifecycle() -> None:

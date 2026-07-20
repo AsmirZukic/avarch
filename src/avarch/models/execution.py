@@ -39,6 +39,27 @@ class ProcessTerminationReason(StrEnum):
     FORCED_KILL = "forced_kill"
 
 
+class ProcessFailureReason(StrEnum):
+    CANCELLED = "cancelled"
+    RESOURCE_OOM = "resource_oom"
+    RESOURCE_PRESSURE = "resource_pressure"
+    PROCESS_SIGNAL = "process_signal"
+    ENCODER_FAILURE = "encoder_failure"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessResourceSummary:
+    peak_rss_bytes: int | None = None
+    peak_swap_bytes: int | None = None
+    memory_oom_events_delta: int | None = None
+    memory_oom_kill_events_delta: int | None = None
+    swap_current_bytes_delta: int | None = None
+    cpu_throttled_events_delta: int | None = None
+    cpu_throttled_usec_delta: int | None = None
+    attribution_available: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     command: tuple[str, ...]
@@ -47,6 +68,7 @@ class ProcessResult:
     finished_at: datetime
     termination_reason: ProcessTerminationReason
     termination_requested_at: datetime | None = None
+    resource_summary: ProcessResourceSummary | None = None
 
     def __post_init__(self) -> None:
         if self.finished_at < self.started_at:
@@ -62,6 +84,31 @@ class ProcessResult:
     def succeeded(self) -> bool:
         return self.return_code == 0 and self.termination_reason is ProcessTerminationReason.EXITED
 
+    @property
+    def failure_reason(self) -> ProcessFailureReason | None:
+        if self.succeeded:
+            return None
+        if self.termination_reason in {
+            ProcessTerminationReason.CANCELLED,
+            ProcessTerminationReason.FORCED_KILL,
+        }:
+            return ProcessFailureReason.CANCELLED
+        summary = self.resource_summary
+        if summary is not None:
+            if (summary.memory_oom_kill_events_delta or 0) > 0:
+                return ProcessFailureReason.RESOURCE_OOM
+            if (
+                (summary.memory_oom_events_delta or 0) > 0
+                or (summary.swap_current_bytes_delta or 0) > 0
+                or (summary.cpu_throttled_events_delta or 0) > 0
+            ):
+                return ProcessFailureReason.RESOURCE_PRESSURE
+        if self.return_code < 0:
+            return ProcessFailureReason.PROCESS_SIGNAL
+        if self.return_code > 0:
+            return ProcessFailureReason.ENCODER_FAILURE
+        return ProcessFailureReason.UNKNOWN
+
     @classmethod
     def exited(
         cls,
@@ -70,6 +117,7 @@ class ProcessResult:
         return_code: int,
         started_at: datetime,
         finished_at: datetime,
+        resource_summary: ProcessResourceSummary | None = None,
     ) -> ProcessResult:
         return cls(
             command=command,
@@ -77,6 +125,7 @@ class ProcessResult:
             started_at=started_at,
             finished_at=finished_at,
             termination_reason=ProcessTerminationReason.EXITED,
+            resource_summary=resource_summary,
         )
 
     @classmethod
@@ -88,6 +137,7 @@ class ProcessResult:
         started_at: datetime,
         finished_at: datetime,
         termination_requested_at: datetime | None = None,
+        resource_summary: ProcessResourceSummary | None = None,
     ) -> ProcessResult:
         return cls(
             command=command,
@@ -96,6 +146,7 @@ class ProcessResult:
             finished_at=finished_at,
             termination_reason=ProcessTerminationReason.CANCELLED,
             termination_requested_at=termination_requested_at,
+            resource_summary=resource_summary,
         )
 
     @classmethod
@@ -107,6 +158,7 @@ class ProcessResult:
         started_at: datetime,
         finished_at: datetime,
         termination_requested_at: datetime | None = None,
+        resource_summary: ProcessResourceSummary | None = None,
     ) -> ProcessResult:
         return cls(
             command=command,
@@ -115,6 +167,7 @@ class ProcessResult:
             finished_at=finished_at,
             termination_reason=ProcessTerminationReason.FORCED_KILL,
             termination_requested_at=termination_requested_at,
+            resource_summary=resource_summary,
         )
 
 
@@ -156,3 +209,15 @@ class MuxStageError(ExecutionError):
 
 class ExecutionInterruptedError(ExecutionError):
     pass
+
+
+class ResourceExhaustionError(ExecutionError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        resource_summary: ProcessResourceSummary | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resource_summary = resource_summary
+        self.failure_reason = ProcessFailureReason.RESOURCE_OOM
