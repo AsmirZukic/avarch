@@ -38,6 +38,17 @@ def test_plan_round_trips_through_json() -> None:
     assert restored == plan
 
 
+def test_legacy_plan_without_split_hashes_loads_with_compatibility_defaults() -> None:
+    data = sample_plan().model_dump(mode="json")
+    data.pop("semantic_hash", None)
+    data.pop("resource_policy_hash", None)
+
+    restored = TranscodePlan.model_validate(data)
+
+    assert restored.semantic_hash is None
+    assert restored.resource_policy_hash is None
+
+
 def test_plan_requires_promotion_policy() -> None:
     data = sample_plan().model_dump()
     data.pop("promotion")

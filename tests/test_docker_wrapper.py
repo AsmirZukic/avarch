@@ -210,6 +210,59 @@ def test_wrapper_volume_options_env_can_request_relabel(tmp_path: Path) -> None:
     assert f"-v {workspace}:/workspace:z" in command
 
 
+def test_wrapper_forwards_resource_limits_once(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    arg_log = tmp_path / "docker.args"
+    fake_bin = _fake_docker(tmp_path)
+    env = _wrapper_env(
+        fake_bin,
+        log,
+        image="avarch:test",
+        docker_cpus="2.5",
+        docker_cpuset_cpus="0-1",
+        docker_memory="6g",
+    )
+    env["DOCKER_ARG_LOG"] = str(arg_log)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    args = arg_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0
+    assert args.count("--cpus") == 1
+    assert args[args.index("--cpus") + 1] == "2.5"
+    assert args.count("--cpuset-cpus") == 1
+    assert args[args.index("--cpuset-cpus") + 1] == "0-1"
+    assert args.count("--memory") == 1
+    assert args[args.index("--memory") + 1] == "6g"
+
+
+def test_wrapper_rejects_invalid_resource_limit_before_docker_run(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    log = tmp_path / "docker.log"
+    fake_bin = _fake_docker(tmp_path)
+
+    result = subprocess.run(
+        [str(WRAPPER), "version"],
+        cwd=workspace,
+        env=_wrapper_env(fake_bin, log, image="avarch:test", docker_cpus="two"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid AVARCH_DOCKER_CPUS" in result.stderr
+    assert not log.exists()
+
+
 def test_wrapper_allocates_tty_for_interactive_workflow_run(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
@@ -361,6 +414,11 @@ def test_wrapper_does_not_allocate_tty_for_detached_scheduler(tmp_path: Path) ->
     assert result.returncode == 0
     assert "-i" not in args
     assert "-t" not in args
+    assert "-d" in args
+    assert args.index("-d") < args.index("avarch:test")
+    assert "--name" in args
+    assert args[args.index("--name") + 1] == "avarch-encoder"
+    assert args[-3:] == ["--managed-child", "--mode", "detached"]
 
 
 def test_wrapper_rejects_running_scheduler_container(tmp_path: Path) -> None:
@@ -533,6 +591,9 @@ def _wrapper_env(
     ls_zd_result: str = "",
     security_opt: str | None = None,
     volume_options: str | None = None,
+    docker_cpus: str | None = None,
+    docker_cpuset_cpus: str | None = None,
+    docker_memory: str | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -555,4 +616,10 @@ def _wrapper_env(
         env["AVARCH_DOCKER_SECURITY_OPT"] = security_opt
     if volume_options is not None:
         env["AVARCH_DOCKER_VOLUME_OPTIONS"] = volume_options
+    if docker_cpus is not None:
+        env["AVARCH_DOCKER_CPUS"] = docker_cpus
+    if docker_cpuset_cpus is not None:
+        env["AVARCH_DOCKER_CPUSET_CPUS"] = docker_cpuset_cpus
+    if docker_memory is not None:
+        env["AVARCH_DOCKER_MEMORY"] = docker_memory
     return env
