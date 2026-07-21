@@ -176,6 +176,53 @@ def test_recovered_promotion_records_savings_once(tmp_path: Path) -> None:
     )
 
 
+def test_recover_completed_promotion_reruns_cleanup(tmp_path: Path) -> None:
+    config, job_id, source, encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    engine = create_db_engine(config.database.url)
+    now = datetime.now(UTC)
+
+    with Session(engine) as session, session.begin():
+        record = claim_promotion(
+            session,
+            job_id=job_id,
+            mode=PromotionMode.REPLACE_ATOMIC,
+            owner_token="first-owner",
+            now=now,
+        )
+        backup = Path(record.backup_path or "")
+        source_stat = create_file_snapshot(source)
+        backup.hardlink_to(source)
+        record.status = PromotionStatus.COMPLETED
+        record.phase = PromotionPhase.COMMITTED
+        record.cleanup_completed = False
+        record.owner_token = None
+        record.lease_expires_at = None
+        record.source_stat_json = canonical_json(
+            {
+                "size_bytes": source_stat.size_bytes,
+                "mtime_ns": source_stat.mtime_ns,
+                "device_id": source_stat.device_id,
+                "inode": source_stat.inode,
+                "mode": source.stat(follow_symlinks=False).st_mode,
+            }
+        )
+        session.add(record)
+        promotion_id = record.id or 0
+
+    recovered = asyncio.run(
+        recover_promotion(job_id=job_id, config=config, owner_token="second-owner")
+    )
+
+    with Session(engine) as session:
+        record = session.get(PromotionRecord, promotion_id)
+
+    assert recovered.status == PromotionStatus.COMPLETED
+    assert record is not None
+    assert record.cleanup_completed is True
+    assert not backup.exists()
+    assert not encoded.exists()
+
+
 def test_promotion_never_deletes_original_first(tmp_path: Path) -> None:
     config, job_id, source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
 
