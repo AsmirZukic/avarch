@@ -191,6 +191,15 @@ def run_calibration(
     completed_keys = _completed_candidate_keys(measurements)
     required_initial_candidates = min(MIN_INITIAL_CANDIDATES, len(candidates))
     if len(completed_keys) < required_initial_candidates:
+        partial_result = _partial_calibration_result(
+            candidates=candidates,
+            measurements=tuple(measurements),
+            sample=sample,
+            budget_seconds=total_budget_seconds,
+            settings=settings,
+        )
+        if partial_result is not None:
+            return partial_result
         return CalibrationExecutionResult(
             status=CalibrationStatus.INCOMPLETE,
             reason="candidate_set_incomplete",
@@ -255,6 +264,46 @@ def run_calibration(
         sample=sample,
         candidates=candidates,
         measurements=tuple(measurements),
+        tournament=tournament,
+        selection=selection,
+    )
+
+
+def _partial_calibration_result(
+    *,
+    candidates: tuple[PerformanceCandidate, ...],
+    measurements: tuple[CalibrationMeasurementResult, ...],
+    sample: BenchmarkSample,
+    budget_seconds: float,
+    settings: PerformanceSettings,
+) -> CalibrationExecutionResult | None:
+    tournament_measurements = tuple(
+        _tournament_measurement(item, sample) for item in measurements
+    )
+    completed_keys = _completed_measurement_keys(tournament_measurements)
+    if len(completed_keys) < 2:
+        return None
+    tournament = select_measured_candidate(
+        candidates=candidates,
+        measurements=tournament_measurements,
+        minimum_gain_fraction=settings.calibration_min_gain_fraction,
+    )
+    winner = _candidate_for_key(candidates, tournament.winner)
+    if winner is None:
+        return None
+    selection = MeasuredResourceSelection(
+        candidate=winner,
+        confidence=min(tournament.confidence, 0.5),
+        reason="partial_calibration_measurement",
+        evidence_count=len(completed_keys),
+    )
+    return CalibrationExecutionResult(
+        status=CalibrationStatus.COMPLETED,
+        reason=f"partial_{tournament.reason.value}",
+        budget_seconds=budget_seconds,
+        sample=sample,
+        candidates=candidates,
+        measurements=measurements,
         tournament=tournament,
         selection=selection,
     )

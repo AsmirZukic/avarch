@@ -307,7 +307,9 @@ def test_scheduler_snapshot_includes_ordered_upcoming_jobs_and_filters_ineligibl
     assert all("cancel-requested" not in job.source_path for job in snapshot.upcoming_jobs)
 
 
-def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Path) -> None:
+def test_scheduler_snapshot_upcoming_jobs_keep_queue_order_when_capacity_is_full(
+    tmp_path: Path,
+) -> None:
     engine = _engine(tmp_path)
     now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
@@ -393,10 +395,12 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
         ).snapshot()
 
     assert [job.source_path for job in snapshot.upcoming_jobs] == [
+        "/media/would-encode-next.mkv",
         "/media/can-validate.mkv",
         "/media/can-promote.mkv",
     ]
     assert [job.selection_confidence for job in snapshot.upcoming_jobs] == [
+        "current_snapshot",
         "current_snapshot",
         "current_snapshot",
     ]
