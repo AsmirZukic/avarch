@@ -70,11 +70,10 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "next.mkv" in output
     assert "Capacity" in output
     assert "encode jobs" in output
-    assert "4 Av1an workers" in output
-    assert "4 concurrent SVT-AV1 encoders" in output
-    assert "4 LP each" in output
+    assert "4 each" in output
     assert "16 LP nominal" in output
     assert "reused calibration" in output
+    assert "auto Av1an workers" not in output
     assert "Recent activity unavailable" in output
     assert "Resource telemetry unavailable" in output
 
@@ -290,17 +289,85 @@ def test_dashboard_footer_surfaces_cancel_confirmation() -> None:
 
 
 def test_live_dashboard_uses_full_height_and_plain_footer() -> None:
-    output = _render(_snapshot(), width=150, height=40)
+    output = _render(
+        _snapshot(
+            upcoming_jobs=tuple(
+                UpcomingJobSummary(
+                    job_id=index,
+                    source_path=f"/media/next-{index}.mkv",
+                    profile_name="default",
+                    stage=JobStage.ENCODE,
+                    status=JobStatus.QUEUED,
+                    priority=5,
+                    selection_position=index,
+                    selection_confidence="current_snapshot",
+                )
+                for index in range(1, 5)
+            )
+        ),
+        width=150,
+        height=40,
+    )
     lines = output.splitlines()
 
     assert len(lines) == 40
     assert "Recent Activity" in output
+    assert "next-1.mkv" in output
+    assert "next-4.mkv" in output
     assert "Controls" not in output
     assert "p pause/resume   c cancel   l logs   Enter details   d/q detach" in lines[-2]
 
 
+def test_live_dashboard_stacks_panels_on_medium_console_width() -> None:
+    snapshot = _snapshot(
+        active_jobs=(
+            _active_job(
+                1,
+                "/media/Two and a Half Men - S01E10 - Merry Thanksgiving Bluray-1080p.mkv",
+            ).model_copy(
+                update={
+                    "stage": JobStage.SCENE_DETECT,
+                    "attempt": _active_job(1, "/media/movie.mkv").attempt.model_copy(  # type: ignore[union-attr]
+                        update={
+                            "phase": ProgressPhase.SCENE_DETECTION,
+                            "frames_current": 5032,
+                            "frames_total": 30458,
+                            "rate_per_second": 199.7,
+                            "speed_ratio": 8.33,
+                            "chunks_current": None,
+                            "chunks_total": None,
+                            "elapsed_seconds": 147,
+                        }
+                    ),
+                    "workflow_steps": (
+                        WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),
+                        WorkflowStepSummary(stage=JobStage.PLAN, state=WorkflowStepState.COMPLETE),
+                        WorkflowStepSummary(
+                            stage=JobStage.SCENE_DETECT,
+                            state=WorkflowStepState.ACTIVE,
+                        ),
+                        WorkflowStepSummary(stage=JobStage.ENCODE, state=WorkflowStepState.PENDING),
+                    ),
+                }
+            ),
+        )
+    )
+
+    output = _render(snapshot, width=132, height=40)
+    lines = output.splitlines()
+
+    assert len(lines) == 40
+    assert "Active Jobs" in output
+    assert "Merry Thanksgiving" in output
+    assert "scene scan 5032/30458 frames" in output
+    assert "Upcoming Jobs" in output
+    assert "Capacity" not in output
+    assert all(len(line) <= 132 for line in lines)
+
+
 def test_dashboard_renders_resource_telemetry() -> None:
     snapshot = _snapshot(
+        storage_saved_bytes=2_048,
         resources=ResourceTelemetrySummary(
             sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
             health=ResourceHealth.WARNING,
@@ -326,6 +393,8 @@ def test_dashboard_renders_resource_telemetry() -> None:
     narrow = _render(snapshot, width=70)
 
     assert "CPU" in wide
+    assert "space saved" in wide
+    assert "2.0 KiB" in wide
     assert "95%" in wide
     assert "━━━━━━━━━━━" in wide
     assert "active" in wide
@@ -335,13 +404,15 @@ def test_dashboard_renders_resource_telemetry() -> None:
     assert "warning" in wide
     assert "output write" in wide
     assert "84.0 MiB/s" in wide
-    assert "Resources CPU 95%" in narrow
+    assert "space saved 2.0 KiB" in narrow
+    assert "CPU 95%" in narrow
     assert "output write 84.0 MiB/s" in narrow
 
 
 def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
     unavailable = _render(
         _snapshot(
+            storage_saved_bytes=4096,
             resources=ResourceTelemetrySummary(
                 sampled_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
                 health=ResourceHealth.UNAVAILABLE,
@@ -369,6 +440,8 @@ def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
     )
 
     assert "unsupported_platform" in unavailable
+    assert "space saved" in unavailable
+    assert "4.0 KiB" in unavailable
     assert "freshness" in stale
     assert "stale" in stale
 
@@ -502,6 +575,7 @@ def _snapshot(
     watch_details: WatchJobDetailsSummary | None = None,
     watch_log_tail: WatchLogTailSummary | None = None,
     forecast: QueueForecastSummary | None = None,
+    storage_saved_bytes: int = 0,
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
     return SchedulerSnapshot(
@@ -531,6 +605,7 @@ def _snapshot(
             av1an_workers_configured=4,
         ),
         blocked_jobs=blocked_jobs,
+        storage_saved_bytes=storage_saved_bytes,
         upcoming_jobs=upcoming_jobs
         if upcoming_jobs is not None
         else (

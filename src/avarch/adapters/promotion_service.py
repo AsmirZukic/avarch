@@ -521,6 +521,15 @@ async def _execute_claimed_promotion(
     with Session(engine) as session:
         record = _promotion_record(session, promotion_id)
         plan = _load_job_plan(_promotion_job(session, record.job_id))
+        if (
+            PromotionStatus(record.status) == PromotionStatus.COMPLETED
+            and not record.cleanup_completed
+        ):
+            return _complete_success_cleanup(
+                engine=engine,
+                promotion_id=promotion_id,
+                plan=plan,
+            )
         source_path = Path(record.source_path)
         output_path = Path(record.validated_output_path)
         final_path = Path(record.final_path)
@@ -612,6 +621,15 @@ async def _execute_claimed_promotion(
         _commit_verified_promotion(session, record=record, now=_utc_now())
         promotion_id = _require_id(record)
 
+    return _complete_success_cleanup(engine=engine, promotion_id=promotion_id, plan=plan)
+
+
+def _complete_success_cleanup(
+    *,
+    engine: Engine,
+    promotion_id: int,
+    plan: TranscodePlan,
+) -> PromotionRecord:
     cleanup_error = _cleanup_after_success(engine, promotion_id, plan)
     with Session(engine) as session, session.begin():
         try:

@@ -257,6 +257,7 @@ class SchedulerSnapshot(SnapshotModel):
     session: SessionSummary | None = None
     active_jobs: tuple[ActiveJobSummary, ...]
     capacity: CapacitySummary
+    storage_saved_bytes: int = Field(default=0, strict=True)
     resources: ResourceTelemetrySummary | None = None
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
     blocked_jobs: tuple[BlockedJobSummary, ...] = ()
