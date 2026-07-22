@@ -747,6 +747,11 @@ def _cleanup_after_success(engine: Engine, promotion_id: int, plan: TranscodePla
         _delete_known_work_path(plan.av1an.temp_dir, work_dir=plan.temp_dir, recursive=True)
     except Exception as exc:
         errors.append(f"cleanup failed for {plan.av1an.temp_dir}: {exc}")
+    calibration_dir = plan.temp_dir / "calibration"
+    try:
+        _delete_known_work_path(calibration_dir, work_dir=plan.temp_dir, recursive=True)
+    except Exception as exc:
+        errors.append(f"cleanup failed for {calibration_dir}: {exc}")
     return "; ".join(errors)[:500] if errors else None
 
 

@@ -52,6 +52,18 @@ def test_promotion_replaces_original_with_encoded_file(tmp_path: Path) -> None:
     assert not encoded.exists()
 
 
+def test_successful_promotion_removes_calibration_work_dir(tmp_path: Path) -> None:
+    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
+    calibration_output = tmp_path / "work" / "calibration" / "key" / "candidate.mkv"
+    calibration_output.parent.mkdir(parents=True)
+    calibration_output.write_bytes(b"temporary calibration output")
+
+    result = asyncio.run(promote_job(job_id, config=config, mode=PromotionMode.REPLACE_ATOMIC))
+
+    assert result.promoted is True
+    assert not (tmp_path / "work" / "calibration").exists()
+
+
 def test_promotion_claim_records_promoting_progress(tmp_path: Path) -> None:
     config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
     engine = create_db_engine(config.database.url)
