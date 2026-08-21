@@ -170,7 +170,7 @@ def test_scheduler_snapshot_counts_active_attempts_and_current_progress(tmp_path
     assert snapshot.active_jobs[0].attempt.stale is True
     assert snapshot.active_jobs[0].attempt.last_update_age_seconds == 18
     assert snapshot.active_jobs[0].workflow_steps[3].state.value == "active"
-    assert query_count <= 14
+    assert query_count <= 13
 
 
 def test_scheduler_snapshot_does_not_rewind_encode_job_to_scene_detect_for_stale_scene_progress(
@@ -551,58 +551,6 @@ def test_scheduler_snapshot_includes_session_history_and_recent_events(tmp_path:
     assert snapshot.recent_events[0].stage == JobStage.ENCODE
     assert snapshot.recent_events[0].scheduler_session_id == snapshot.session.current.session_id
     assert snapshot.recent_events[0].details == {"frames": 100, "saved_bytes": 42}
-
-
-def test_scheduler_snapshot_sums_promoted_storage_savings(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
-
-    with Session(engine) as session:
-        job = _job(
-            session,
-            path="/media/promoted.mkv",
-            status=JobStatus.PROMOTED,
-            stage=JobStage.PROMOTE,
-        )
-        session.flush()
-        session.add_all(
-            [
-                JobEvent(
-                    job_id=job.id or 0,
-                    event_type=JobEventType.STAGE_COMPLETED,
-                    stage=JobStage.PROMOTE,
-                    actor="runner-1",
-                    details_json='{"saved_bytes":2048}',
-                    created_at=(now - timedelta(minutes=3)).replace(tzinfo=None),
-                ),
-                JobEvent(
-                    job_id=job.id or 0,
-                    event_type=JobEventType.STAGE_COMPLETED,
-                    stage=JobStage.PROMOTE,
-                    actor="runner-1",
-                    details_json='{"saved_bytes":1024}',
-                    created_at=(now - timedelta(minutes=2)).replace(tzinfo=None),
-                ),
-                JobEvent(
-                    job_id=job.id or 0,
-                    event_type=JobEventType.STAGE_COMPLETED,
-                    stage=JobStage.VALIDATE,
-                    actor="runner-1",
-                    details_json='{"saved_bytes":999999}',
-                    created_at=(now - timedelta(minutes=1)).replace(tzinfo=None),
-                ),
-            ]
-        )
-        session.commit()
-
-    with Session(engine) as session:
-        snapshot = SqliteSchedulerSnapshotQuery(
-            session,
-            workspace_root=str(tmp_path),
-            now=lambda: now,
-        ).snapshot()
-
-    assert snapshot.storage_saved_bytes == 3072
 
 
 def test_scheduler_snapshot_projects_known_blockers(tmp_path: Path) -> None:
