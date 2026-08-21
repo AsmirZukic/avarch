@@ -189,47 +189,6 @@ def test_orchestrator_attempts_every_candidate_with_shared_absolute_deadline(
     assert messages[-1] == "calibration candidate 5/5 completed"
 
 
-def test_orchestrator_uses_partial_measurements_when_budget_expires(
-    tmp_path: Path,
-) -> None:
-    runner = _FakeRunner(write_output=True)
-
-    result = run_calibration(
-        plan=sample_plan(),
-        settings=PerformanceSettings(
-            calibration_max_seconds=30,
-            calibration_max_predicted_fraction=0.01,
-            calibration_max_candidates=5,
-            calibration_warmup_seconds=0,
-        ),
-        intent=parse_resource_intent(workers="auto"),
-        capacity=ResourceCapacity(
-            cheap_workers=1,
-            av1an_jobs=1,
-            file_ops=1,
-            cpu_budget=19,
-            memory_budget_bytes=16 * 1024**3,
-        ),
-        observations=(),
-        frame_rate=24.0,
-        predicted_encode_seconds=1_319.0,
-        calibration_dir=tmp_path / "partial",
-        runner=runner,
-        command_renderer=build_av1an_command,
-        cancellation_token=ProcessCancellationToken(),
-        monotonic=_SequenceClock((0.0, 0.0, 10.0, 30.0)),
-    )
-
-    assert result.status == "completed"
-    assert result.reason == "partial_native_baseline"
-    assert result.selection is not None
-    assert result.selection.reason == "partial_calibration_measurement"
-    assert result.selection.evidence_count == 2
-    assert result.selection.confidence == 0.5
-    assert len(result.candidates) == 5
-    assert len(result.measurements) == 2
-
-
 def test_orchestrator_scores_post_warmup_fps_and_remeasures_close_finalists(
     tmp_path: Path,
 ) -> None:

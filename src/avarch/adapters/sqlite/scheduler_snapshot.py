@@ -19,7 +19,7 @@ from avarch.adapters.sqlite.models import (
     SchedulerSession,
     SchedulerState,
 )
-from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.adapters.sqlite.queue import claimable_jobs, select_launchable_queue_jobs
 from avarch.adapters.sqlite.scheduler_state import lease_active
 from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
@@ -43,7 +43,7 @@ from avarch.application.scheduler_snapshot import (
 )
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressUnit
-from avarch.domain.scheduler import SchedulerMode
+from avarch.domain.scheduler import ActiveJob, ResourceCapacity, SchedulerMode, resource_for_stage
 
 _ACTIVE_STATUSES = {
     JobStatus.ENCODING,
@@ -227,14 +227,37 @@ class SqliteSchedulerSnapshotQuery:
         )
 
     def _selected_upcoming_jobs(self, *, limit: int) -> list[Job]:
-        active_job_ids = {
-            _required_id(job.id)
+        capacity = self._resource_capacity()
+        if capacity is None:
+            return claimable_jobs(session=self._session, active_job_ids=set())[:limit]
+        return select_launchable_queue_jobs(
+            self._session,
+            active_jobs=self._active_jobs_for_selection(),
+            capacity=capacity,
+            limit=limit,
+        )
+
+    def _resource_capacity(self) -> ResourceCapacity | None:
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.capacity_cheap_workers is None:
+            return None
+        return ResourceCapacity(
+            cheap_workers=state.capacity_cheap_workers,
+            av1an_jobs=state.capacity_av1an_jobs or 0,
+            file_ops=state.capacity_file_ops or 0,
+        )
+
+    def _active_jobs_for_selection(self) -> list[ActiveJob]:
+        active_jobs = [
+            ActiveJob(job_id=_required_id(job.id), stage=JobStage(job.stage))
             for job in self._session.exec(
                 select(Job).where(col(Job.status).in_(_ACTIVE_STATUSES))
             ).all()
-            if job.id is not None
-        }
-        return claimable_jobs(session=self._session, active_job_ids=active_job_ids)[:limit]
+        ]
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.capacity_cheap_workers is None:
+            return active_jobs
+        return _pad_active_jobs_from_capacity_state(active_jobs, state)
 
     def _session_summary(self) -> SessionSummary | None:
         sessions = tuple(
@@ -472,6 +495,32 @@ def _blocked_details(
     if reason == JobEligibilityReason.PLAN_MISSING:
         return {"stage": JobStage(job.stage).value}
     return {}
+
+
+def _pad_active_jobs_from_capacity_state(
+    active_jobs: list[ActiveJob],
+    state: SchedulerState,
+) -> list[ActiveJob]:
+    padded = list(active_jobs)
+    active_by_resource = {
+        "cheap": 0,
+        "heavy_av1an": 0,
+        "file_op": 0,
+    }
+    for job in active_jobs:
+        active_by_resource[resource_for_stage(job.stage).value] += 1
+    synthetic_id = -1
+    for stage, target in (
+        (JobStage.VALIDATE, state.capacity_cheap_active or 0),
+        (JobStage.ENCODE, state.capacity_av1an_active or 0),
+        (JobStage.PROMOTE, state.capacity_file_ops_active or 0),
+    ):
+        resource = resource_for_stage(stage).value
+        while active_by_resource[resource] < target:
+            padded.append(ActiveJob(job_id=synthetic_id, stage=stage))
+            synthetic_id -= 1
+            active_by_resource[resource] += 1
+    return padded
 
 
 def _av1an_workers_from_command(command_json: str | None) -> int | None:
