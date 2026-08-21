@@ -3,10 +3,8 @@
 .ruff_cache/
 __pycache__/
 *.py[cod]
-avarch.toml
 .avarch/
 /media/
-/profiles/
 
 .codex/
 .uv-cache/

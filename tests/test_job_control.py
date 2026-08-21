@@ -28,7 +28,6 @@ from avarch.adapters.sqlite.models import (
     JobEvent,
     MediaFile,
     MediaFileStatus,
-    ResourceReservation,
 )
 from avarch.domain.jobs import (
     AttemptStatus,
@@ -413,31 +412,6 @@ def test_recovery_returns_plain_abandoned_job_to_pending(tmp_path: Path) -> None
     assert job.stage == JobStage.ENCODE
 
 
-def test_recovery_releases_stale_resource_reservation(tmp_path: Path) -> None:
-    engine, _job_id = _running_job_with_attempt(tmp_path)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session, session.begin():
-        attempt = session.exec(select(JobAttempt)).one()
-        attempt.status = AttemptStatus.FAILED
-        attempt.finished_at = now
-        session.add(attempt)
-
-    with Session(engine) as session, session.begin():
-        recover_abandoned_jobs(
-            session,
-            now=now,
-            encoded_output_exists=_encoded_output_exists,
-        )
-
-    with Session(engine) as session:
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.status == "released"
-    assert reservation.release_reason == "reconciled_stale_attempt"
-    assert reservation.released_at == now.replace(tzinfo=None)
-
-
 def test_recovery_recovers_running_promotion_jobs(tmp_path: Path) -> None:
     engine, job_id = _running_job_with_attempt(tmp_path, stage=JobStage.PROMOTE)
 
@@ -595,8 +569,6 @@ def _stored_job(
             device_id=3,
             inode=4,
             fs_fingerprint="fingerprint",
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)
@@ -622,7 +594,7 @@ def _stored_job(
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 

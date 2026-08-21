@@ -67,18 +67,6 @@ def av1an_tty_progress_supported(version_family: str, *, enabled: bool = True) -
     return enabled and version_family == SUPPORTED_AV1AN_TTY_PROGRESS_VERSION_FAMILY
 
 
-def parse_av1an_tty_progress(data: bytes) -> list[Av1anTtyProgressSample]:
-    text = _normalize_for_parser(data)
-    source_fps: float | None = None
-    samples: list[Av1anTtyProgressSample] = []
-    for record in re.split(r"[\r\n]+", text):
-        source_fps = _parse_source_fps(record) or source_fps
-        sample = _parse_record(record, source_fps=source_fps)
-        if sample is not None:
-            samples.append(sample)
-    return samples
-
-
 class Av1anTtyProgressParser:
     def __init__(self) -> None:
         self._buffer = bytearray()
@@ -221,9 +209,7 @@ def _parse_source_fps(record: str) -> float | None:
 
 
 def _encoding_message(record: str, *, chunks: re.Match[str]) -> str:
-    parts = [
-        f"{_parse_int(chunks.group('current'))}/{_parse_int(chunks.group('total'))} chunks"
-    ]
+    parts = [f"{_parse_int(chunks.group('current'))}/{_parse_int(chunks.group('total'))} chunks"]
     bitrate = _BITRATE_RE.search(record)
     if bitrate is not None:
         parts.append(f"{bitrate.group('bitrate_value')} {bitrate.group('bitrate_unit')}")

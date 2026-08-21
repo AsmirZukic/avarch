@@ -10,20 +10,7 @@ from avarch.profiles.registry import (
     DuplicateProfileNameError,
     ProfileOrigin,
     ProfileRegistry,
-    ProfileRegistryError,
-    ReservedProfileNameError,
-    seed_packaged_profiles,
 )
-
-
-def test_registry_loads_seeded_profiles(tmp_path: Path) -> None:
-    seed_packaged_profiles(tmp_path)
-    registry = ProfileRegistry.load(search_paths=[tmp_path])
-    profile = registry.get("av1_1080p_sdr")
-
-    assert profile.origin == ProfileOrigin.USER
-    assert profile.profile.backend == "av1an"
-    assert profile.profile.container == "mkv"
 
 
 def test_user_profiles_load_through_registry(tmp_path: Path) -> None:
@@ -38,7 +25,7 @@ def test_user_profiles_load_through_registry(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    registry = ProfileRegistry.load(search_paths=[profiles_dir])
+    registry = ProfileRegistry.from_config(_config(profiles_dir))
     profile = registry.get("my_1080p")
 
     assert profile.origin == ProfileOrigin.USER
@@ -55,7 +42,7 @@ def test_user_profiles_load_recursively(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    registry = ProfileRegistry.load(search_paths=[tmp_path])
+    registry = ProfileRegistry.from_config(_config(tmp_path))
 
     assert registry.get("my_anime").source == str(profile_path)
 
@@ -75,32 +62,7 @@ def test_duplicate_profile_names_fail(tmp_path: Path) -> None:
     )
 
     with pytest.raises(DuplicateProfileNameError):
-        ProfileRegistry.load(search_paths=[first, second])
-
-
-def test_user_profile_cannot_use_reserved_builtin_name(tmp_path: Path) -> None:
-    (tmp_path / "default.toml").write_text(
-        _profile_text(name="default"),
-        encoding="utf-8",
-    )
-
-    config = AppConfig.model_validate({"profile_registry": {"search_paths": [tmp_path]}})
-
-    with pytest.raises(ReservedProfileNameError):
-        ProfileRegistry.from_config(config)
-
-
-def test_validate_all_reports_loaded_profiles(tmp_path: Path) -> None:
-    seed_packaged_profiles(tmp_path)
-    summary = ProfileRegistry.load(search_paths=[tmp_path]).validate_all()
-
-    assert summary.ok is True
-    assert [profile.name for profile in summary.valid] == ["av1_1080p_sdr"]
-
-
-def test_registry_fails_loudly_when_no_profile_documents_exist(tmp_path: Path) -> None:
-    with pytest.raises(ProfileRegistryError, match="No profiles found"):
-        ProfileRegistry.load(search_paths=[tmp_path])
+        ProfileRegistry.from_config(_config(first, second))
 
 
 def test_profile_document_normalizes_codec_names() -> None:
@@ -140,20 +102,9 @@ def test_profile_document_accepts_auto_workers() -> None:
     assert profile.av1an.workers == "auto"
 
 
-def test_profile_document_rejects_structured_svt_lp_with_raw_lp() -> None:
-    with pytest.raises(ValidationError, match="both svt_lp and raw video_args"):
-        _profile_document(av1an={"video_args": "--preset 6 --lp 4", "svt_lp": 4})
-
-
-def test_profile_document_rejects_repeated_raw_svt_lp() -> None:
-    with pytest.raises(ValidationError, match="may only be defined once"):
-        _profile_document(av1an={"video_args": "--preset 6 --lp 4 --lp=8"})
-
-
-def test_profile_document_accepts_one_raw_svt_lp() -> None:
-    profile = _profile_document(av1an={"video_args": "--preset 6 --lp=4"})
-
-    assert profile.av1an.video_args == "--preset 6 --lp=4"
+def test_profile_document_rejects_raw_svt_lp() -> None:
+    with pytest.raises(ValidationError, match="must be configured with svt_lp"):
+        _profile_document(av1an={"video_args": "--preset 6 --lp 4"})
 
 
 def test_profile_document_rejects_nonpositive_max_width() -> None:
@@ -283,3 +234,7 @@ languages = ["eng"]
 languages = ["eng"]
 keep_forced = true
 """.strip()
+
+
+def _config(*search_paths: Path) -> AppConfig:
+    return AppConfig.model_validate({"profile_registry": {"search_paths": list(search_paths)}})

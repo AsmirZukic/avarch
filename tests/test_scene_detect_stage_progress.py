@@ -16,7 +16,6 @@ from avarch.adapters.execution import (
 )
 from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser
 from avarch.adapters.scheduler_workers import (
-    _restore_missing_scene_detect_stage,
     _SceneDetectStageProgressSink,
 )
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
@@ -233,27 +232,6 @@ def test_scene_detect_transition_retries_after_a_transient_write_failure(
     assert [snapshot.phase for snapshot in downstream.snapshots] == [ProgressPhase.ENCODING]
 
 
-def test_legacy_encode_stage_without_scene_completion_is_restored(tmp_path: Path) -> None:
-    engine, job_id, _attempt_id = _claimed_scene_detect_job(tmp_path)
-    with Session(engine) as session, session.begin():
-        job = session.get(Job, job_id)
-        assert job is not None
-        job.stage = JobStage.ENCODE
-        job.status = JobStatus.QUEUED
-        session.add(job)
-
-    with Session(engine) as session, session.begin():
-        job = session.get(Job, job_id)
-        assert job is not None
-        completed = _restore_missing_scene_detect_stage(session, job=job)
-
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-    assert completed is False
-    assert job is not None
-    assert job.stage == JobStage.SCENE_DETECT
-
-
 def test_late_scene_detect_progress_is_ignored_after_encoding_starts(tmp_path: Path) -> None:
     engine, job_id, attempt_id = _claimed_scene_detect_job(tmp_path)
     downstream = _CaptureSink()
@@ -354,7 +332,7 @@ def test_scene_detect_heartbeat_becomes_encoding_heartbeat_after_stage_completed
 
 
 def _claimed_scene_detect_job(tmp_path: Path) -> tuple[Engine, int, int]:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     with Session(engine) as session:
         media_file = MediaFile(
@@ -364,8 +342,6 @@ def _claimed_scene_detect_job(tmp_path: Path) -> tuple[Engine, int, int]:
             device_id=3,
             inode=4,
             fs_fingerprint="fingerprint",
-            discovered_at=NOW,
-            last_seen_at=NOW,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)

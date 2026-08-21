@@ -22,12 +22,6 @@ from rich.table import Table
 from rich.text import Text
 
 from avarch import __version__
-from avarch.application.calibration_service import plan_calibration
-from avarch.application.database_admin import (
-    DatabaseAdminError,
-    check_database_health,
-    current_database_revision,
-)
 from avarch.application.enqueue import PlanEnqueueSummary, enqueue_selected_plans
 from avarch.application.file_views import (
     inventory_file_detail,
@@ -177,7 +171,6 @@ from avarch.application.workspace_management import (
     summarize_config,
 )
 from avarch.bootstrap import (
-    DatabaseSchemaUpgradeError,
     PlanArtifactConflictError,
     VapourSynthEnvironmentAdapters,
     VapourSynthGenerationError,
@@ -186,13 +179,13 @@ from avarch.bootstrap import (
     WorkspaceContext,
     WorkspaceError,
     create_workspace,
-    database_admin,
-    database_admin_errors,
+    database_table_names,
     db_session,
     db_transaction,
     enqueue_store,
     ffprobe_collector,
     file_view_store,
+    initialize_database,
     inventory_scan_workflow,
     job_control_store,
     job_view_store,
@@ -210,7 +203,6 @@ from avarch.bootstrap import (
     scheduler_runner,
     scheduler_snapshot_query,
     scheduler_status_store,
-    upgrade_database_schema,
     vapoursynth_environment_adapters,
     vapoursynth_planning_runtime,
     workspace_database_url,
@@ -245,7 +237,6 @@ from avarch.config import (
     resolve_data_dir,
 )
 from avarch.domain.jobs import JobStage, JobStatus, ManualValidationAction
-from avarch.domain.resource_policy import ResourceIntent, ResourcePolicyError, parse_resource_intent
 from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
@@ -274,7 +265,6 @@ app = typer.Typer(
     help="Av1an-first archival transcoding orchestrator.",
     no_args_is_help=True,
 )
-db_app = typer.Typer(help="Database commands.")
 scheduler_app = typer.Typer(help="Scheduler commands.")
 jobs_app = typer.Typer(help="Job commands.")
 queue_app = typer.Typer(help="Queue commands.")
@@ -283,7 +273,6 @@ plans_app = typer.Typer(help="Plan commands.")
 workspace_app = typer.Typer(help="Workspace commands.")
 config_app = typer.Typer(help="Configuration commands.")
 system_app = typer.Typer(help="System diagnostics.")
-performance_app = typer.Typer(help="Performance calibration commands.")
 workflow_app = typer.Typer(help="Workflow commands.")
 profiles_app = typer.Typer(help="Profile commands.")
 vpy_app = typer.Typer(help="VapourSynth commands.")
@@ -351,7 +340,7 @@ def _init_workspace(*, force: bool) -> None:
     configure_logging(app_config.logging.level, app_config.logging.format)
 
     database_url = workspace_database_url(app_config, workspace.config_toml)
-    _upgrade_database_or_exit(database_url)
+    initialize_database(database_url)
 
     profiles = ", ".join(result.profile_names)
 
@@ -360,29 +349,6 @@ def _init_workspace(*, force: bool) -> None:
     typer.echo(f"Data dir: {workspace.data_dir}")
     typer.echo(f"Profiles dir: {workspace.profiles_dir}")
     typer.echo(f"Profiles: {profiles}")
-
-
-@db_app.command("upgrade")
-def db_upgrade() -> None:
-    cli_workspace = _load_cli_workspace()
-    database_url = cli_workspace.database_url
-    log.info("database_upgraded", database_url=database_url)
-    typer.echo("Database upgraded")
-
-
-@db_app.command("current")
-def db_current() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
-    database_url = cli_workspace.database_url
-    try:
-        revision = current_database_revision(
-            database_admin(database_url),
-            admin_errors=database_admin_errors(),
-        )
-    except DatabaseAdminError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    typer.echo(revision or "unknown")
 
 
 @app.command()
@@ -429,11 +395,7 @@ def doctor(
     typer.echo("PASS database_url_sqlite")
 
     try:
-        health = check_database_health(
-            database_admin(database_url),
-            required_tables={"appmeta", "mediafile"},
-            admin_errors=(Exception,),
-        )
+        missing_tables = {"mediafile"} - database_table_names(database_url)
     except Exception as exc:
         _doctor_fail("database_connection", exc.__class__.__name__)
         typer.echo("FAIL database_connection")
@@ -441,8 +403,8 @@ def doctor(
     _doctor_pass("database_connection")
     typer.echo("PASS database_connection")
 
-    if health.missing_tables:
-        missing = ", ".join(sorted(health.missing_tables))
+    if missing_tables:
+        missing = ", ".join(sorted(missing_tables))
         _doctor_fail("required_tables", f"missing table: {missing}")
         typer.echo("FAIL required_tables")
         raise typer.Exit(1)
@@ -489,7 +451,6 @@ def scan(
                 root=root,
                 config=app_config,
                 workspace_root=workspace_root,
-                scanned_at=_utc_now(),
             )
             results.append(result)
         except InventoryScanError as exc:
@@ -686,36 +647,6 @@ def run_queue(
     runtime_config = cli_workspace.runtime_config
     workspace = cli_workspace.workspace
 
-    if (
-        not detached
-        and not managed_child
-        and _scheduler_live_progress_enabled(mode=mode, stdout_is_tty=sys.stdout.isatty())
-    ):
-        child_argv = ["scheduler", "run"]
-        if resume:
-            child_argv.append("--resume")
-        if not promote:
-            child_argv.append("--no-promote")
-        try:
-            launch_detached(
-                scheduler_process_controller(),
-                workspace=workspace,
-                argv=child_argv,
-            )
-        except SchedulerLifecycleError as exc:
-            typer.echo(str(exc))
-            raise typer.Exit(1) from exc
-        asyncio.run(
-            _run_scheduler_watch_live(
-                database_url=database_url,
-                workspace_root=cli_workspace.workspace_root,
-                interval_seconds=DEFAULT_PROGRESS_WATCH_POLL_INTERVAL,
-                no_color=os.environ.get("NO_COLOR") is not None,
-                owner=True,
-            )
-        )
-        return
-
     if detached and not managed_child:
         child_argv = ["scheduler", "run"]
         if resume:
@@ -754,7 +685,6 @@ def run_queue(
                 stop_scheduler(
                     scheduler_control_store(session),
                     now=_utc_now(),
-                    reason="SIGTERM",
                 )
         except SchedulerControlWorkflowError:
             pass
@@ -932,9 +862,7 @@ def queue_retry_command(
 
 
 @scheduler_app.command("pause")
-def pause(
-    reason: Annotated[str | None, typer.Option("--reason")] = None,
-) -> None:
+def pause() -> None:
     cli_workspace = _load_cli_workspace()
     database_url = cli_workspace.database_url
     workspace = cli_workspace.workspace
@@ -947,7 +875,6 @@ def pause(
             pause_scheduler(
                 scheduler_control_store(session),
                 now=_utc_now(),
-                reason=reason,
             )
     except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
@@ -976,7 +903,6 @@ def resume_scheduler_command() -> None:
 
 @scheduler_app.command("drain")
 def drain_scheduler_command(
-    reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = False,
     timeout_seconds: Annotated[float, typer.Option("--timeout-seconds")] = 30.0,
 ) -> None:
@@ -987,7 +913,6 @@ def drain_scheduler_command(
             drain_scheduler(
                 scheduler_control_store(session),
                 now=_utc_now(),
-                reason=reason,
             )
     except SchedulerControlWorkflowError as exc:
         typer.echo(str(exc))
@@ -1000,7 +925,6 @@ def drain_scheduler_command(
 
 @scheduler_app.command("stop")
 def stop_scheduler_command(
-    reason: Annotated[str | None, typer.Option("--reason")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="Wait for the scheduler to exit.")] = True,
     force: Annotated[
         bool,
@@ -1018,7 +942,6 @@ def stop_scheduler_command(
                 stop_scheduler(
                     scheduler_control_store(session),
                     now=_utc_now(),
-                    reason=reason,
                 )
         except SchedulerControlWorkflowError as exc:
             typer.echo(str(exc))
@@ -1057,10 +980,6 @@ def scheduler_watch_command(
         bool,
         typer.Option("--no-color", help="Disable terminal colours."),
     ] = False,
-    owner: Annotated[
-        bool,
-        typer.Option("--owner", help="Internal owner dashboard mode.", hidden=True),
-    ] = False,
 ) -> None:
     if json_output:
         once = True
@@ -1077,7 +996,6 @@ def scheduler_watch_command(
                 workspace_root=cli_workspace.workspace_root,
                 interval_seconds=interval,
                 no_color=no_color,
-                owner=owner,
             )
         )
         return
@@ -1120,7 +1038,6 @@ async def _run_scheduler_watch_live(
     workspace_root: Path,
     interval_seconds: float,
     no_color: bool,
-    owner: bool = False,
 ) -> None:
     console = Console(file=sys.stdout, color_system=None if no_color else "auto")
     query = _LiveSchedulerSnapshotQuery(
@@ -1141,7 +1058,7 @@ async def _run_scheduler_watch_live(
             renderer=lambda snapshot, width: render_scheduler_dashboard(
                 snapshot,
                 width=width,
-                mode=DashboardMode.OWNER if owner else DashboardMode.OBSERVER,
+                mode=DashboardMode.OBSERVER,
                 height=console.height,
                 shortcuts_available=key_source.supported,
             ),
@@ -1154,8 +1071,6 @@ async def _run_scheduler_watch_live(
             ),
             key_source=key_source,
             watch_controller=_LiveSchedulerWatchController(database_url=database_url),
-            ctrl_c_stops_scheduler=owner,
-            stop_when_scheduler_stops=owner,
         )
         await loop.run()
 
@@ -1188,9 +1103,9 @@ class _LiveSchedulerWatchController:
         self._database_url = database_url
         self._actor = cli_actor()
 
-    def pause(self, *, reason: str | None = None) -> WatchControlResult:
+    def pause(self) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
-            return self._controller(session).pause(reason=reason)
+            return self._controller(session).pause()
 
     def resume(self) -> WatchControlResult:
         with db_transaction(self._database_url) as session:
@@ -1214,10 +1129,6 @@ class _LiveSchedulerWatchController:
     def detach(self) -> WatchControlResult:
         with db_session(self._database_url) as session:
             return self._controller(session).detach()
-
-    def stop(self, *, reason: str | None = None) -> WatchControlResult:
-        with db_transaction(self._database_url) as session:
-            return self._controller(session).stop(reason=reason)
 
     def _controller(self, session: Any) -> SchedulerWatchController:
         return SchedulerWatchController(
@@ -1295,7 +1206,6 @@ def scheduler_restart_command(
                 stop_scheduler(
                     scheduler_control_store(session),
                     now=_utc_now(),
-                    reason="restart",
                 )
         except SchedulerControlWorkflowError:
             pass
@@ -1441,56 +1351,6 @@ def jobs_show(
             f"  {attempt.attempt_number:<3} {job_stage_value(attempt.stage):<9} "
             f"{attempt_status_value(attempt.status):<11} {attempt.runner_id}"
         )
-        if attempt.resource_decision is not None:
-            decision = attempt.resource_decision
-            fallback = " fallback" if decision.fallback else ""
-            evidence = (
-                f", evidence={decision.evidence_count}"
-                if decision.evidence_count is not None
-                else ""
-            )
-            actual_workers = (
-                ", av1an_selected_workers=unknown"
-                if decision.effective_workers == "auto"
-                else ""
-            )
-            typer.echo(
-                "      resources: "
-                f"{decision.mode}{fallback}, workers={decision.effective_workers}, "
-                f"svt_lp={decision.effective_svt_lp}, reason={decision.reason}, "
-                f"confidence={decision.confidence:.2f}, algorithm=v{decision.algorithm_version}"
-                f"{evidence}{actual_workers}"
-            )
-        if attempt.performance is not None:
-            performance = attempt.performance
-            memory = (
-                format_size(performance.peak_cgroup_memory_bytes)
-                if performance.peak_cgroup_memory_bytes is not None
-                else (
-                    format_size(performance.peak_rss_bytes)
-                    if performance.peak_rss_bytes is not None
-                    else "—"
-                )
-            )
-            fps = (
-                f"{performance.aggregate_fps:.2f}"
-                if performance.aggregate_fps is not None
-                else "—"
-            )
-            cpu = (
-                f"{performance.average_cpu_utilization_percent:.1f}%"
-                if performance.average_cpu_utilization_percent is not None
-                else "—"
-            )
-            throttled = performance.cpu_throttled_events_delta
-            oom = performance.memory_oom_kill_events_delta
-            completeness = "incomplete" if performance.incomplete else "complete"
-            typer.echo(
-                "      performance: "
-                f"fps={fps}, peak_memory={memory}, avg_cpu={cpu}, "
-                f"throttled_events={throttled if throttled is not None else '—'}, "
-                f"oom_kills={oom if oom is not None else '—'}, {completeness}"
-            )
     typer.echo("")
     typer.echo("Events:")
     for event in job.events:
@@ -2275,15 +2135,6 @@ def _doctor_fail(check: str, reason: str) -> None:
     log.error("doctor_check_failed", check=check, reason=reason)
 
 
-def _upgrade_database_or_exit(database_url: str) -> None:
-    try:
-        upgrade_database_schema(database_url)
-    except DatabaseSchemaUpgradeError as exc:
-        log.debug("database_schema_unsupported", exc_info=exc)
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-
-
 def _load_and_configure(config: Path) -> AppConfig:
     if not config.exists():
         configure_logging()
@@ -2300,12 +2151,12 @@ def _load_and_configure(config: Path) -> AppConfig:
     return app_config
 
 
-def _load_cli_workspace(*, upgrade_database: bool = True) -> CliWorkspace:
+def _load_cli_workspace(*, initialize_schema: bool = True) -> CliWorkspace:
     config = _workspace_config_path()
     app_config = _load_and_configure(config)
     database_url = workspace_database_url(app_config, config)
-    if upgrade_database:
-        _upgrade_database_or_exit(database_url)
+    if initialize_schema:
+        initialize_database(database_url)
     data_dir = resolve_data_dir(app_config, config)
     runtime_config = _runtime_config(
         app_config,
@@ -2560,12 +2411,11 @@ def workspace_info() -> None:
     typer.echo(f"Database: {workspace.database_path}")
     typer.echo(f"Profiles: {workspace.profiles_dir}")
     typer.echo(f"Scripts: {workspace.scripts_dir}")
-    typer.echo(f"Work: {workspace.work_dir}")
 
 
 @config_app.command("show")
 def config_show() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     summary = summarize_config(
         config_path=cli_workspace.config,
         config=cli_workspace.app_config,
@@ -2581,7 +2431,7 @@ def config_show() -> None:
 
 @profiles_app.command("list")
 def profiles_list() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     try:
         profiles = list_available_profiles(cli_workspace.app_config)
     except ProfileManagementError as exc:
@@ -2598,7 +2448,7 @@ def profiles_copy(
     source_name: Annotated[str, typer.Argument(help="Built-in profile to copy.")],
     name: Annotated[str, typer.Option("--name", help="New user profile name.")],
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     try:
         result = copy_builtin_profile(
             cli_workspace.app_config,
@@ -2629,7 +2479,7 @@ def profiles_scaffold(
 def vpy_scaffold_filter(
     name: Annotated[str, typer.Option("--name", help="Filter module name.")],
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     try:
         result = scaffold_filter_script(
             scripts_dir=cli_workspace.workspace.scripts_dir,
@@ -2645,7 +2495,7 @@ def vpy_scaffold_filter(
 def vpy_scaffold_template(
     name: Annotated[str, typer.Option("--name", help="Template script name.")],
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     try:
         result = scaffold_template_script(
             scripts_dir=cli_workspace.workspace.scripts_dir,
@@ -2661,7 +2511,7 @@ def vpy_scaffold_template(
 def vpy_validate(
     profile: Annotated[str, typer.Option("--profile", help="Profile name.")],
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     try:
         resolved_profile = resolve_profile(cli_workspace.app_config, profile)
         validate_vapoursynth_profile_scripts(
@@ -2738,7 +2588,7 @@ def vpy_check(
 
 @vpy_app.command("sync")
 def vpy_sync() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     workspace = cli_workspace.workspace
     adapters = _vapoursynth_environment_adapters()
     try:
@@ -2777,7 +2627,7 @@ def vpy_plugins() -> None:
 
 @vpy_env_app.command("show")
 def vpy_env_show() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     workspace = cli_workspace.workspace
     adapters = _vapoursynth_environment_adapters()
     info = vapoursynth_environment_info(
@@ -2798,7 +2648,7 @@ def vpy_env_show() -> None:
 
 @vpy_env_app.command("check")
 def vpy_env_check() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     workspace = cli_workspace.workspace
     adapters = _vapoursynth_environment_adapters()
     try:
@@ -2820,7 +2670,7 @@ def vpy_env_check() -> None:
 
 @vpy_packages_app.command("list")
 def vpy_packages_list() -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     adapters = _vapoursynth_environment_adapters()
     packages = list_vapoursynth_packages(
         cli_workspace.workspace,
@@ -2873,7 +2723,7 @@ def vpy_packages_install(
         typer.Option("--kind", help="Dependency kind to add to the manifest."),
     ] = "python",
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     workspace = cli_workspace.workspace
     adapters = _vapoursynth_environment_adapters()
     try:
@@ -2901,7 +2751,7 @@ def vpy_packages_remove(
         typer.Option("--kind", help="Dependency kind to remove from the manifest."),
     ] = "python",
 ) -> None:
-    cli_workspace = _load_cli_workspace(upgrade_database=False)
+    cli_workspace = _load_cli_workspace(initialize_schema=False)
     workspace = cli_workspace.workspace
     adapters = _vapoursynth_environment_adapters()
     try:
@@ -3097,63 +2947,6 @@ def system_resources() -> None:
     typer.echo(f"  degraded:         {'yes' if snapshot.degraded else 'no'}")
 
 
-@performance_app.command("calibration-policy")
-def performance_calibration_policy(
-    predicted_seconds: Annotated[
-        float | None,
-        typer.Option("--predicted-seconds", help="Predicted encode duration in seconds."),
-    ] = None,
-    mode: Annotated[
-        Literal["auto", "native", "manual"],
-        typer.Option("--mode", help="Resource mode to evaluate."),
-    ] = "auto",
-    workers: Annotated[
-        int | None,
-        typer.Option("--workers", help="Manual worker count for manual mode."),
-    ] = None,
-    svt_lp: Annotated[
-        int | None,
-        typer.Option("--svt-lp", help="Manual SVT logical processor count."),
-    ] = None,
-    explicit: Annotated[
-        bool,
-        typer.Option("--explicit", help="Treat calibration as explicitly requested."),
-    ] = False,
-) -> None:
-    try:
-        intent = _cli_resource_intent(mode=mode, workers=workers, svt_lp=svt_lp)
-    except ResourcePolicyError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    calibration_plan = plan_calibration(
-        settings=AppConfig().performance,
-        intent=intent,
-        predicted_encode_seconds=predicted_seconds,
-        explicit_request=explicit,
-    )
-    typer.echo("Calibration policy")
-    typer.echo(
-        f"  decision: {'run' if calibration_plan.decision.should_benchmark else 'skip'}"
-    )
-    typer.echo(f"  reason:   {calibration_plan.decision.reason.value}")
-    typer.echo(f"  budget:   {calibration_plan.decision.budget_seconds:g}s")
-
-
-def _cli_resource_intent(
-    *,
-    mode: Literal["auto", "native", "manual"],
-    workers: int | None,
-    svt_lp: int | None,
-) -> ResourceIntent:
-    if mode == "manual":
-        if workers is None:
-            raise ResourcePolicyError("manual resource mode requires --workers")
-        return parse_resource_intent(mode=mode, workers=workers, svt_lp=svt_lp)
-    if workers is not None or svt_lp is not None:
-        raise ResourcePolicyError("--workers and --svt-lp require --mode manual")
-    return parse_resource_intent(mode=mode, workers="auto")
-
-
 def _resource_source_summary(values: tuple[object, ...]) -> str:
     parts: list[str] = []
     for value in values:
@@ -3166,7 +2959,6 @@ def _resource_source_summary(values: tuple[object, ...]) -> str:
     return ", ".join(parts) if parts else "unknown"
 
 
-app.add_typer(db_app, name="db")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(files_app, name="files")
@@ -3174,7 +2966,6 @@ app.add_typer(plans_app, name="plans")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(config_app, name="config")
 app.add_typer(system_app, name="system")
-app.add_typer(performance_app, name="performance")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(profiles_app, name="profiles")
 vpy_app.add_typer(vpy_scaffold_app, name="scaffold")

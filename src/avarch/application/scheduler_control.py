@@ -9,22 +9,21 @@ class SchedulerControlWorkflowError(RuntimeError):
 
 
 class SchedulerControlStore(Protocol):
-    def pause(self, *, now: datetime, reason: str | None) -> None: ...
+    def pause(self, *, now: datetime) -> None: ...
 
     def resume(self, *, now: datetime) -> None: ...
 
-    def drain(self, *, now: datetime, reason: str | None) -> None: ...
+    def drain(self, *, now: datetime) -> None: ...
 
-    def stop(self, *, now: datetime, reason: str | None) -> None: ...
+    def stop(self, *, now: datetime) -> None: ...
 
 
 def pause_scheduler(
     store: SchedulerControlStore,
     *,
     now: datetime,
-    reason: str | None = None,
 ) -> None:
-    store.pause(now=now, reason=reason)
+    store.pause(now=now)
 
 
 def resume_scheduler(store: SchedulerControlStore, *, now: datetime) -> None:
@@ -35,15 +34,13 @@ def drain_scheduler(
     store: SchedulerControlStore,
     *,
     now: datetime,
-    reason: str | None = None,
 ) -> None:
-    store.drain(now=now, reason=reason)
+    store.drain(now=now)
 
 
 def stop_scheduler(
     store: SchedulerControlStore,
     *,
     now: datetime,
-    reason: str | None = None,
 ) -> None:
-    store.stop(now=now, reason=reason)
+    store.stop(now=now)

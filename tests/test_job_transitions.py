@@ -27,10 +27,8 @@ from avarch.adapters.sqlite.models import (
     JobEvent,
     MediaFile,
     MediaFileStatus,
-    ResourceReservation,
     SchedulerSession,
 )
-from avarch.adapters.sqlite.resource_reservations import release_attempt_reservation
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
@@ -39,7 +37,6 @@ from avarch.domain.jobs import (
     JobStatus,
     ResourceClass,
 )
-from avarch.domain.scheduler import JobResourceReservation
 from avarch.models.execution import (
     ProcessFailureReason,
     ProcessResourceSummary,
@@ -71,48 +68,6 @@ def test_claim_creates_attempt(tmp_path: Path) -> None:
 
     assert attempt.stage == JobStage.PROBE
     assert attempt.resource_class == ResourceClass.CHEAP
-
-
-def test_claim_heavy_stage_creates_active_resource_reservation(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        attempt_id = attempt.id
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.job_id == job_id
-    assert reservation.attempt_id == attempt_id
-    assert reservation.resource_class == ResourceClass.HEAVY_AV1AN
-    assert reservation.exclusive is True
-    assert reservation.status == "active"
-    assert reservation.created_at == now.replace(tzinfo=None)
-
-
-def test_claim_heavy_stage_persists_explicit_bounded_resource_reservation(
-    tmp_path: Path,
-) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        claim_job_stage(
-            session,
-            job_id=job_id,
-            runner_id="runner",
-            now=now,
-            reservation=JobResourceReservation(cpu=2.5, memory_bytes=4 * 1024**3),
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.resource_class == ResourceClass.HEAVY_AV1AN
-    assert reservation.cpu_reserved == 2.5
-    assert reservation.memory_bytes_reserved == 4 * 1024**3
-    assert reservation.exclusive is False
-    assert reservation.status == "active"
 
 
 def test_claim_increments_attempt_count(tmp_path: Path) -> None:
@@ -164,54 +119,6 @@ def test_completion_advances_stage(tmp_path: Path) -> None:
     assert job is not None
     assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.PLAN
-
-
-def test_completion_releases_resource_reservation(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        complete_job_stage(
-            session,
-            job_id=job_id,
-            attempt_id=attempt.id or 0,
-            next_stage=JobStage.VALIDATE,
-            now=now + timedelta(seconds=1),
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.status == "released"
-    assert reservation.release_reason == "completed"
-    assert reservation.released_at == (now + timedelta(seconds=1)).replace(tzinfo=None)
-
-
-def test_resource_reservation_release_is_idempotent(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        attempt_id = attempt.id or 0
-        first = release_attempt_reservation(
-            session,
-            attempt_id=attempt_id,
-            now=now + timedelta(seconds=1),
-            reason="first",
-        )
-        second = release_attempt_reservation(
-            session,
-            attempt_id=attempt_id,
-            now=now + timedelta(seconds=2),
-            reason="second",
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert first is True
-    assert second is False
-    assert reservation.release_reason == "first"
 
 
 def test_claim_and_completion_record_stage_lifecycle_events(tmp_path: Path) -> None:
@@ -629,7 +536,7 @@ def _stored_job(
     stage: JobStage = JobStage.PROBE,
     started_at: datetime | None = None,
 ) -> tuple[Engine, int]:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     with Session(engine) as session:
@@ -640,8 +547,6 @@ def _stored_job(
             device_id=3,
             inode=4,
             fs_fingerprint="fingerprint",
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)

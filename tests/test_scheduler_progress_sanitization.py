@@ -42,8 +42,6 @@ def test_external_progress_messages_are_sanitized_before_persistence(tmp_path: P
             inode=3,
             fs_fingerprint="fingerprint",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media_file)
         session.flush()

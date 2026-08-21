@@ -8,14 +8,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from avarch.application.resource_limits import parse_memory_reserve, resolve_resource_limits
-from avarch.application.resources import effective_resource_snapshot
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage
 from avarch.domain.scheduler import (
     ActiveJob,
     ClaimableJob,
-    JobResourceReservation,
     ResourceCapacity,
     SchedulerMode,
     jobs_to_cancel,
@@ -113,7 +110,6 @@ class SchedulerWorkerRegistry(Protocol):
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None: ...
 
     def pause_active_jobs(self) -> None: ...
@@ -301,17 +297,10 @@ def cli_actor() -> str:
 
 
 def _resource_capacity(config: AppConfig) -> ResourceCapacity:
-    limits = resolve_resource_limits(
-        snapshot=effective_resource_snapshot(),
-        cpu_reserve=config.resources.cpu_reserve,
-        memory_reserve=parse_memory_reserve(config.resources.memory_reserve),
-    )
     return ResourceCapacity(
         cheap_workers=config.resources.cheap_workers,
         av1an_jobs=config.resources.av1an_jobs,
         file_ops=config.resources.file_ops,
-        cpu_budget=limits.usable_cpu_count,
-        memory_budget_bytes=limits.usable_memory_bytes,
     )
 
 
@@ -394,12 +383,7 @@ def _launch_claimable_jobs(
                 job_id=job.job_id,
                 runner_id=runner_id,
                 config=config,
-                reservation=job.reservation,
             )
         )
-        active[task] = ActiveJob(
-            job_id=job.job_id,
-            stage=job.stage,
-            reservation=job.reservation,
-        )
+        active[task] = ActiveJob(job_id=job.job_id, stage=job.stage)
         active_job_ids.add(job.job_id)

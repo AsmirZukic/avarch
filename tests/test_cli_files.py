@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlmodel import Session
@@ -99,7 +98,6 @@ def _init_config(tmp_path: Path) -> Path:
 def _insert_media_file(config_path: Path, path: str, status: MediaFileStatus) -> None:
     app_config = load_config(config_path)
     engine = create_db_engine(resolve_database_url(app_config, config_path))
-    now = datetime(2026, 6, 14, tzinfo=UTC)
     with Session(engine) as session:
         session.add(
             MediaFile(
@@ -109,8 +107,6 @@ def _insert_media_file(config_path: Path, path: str, status: MediaFileStatus) ->
                 device_id=456,
                 inode=789,
                 fs_fingerprint=f"key:{path}",
-                discovered_at=now,
-                last_seen_at=now,
                 status=status,
             )
         )

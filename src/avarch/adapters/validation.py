@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,11 +25,9 @@ from avarch.models.validation import (
     ValidationPolicy,
     ValidationReport,
 )
-from avarch.profiles.models import EncodingProfile
 from avarch.serialization import canonical_json
 
 Clock = Callable[[], datetime]
-ProbeRunner = Callable[[Path], Mapping[str, Any]]
 
 
 class ValidationJob(Protocol):
@@ -82,115 +79,6 @@ class ValidationExecutionError(ValidationError):
 
 class ValidationTargetError(ValidationError):
     pass
-
-
-def validate_encoded_file(
-    original_path: Path,
-    encoded_path: Path,
-    profile: EncodingProfile,
-    *,
-    probe_runner: ProbeRunner = run_ffprobe,
-    clock: Clock | None = None,
-) -> ValidationReport:
-    now = clock or datetime.now
-    started_at = now()
-    checks: list[ValidationCheck] = []
-    observed: ObservedValidationMedia | None = None
-
-    output_exists = encoded_path.exists()
-    checks.append(_check("output_exists", output_exists, expected=True, observed=output_exists))
-    output_size = encoded_path.stat().st_size if output_exists and encoded_path.is_file() else None
-    output_nonempty = output_size is not None and output_size > 0
-    checks.append(
-        _check("output_nonempty", output_nonempty, expected=">0", observed=output_size)
-        if output_exists
-        else _skipped("output_nonempty", "output_exists")
-    )
-
-    source_probe = None
-    output_probe = None
-    if output_nonempty:
-        try:
-            source_probe = normalize_probe(probe_runner(original_path))
-            output_probe = normalize_probe(probe_runner(encoded_path))
-            observed = ObservedValidationMedia(
-                output_size_bytes=output_size,
-                container=output_probe.container,
-                duration_seconds=output_probe.duration_seconds,
-                video_streams=output_probe.video_streams,
-                audio_streams=output_probe.audio_streams,
-                subtitle_streams=output_probe.subtitle_streams,
-            )
-            checks.append(_passed("ffprobe_readable"))
-        except ProbeError as exc:
-            checks.append(_failed("ffprobe_readable", message=str(exc)))
-        except Exception as exc:
-            checks.append(_failed("ffprobe_readable", message=str(exc)))
-    else:
-        checks.append(_skipped("ffprobe_readable", "output_nonempty"))
-
-    if source_probe is not None and output_probe is not None:
-        checks.append(
-            _check(
-                "has_video_stream",
-                len(output_probe.video_streams) > 0,
-                expected=">=1",
-                observed=len(output_probe.video_streams),
-            )
-        )
-        checks.append(
-            _duration_close_check(
-                source_duration=source_probe.duration_seconds,
-                output_duration=output_probe.duration_seconds,
-                tolerance_seconds=profile.validation.duration_tolerance_seconds,
-            )
-        )
-        checks.append(
-            _check(
-                "container_matches",
-                _container_matches_profile(output_probe.container, profile),
-                expected=profile.container,
-                observed=output_probe.container,
-            )
-        )
-        video_stream = output_probe.video_streams[0] if output_probe.video_streams else None
-        checks.append(
-            _check(
-                "codec_expected",
-                video_stream is not None and _normalize_text(video_stream.codec) == "av1",
-                expected="av1",
-                observed=video_stream.codec if video_stream is not None else None,
-            )
-        )
-    else:
-        checks.extend(
-            [
-                _skipped("has_video_stream", "ffprobe_readable"),
-                _skipped("duration_close", "ffprobe_readable"),
-                _skipped("container_matches", "ffprobe_readable"),
-                _skipped("codec_expected", "ffprobe_readable"),
-            ]
-        )
-
-    source_before = _snapshot_fingerprint(original_path)
-    output_before = _snapshot_fingerprint(encoded_path) if output_nonempty else None
-    finished_at = now()
-    return ValidationReport(
-        plan_hash="path-validation",
-        policy_hash=_path_validation_policy_hash(profile),
-        source_path=original_path,
-        output_path=encoded_path,
-        source_fs_fingerprint_before=source_before,
-        source_fs_fingerprint_after=source_before,
-        output_fs_fingerprint_before=output_before,
-        output_fs_fingerprint_after=output_before,
-        passed=checks_pass(checks),
-        checks=checks,
-        warnings=[],
-        observed=observed,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
 
 
 async def validate_output(
@@ -340,9 +228,6 @@ async def validate_output(
         policy_hash=policy.policy_hash,
         source_path=plan.input_path,
         output_path=plan.output_path,
-        source_fs_fingerprint_before=source_before,
-        source_fs_fingerprint_after=source_after,
-        output_fs_fingerprint_before=output_before,
         output_fs_fingerprint_after=output_after,
         passed=checks_pass(ordered_checks),
         checks=ordered_checks,
@@ -390,58 +275,6 @@ def validate_duration(
             "absolute_delta": delta,
         },
     )
-
-
-def _duration_close_check(
-    *,
-    source_duration: float | None,
-    output_duration: float | None,
-    tolerance_seconds: float,
-) -> ValidationCheck:
-    if (
-        source_duration is None
-        or output_duration is None
-        or not math.isfinite(source_duration)
-        or not math.isfinite(output_duration)
-        or source_duration <= 0
-        or output_duration <= 0
-    ):
-        return _failed(
-            "duration_close",
-            expected={"source": source_duration, "tolerance": tolerance_seconds},
-            observed=output_duration,
-            message="Duration must be finite and positive.",
-        )
-    delta = abs(output_duration - source_duration)
-    return _check(
-        "duration_close",
-        delta <= tolerance_seconds,
-        expected={"source": source_duration, "tolerance": tolerance_seconds},
-        observed={"output": output_duration, "absolute_delta": delta},
-    )
-
-
-def _container_matches_profile(
-    observed_container: str | None,
-    profile: EncodingProfile,
-) -> bool:
-    normalized = _normalize_text(observed_container)
-    if normalized is None:
-        return False
-    if profile.container == "mkv":
-        return "matroska" in normalized or "webm" in normalized
-    return normalized == profile.container
-
-
-def _path_validation_policy_hash(profile: EncodingProfile) -> str:
-    payload = canonical_json(
-        {
-            "container": profile.container,
-            "duration_tolerance_seconds": profile.validation.duration_tolerance_seconds,
-            "expected_video_codec": "av1",
-        }
-    )
-    return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
 
 
 def validate_container(

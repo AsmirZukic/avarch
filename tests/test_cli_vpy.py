@@ -119,7 +119,10 @@ def test_vpy_check_generates_and_evaluates_script(
     scan_result = runner.invoke(app, ["scan", "."])
     probe_result = runner.invoke(app, ["probe", "--file", "Movies/Test.mkv"])
 
-    result = runner.invoke(app, ["vpy", "check", "--profile", "default", "Movies/Test.mkv"])
+    result = runner.invoke(
+        app,
+        ["vpy", "check", "--profile", "av1_1080p_sdr", "Movies/Test.mkv"],
+    )
 
     assert scan_result.exit_code == 0
     assert probe_result.exit_code == 0
@@ -207,7 +210,8 @@ source = "vapoursynth"
 [av1an]
 encoder = "svt-av1"
 workers = 2
-video_args = "--preset 6 --crf 28 --keyint 240 --lp 2"
+video_args = "--preset 6 --crf 28 --keyint 240"
+svt_lp = 2
 
 [audio]
 codec = "libopus"

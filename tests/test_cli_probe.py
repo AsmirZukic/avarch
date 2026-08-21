@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -181,7 +180,6 @@ def test_probe_command_does_not_mutate_media_file_state(
     after = _load_media_file(config_path, media_file)
     assert result.exit_code == 0
     assert after.status == before.status
-    assert after.last_seen_at == before.last_seen_at
     assert after.fs_fingerprint == before.fs_fingerprint
 
 
@@ -210,7 +208,6 @@ def _tracked_file(
 
 def _insert_media_file(config_path: Path, path: Path, status: MediaFileStatus) -> None:
     engine = _engine(config_path)
-    now = datetime(2026, 6, 14, tzinfo=UTC)
     with Session(engine) as session:
         session.add(
             MediaFile(
@@ -220,8 +217,6 @@ def _insert_media_file(config_path: Path, path: Path, status: MediaFileStatus) -
                 device_id=path.stat().st_dev,
                 inode=path.stat().st_ino,
                 fs_fingerprint="key",
-                discovered_at=now,
-                last_seen_at=now,
                 status=status,
             )
         )

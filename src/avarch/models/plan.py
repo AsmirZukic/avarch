@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -18,7 +17,7 @@ from avarch.contracts import (
 from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import ValidationPolicy
 
-AV1AN_COMMAND_CONTRACT_VERSION = 2
+AV1AN_COMMAND_CONTRACT_VERSION = 4
 FFMPEG_MUX_CONTRACT_VERSION = 1
 
 type VapourSynthMode = Literal[
@@ -30,11 +29,6 @@ type VapourSynthMode = Literal[
 type VapourSynthOutputFormat = Literal["YUV420P10",]
 
 type VapourSynthResizeFilter = Literal["spline36",]
-
-type Av1anResumePolicy = Literal[
-    "auto",
-    "never",
-]
 
 type EncodeExecutionStatus = Literal[
     "completed",
@@ -75,9 +69,6 @@ class AudioPlan(BaseModel):
     source_stream_index: int = Field(ge=0)
     source_codec: str | None
     source_language: str | None
-    source_channels: int | None
-    source_title: str | None
-    source_commentary: bool
 
     target_codec: str
     target_bitrate: str
@@ -105,15 +96,13 @@ class ExecutionIdentity(BaseModel):
 
     av1an_version_family: str
 
-    video_container: Literal["mkv"]
     final_container: Literal["mkv"]
 
     identity_hash: str
 
 
 class Av1anCommandSpec(BaseModel):
-    schema_version: Literal[2] = AV1AN_COMMAND_SCHEMA_VERSION
-    command_contract_version: int = AV1AN_COMMAND_CONTRACT_VERSION
+    schema_version: Literal[4] = AV1AN_COMMAND_SCHEMA_VERSION
 
     executable: str = "av1an"
 
@@ -124,33 +113,23 @@ class Av1anCommandSpec(BaseModel):
 
     encoder: Literal["svt-av1"]
     encoder_args: list[str]
-    workers: StrictInt | Literal["auto"]
+    workers: StrictInt | Literal["auto"] = 1
 
     pixel_format: Literal["yuv420p10le"] = "yuv420p10le"
     concat_method: Literal["ffmpeg"] = "ffmpeg"
-    cache_mode: Literal["temp"] = "temp"
 
     max_tries: int = 3
-
-    no_defaults: Literal[True] = True
-    keep_temp: Literal[True] = True
-    never_overwrite: Literal[True] = True
-
-    resume_policy: Av1anResumePolicy = "auto"
 
     @field_validator("workers")
     @classmethod
     def validate_workers(cls, value: int | Literal["auto"]) -> int | Literal["auto"]:
-        if value == "auto":
-            return value
-        if value <= 0:
+        if value != "auto" and value <= 0:
             raise ValueError("workers must be positive or 'auto'")
         return value
 
 
 class FfmpegMuxSpec(BaseModel):
     schema_version: Literal[1] = FFMPEG_MUX_SCHEMA_VERSION
-    command_contract_version: int = FFMPEG_MUX_CONTRACT_VERSION
 
     executable: str = "ffmpeg"
 
@@ -164,12 +143,6 @@ class FfmpegMuxSpec(BaseModel):
     audio_codec: str | None = None
     audio_bitrate: str | None = None
     audio_channels: int | None = None
-
-    copy_subtitles: Literal[True] = True
-    copy_chapters: Literal[True] = True
-    copy_metadata: Literal[True] = True
-
-    never_overwrite: Literal[True] = True
 
 
 class ExecutionRuntimePaths(BaseModel):
@@ -199,8 +172,6 @@ class Av1anStageMarker(BaseModel):
     video_output_path: Path
     video_output_size: int
 
-    completed_at: datetime
-
 
 class EncodeResultReceipt(BaseModel):
     schema_version: Literal[1] = ENCODE_RESULT_RECEIPT_SCHEMA_VERSION
@@ -214,8 +185,6 @@ class EncodeResultReceipt(BaseModel):
 
     final_output_path: Path
     final_output_size: int
-
-    completed_at: datetime
 
 
 class VapourSynthPlan(BaseModel):
@@ -265,10 +234,9 @@ class VapourSynthPlan(BaseModel):
 
 
 class TranscodePlan(BaseModel):
-    schema_version: Literal[5] = TRANSCODE_PLAN_SCHEMA_VERSION
+    schema_version: Literal[7] = TRANSCODE_PLAN_SCHEMA_VERSION
     plan_hash: str
-    semantic_hash: str | None = None
-    resource_policy_hash: str | None = None
+    semantic_hash: str
 
     input_path: Path
     output_path: Path

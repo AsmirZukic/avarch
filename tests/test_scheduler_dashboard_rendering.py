@@ -6,18 +6,15 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth
-from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
     BlockedJobSummary,
     CapacitySummary,
-    EncodeResourceDecisionSummary,
+    JobEligibilityReason,
     LifecycleEventSummary,
     PipelineSummary,
-    QueueForecastSummary,
     ResourceMetricSummary,
     ResourceTelemetrySummary,
     SchedulerRuntimeState,
@@ -70,10 +67,6 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "next.mkv" in output
     assert "Capacity" in output
     assert "encode jobs" in output
-    assert "4 each" in output
-    assert "16 LP nominal" in output
-    assert "reused calibration" in output
-    assert "auto Av1an workers" not in output
     assert "Recent activity unavailable" in output
     assert "Resource telemetry unavailable" in output
 
@@ -169,7 +162,6 @@ def test_dashboard_renders_session_and_recent_activity() -> None:
         ),
         recent_events=(
             LifecycleEventSummary(
-                event_id=1,
                 job_id=42,
                 attempt_id=7,
                 scheduler_session_id=1,
@@ -205,7 +197,6 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
             av1an_active=1,
             file_ops=1,
             file_ops_active=0,
-            av1an_workers_configured=4,
             stale=True,
         ),
         blocked_jobs=(
@@ -240,8 +231,6 @@ def test_dashboard_renders_capacity_upcoming_and_blockers() -> None:
     assert "0/1" in wide
     assert "encode chunks" in wide
     assert "2/5" in wide
-    assert "Av1an workers" in wide
-    assert "4 active" in wide
     assert "freshness" in wide
     assert "stale" in wide
     assert "current_snapshot" in wide
@@ -386,7 +375,7 @@ def test_dashboard_renders_resource_telemetry() -> None:
                     unit="bytes_per_second",
                 ),
             ),
-        )
+        ),
     )
 
     wide = _render(snapshot, width=150)
@@ -423,7 +412,7 @@ def test_dashboard_renders_unavailable_and_stale_resource_telemetry() -> None:
                         reason="unsupported_platform",
                     ),
                 ),
-            )
+            ),
         ),
         width=150,
     )
@@ -491,51 +480,6 @@ def test_dashboard_renders_job_details_and_bounded_log_tail(
     assert "should-not-appear" not in output
 
 
-def test_dashboard_renders_forecast_and_estimated_starts() -> None:
-    unavailable = _render(
-        _snapshot(
-            forecast=QueueForecastSummary(
-                available=False,
-                reason="insufficient_history",
-                confidence=ForecastConfidence.UNAVAILABLE,
-                sample_count=4,
-            )
-        ),
-        width=150,
-    )
-    low_confidence = _render(
-        _snapshot(
-            upcoming_jobs=(
-                UpcomingJobSummary(
-                    job_id=2,
-                    source_path="/media/next.mkv",
-                    profile_name="default",
-                    stage=JobStage.ENCODE,
-                    status=JobStatus.QUEUED,
-                    priority=5,
-                    selection_position=1,
-                    selection_confidence="current_snapshot",
-                    estimated_start_lower_seconds=18 * 3600,
-                    estimated_start_upper_seconds=30 * 3600,
-                ),
-            ),
-            forecast=QueueForecastSummary(
-                available=True,
-                confidence=ForecastConfidence.LOW,
-                sample_count=7,
-                lower_seconds=(24 + 18) * 3600,
-                upper_seconds=(3 * 24 + 4) * 3600,
-            ),
-        ),
-        width=150,
-    )
-
-    assert "forecast unavailable · insufficient history" in unavailable
-    assert "forecast 1d 18h-3d 4h · low confidence · n=7" in low_confidence
-    assert "starts in 18h-1d 6h" in low_confidence
-    assert "42m 17s" not in low_confidence
-
-
 def _render(
     snapshot: SchedulerSnapshot,
     *,
@@ -574,7 +518,6 @@ def _snapshot(
     resources: ResourceTelemetrySummary | None = None,
     watch_details: WatchJobDetailsSummary | None = None,
     watch_log_tail: WatchLogTailSummary | None = None,
-    forecast: QueueForecastSummary | None = None,
     storage_saved_bytes: int = 0,
 ) -> SchedulerSnapshot:
     captured_at = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -602,7 +545,6 @@ def _snapshot(
             av1an_active=1,
             file_ops=1,
             file_ops_active=0,
-            av1an_workers_configured=4,
         ),
         blocked_jobs=blocked_jobs,
         storage_saved_bytes=storage_saved_bytes,
@@ -625,7 +567,6 @@ def _snapshot(
         resources=resources,
         watch_details=watch_details,
         watch_log_tail=watch_log_tail,
-        forecast=forecast,
     )
 
 
@@ -654,16 +595,6 @@ def _active_job(job_id: int, source_path: str) -> ActiveJobSummary:
             elapsed_seconds=90,
             stale=True,
             last_update_age_seconds=18,
-            resource_decision=EncodeResourceDecisionSummary(
-                mode="auto",
-                effective_workers=4,
-                effective_svt_lp=4,
-                reason="reused_calibration",
-                confidence=0.8,
-                algorithm_version=1,
-                fallback=False,
-                evidence_count=5,
-            ),
         ),
         workflow_steps=(
             WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),

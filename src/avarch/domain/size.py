@@ -32,4 +32,3 @@ def evaluate_size_policy(
     if savings_percent < policy.minimum_savings_percent:
         return SizeDecision.REJECT_MINIMUM_SAVINGS_NOT_MET
     return SizeDecision.ACCEPT
-

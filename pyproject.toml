@@ -3,9 +3,7 @@ name = "avarch"
 version = "0.2.0"
 requires-python = ">=3.12"
 dependencies = [
-    "alembic>=1.18.4",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.14.2",
     "rich>=15.0.0",
     "sqlmodel>=0.0.38",
     "structlog>=26.1.0",
@@ -33,11 +31,6 @@ typeCheckingMode = "strict"
 include = ["src", "tests"]
 venvPath = "."
 venv = ".venv"
-
-[tool.pytest.ini_options]
-markers = [
-  "encoder_integration: opt-in tests that run real encoder resume compatibility checks",
-]
 
 [tool.ruff]
 target-version = "py312"

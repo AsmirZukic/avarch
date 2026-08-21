@@ -3,15 +3,19 @@ from pathlib import Path
 from avarch.adapters.progress.av1an_tty import (
     Av1anTtyProgressParser,
     av1an_tty_progress_supported,
-    parse_av1an_tty_progress,
 )
 from avarch.domain.progress import ProgressPhase, ProgressUnit
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "av1an_progress"
 
 
+def _parse_av1an_tty_progress(data: bytes):
+    parser = Av1anTtyProgressParser()
+    return [*parser.feed(data), *parser.flush()]
+
+
 def test_parse_tty_fixture_extracts_numeric_progress_records() -> None:
-    samples = parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
+    samples = _parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
     first_numeric = next(sample for sample in samples if sample.current is not None)
 
     assert len(samples) >= 10
@@ -24,17 +28,15 @@ def test_parse_tty_fixture_extracts_numeric_progress_records() -> None:
 
 
 def test_parse_tty_fixture_extracts_scene_detection_result() -> None:
-    samples = parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
+    samples = _parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
 
     scene_samples = [sample for sample in samples if sample.phase == ProgressPhase.SCENE_DETECTION]
 
-    assert any(
-        sample.message == "scenes found: 1, chunks prepared: 1" for sample in scene_samples
-    )
+    assert any(sample.message == "scenes found: 1, chunks prepared: 1" for sample in scene_samples)
 
 
 def test_parse_scene_detection_spinner_extracts_frames_fps_and_speed() -> None:
-    samples = parse_av1an_tty_progress(
+    samples = _parse_av1an_tty_progress(
         b"INFO encode_file: Input: 1920x1080 @ 24.000 fps\n"
         b"00:00:03 [========]  1,420 frames (384.0 fps)\r"
     )
@@ -48,7 +50,7 @@ def test_parse_scene_detection_spinner_extracts_frames_fps_and_speed() -> None:
 
 
 def test_parse_scene_detection_result_includes_prepared_chunk_count() -> None:
-    samples = parse_av1an_tty_progress(
+    samples = _parse_av1an_tty_progress(
         b"INFO encode_file: scenecut: found 142 scene(s) "
         b"[with extra_splits (240 frames): 317 scene(s)]\n"
     )
@@ -60,9 +62,7 @@ def test_parse_scene_detection_result_includes_prepared_chunk_count() -> None:
 
 
 def test_parse_queue_line_marks_explicit_encoding_boundary() -> None:
-    samples = parse_av1an_tty_progress(
-        b"Queue 317 Workers 4 Encoder svt-av1 Passes 1\n"
-    )
+    samples = _parse_av1an_tty_progress(b"Queue 317 Workers 4 Encoder svt-av1 Passes 1\n")
 
     assert len(samples) == 1
     assert samples[0].phase == ProgressPhase.ENCODING
@@ -70,7 +70,7 @@ def test_parse_queue_line_marks_explicit_encoding_boundary() -> None:
 
 
 def test_parse_tty_fixture_extracts_encoding_chunk_context() -> None:
-    samples = parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
+    samples = _parse_av1an_tty_progress((FIXTURE_DIR / "encode_tty_raw.bin").read_bytes())
 
     encoding = [sample for sample in samples if sample.phase == ProgressPhase.ENCODING]
 
@@ -92,7 +92,7 @@ def test_parse_tty_fixture_extracts_encoding_chunk_context() -> None:
 
 
 def test_parse_tty_encoding_line_includes_bitrate_context() -> None:
-    samples = parse_av1an_tty_progress(
+    samples = _parse_av1an_tty_progress(
         b"00:01:04 [9/317 Chunks] \xe2\x96\x90\xe2\x96\x8c   "
         b"7% 2345/31625 (36.46 fps, eta 13m, 1344.1 Kbps, "
         b"est. 211.35 MiB)\r"
@@ -111,7 +111,7 @@ def test_parse_tty_encoding_line_includes_bitrate_context() -> None:
 
 
 def test_parse_tty_encoding_line_accepts_thousands_separators() -> None:
-    samples = parse_av1an_tty_progress(
+    samples = _parse_av1an_tty_progress(
         b"00:01:04 [1,009/2,317 Chunks] 2,345/31,625 "
         b"(36.46 fps, eta 13m, 1.5 Mbps, est. 1.25 GiB)\r"
     )
@@ -128,7 +128,7 @@ def test_parse_tty_encoding_line_accepts_thousands_separators() -> None:
 def test_parse_non_tty_output_extracts_scene_detection_samples() -> None:
     stderr = (FIXTURE_DIR / "encode_non_tty_stderr.txt").read_bytes()
 
-    samples = parse_av1an_tty_progress(stderr)
+    samples = _parse_av1an_tty_progress(stderr)
 
     assert [sample.phase for sample in samples] == [
         ProgressPhase.SCENE_DETECTION,
@@ -142,20 +142,18 @@ def test_parse_non_tty_output_extracts_scene_detection_samples() -> None:
 def test_parse_failure_output_extracts_scene_detection_before_failure() -> None:
     stderr = (FIXTURE_DIR / "encode_failure_stderr.txt").read_bytes()
 
-    samples = parse_av1an_tty_progress(stderr)
+    samples = _parse_av1an_tty_progress(stderr)
 
-    assert any(
-        sample.message == "scenes found: 1, chunks prepared: 1" for sample in samples
-    )
+    assert any(sample.message == "scenes found: 1, chunks prepared: 1" for sample in samples)
     assert samples[-1].message == "1 chunks queued, 1 workers"
 
 
 def test_parse_unsupported_record_returns_no_sample() -> None:
-    assert parse_av1an_tty_progress(b"progress: eighty percent maybe\n") == []
+    assert _parse_av1an_tty_progress(b"progress: eighty percent maybe\n") == []
 
 
 def test_parse_malformed_numeric_data_remains_harmless() -> None:
-    assert parse_av1an_tty_progress(b"00:00:00 [x/1 Chunks] nope/120 (nan fps)\r") == []
+    assert _parse_av1an_tty_progress(b"00:00:00 [x/1 Chunks] nope/120 (nan fps)\r") == []
 
 
 def test_av1an_tty_progress_supported_only_for_tested_version_family() -> None:
@@ -216,8 +214,7 @@ def test_incremental_parser_ignores_malformed_utf8_and_unrelated_lines() -> None
     parser = Av1anTtyProgressParser()
 
     samples = parser.feed(
-        b"\xff\xfe not telemetry\r"
-        b"\x1b[2K00:00:00 [0/1 Chunks] 3/120 (13 fps, eta 1s)\r"
+        b"\xff\xfe not telemetry\r\x1b[2K00:00:00 [0/1 Chunks] 3/120 (13 fps, eta 1s)\r"
     )
 
     assert [sample.current for sample in samples] == [3]

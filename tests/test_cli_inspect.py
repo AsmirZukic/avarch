@@ -120,7 +120,6 @@ def _insert_media_file(
     path.write_bytes(b"media")
     stat_result = path.stat()
     engine = _engine(config_path)
-    now = datetime(2026, 6, 14, tzinfo=UTC)
     with Session(engine) as session:
         session.add(
             MediaFile(
@@ -130,8 +129,6 @@ def _insert_media_file(
                 device_id=stat_result.st_dev,
                 inode=stat_result.st_ino,
                 fs_fingerprint="key",
-                discovered_at=now,
-                last_seen_at=now,
                 status=status,
             )
         )
@@ -154,7 +151,6 @@ def _insert_probe(
         probe_result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={"format": {}},
             normalized_probe=normalized_probe,
             created_at=created_at,
         )

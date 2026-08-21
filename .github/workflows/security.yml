@@ -29,19 +29,6 @@ jobs:
         shell: bash
         run: gzip -dc artifacts/avarch-image.tar.gz | docker load
 
-      - name: Capture vulnerability package baseline
-        shell: bash
-        run: |
-          docker run --rm --entrypoint sh avarch:test -c \
-            'dpkg-query -W -f="\${db:Status-Abbrev}\t\${binary:Package}\t\${Version}\n" perl perl-base "perl-modules-*" libio-compress-perl libhttp-tiny-perl libsocket-perl libexpat1 expat 2>/dev/null || true' \
-            > artifacts/runtime-vulnerability-packages.txt
-          docker run --rm --entrypoint sh avarch:test -c \
-            'apt-cache rdepends --installed perl 2>/dev/null || true' \
-            > artifacts/perl-rdepends.txt
-          docker run --rm --entrypoint sh avarch:test -c \
-            'apt-mark showmanual 2>/dev/null || true' \
-            > artifacts/apt-manual.txt
-
       - name: Generate vulnerability report
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -72,9 +59,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: image-security-${{ github.run_number }}-${{ github.run_attempt }}
-          path: |
-            artifacts/runtime-vulnerability-packages.txt
-            artifacts/perl-rdepends.txt
-            artifacts/apt-manual.txt
-            artifacts/trivy-image.json
+          path: artifacts/trivy-image.json
           retention-days: 14

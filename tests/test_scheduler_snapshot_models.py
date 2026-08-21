@@ -94,7 +94,9 @@ def test_every_snapshot_includes_one_captured_at_value() -> None:
 def _snapshot(*, active_jobs: tuple[ActiveJobSummary, ...]) -> SchedulerSnapshot:
     return SchedulerSnapshot(
         captured_at=datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
-        workspace=WorkspaceSummary(root_path="/workspace", database_url="sqlite:///workspace/db.sqlite"),
+        workspace=WorkspaceSummary(
+            root_path="/workspace", database_url="sqlite:///workspace/db.sqlite"
+        ),
         scheduler=SchedulerRuntimeSummary(state=SchedulerRuntimeState.RUNNING),
         pipeline=PipelineSummary(queued=3, active=len(active_jobs), completed=5, failed=1),
         active_jobs=active_jobs,

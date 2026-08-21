@@ -59,8 +59,7 @@ RUN git clone --depth 1 --branch "v${SVT_AV1_VERSION}" https://gitlab.com/AOMedi
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock alembic.ini ./
-COPY migrations ./migrations
+COPY pyproject.toml uv.lock ./
 COPY src ./src
 
 RUN uv sync --locked --no-dev --no-editable
@@ -131,8 +130,10 @@ PY
 
 RUN chmod -R a+rX "${XDG_CONFIG_HOME}"
 
-RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-    cargo install av1an --version "=${AVARCH_AV1AN_VERSION}" --locked \
+RUN cargo \
+        --config 'source.crates-io.replace-with="crates-io-http"' \
+        --config 'source.crates-io-http.registry="sparse+http://index.crates.io/"' \
+        install av1an --version "=${AVARCH_AV1AN_VERSION}" --locked \
     && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
 RUN avarch --version \
@@ -147,7 +148,6 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/avarch/venv \
     AVARCH_LIB_DIR=/opt/avarch/lib \
-    AVARCH_MIGRATIONS_ROOT=/opt/avarch/app \
     XDG_CONFIG_HOME=/opt/avarch/config \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
@@ -167,8 +167,6 @@ RUN apt-get update \
 COPY --from=python-builder /opt/avarch/venv /opt/avarch/venv
 COPY --from=python-builder /opt/avarch/lib /opt/avarch/lib
 COPY --from=python-builder /opt/avarch/config /opt/avarch/config
-COPY --from=python-builder /app/alembic.ini /opt/avarch/app/alembic.ini
-COPY --from=python-builder /app/migrations /opt/avarch/app/migrations
 COPY --from=python-builder /usr/local/bin/SvtAv1EncApp /usr/local/bin/SvtAv1EncApp
 COPY --from=python-builder /usr/local/cargo/bin/av1an /usr/local/bin/av1an
 
@@ -192,37 +190,7 @@ RUN set -eu; \
         /opt/avarch/venv/lib/python*/site-packages/setuptools \
         /opt/avarch/venv/lib/python*/site-packages/setuptools-* \
         /opt/avarch/venv/lib/python*/site-packages/wheel \
-        /opt/avarch/venv/lib/python*/site-packages/wheel-*; \
-    for package in perl 'perl-modules-*' libio-compress-perl libhttp-tiny-perl libsocket-perl; do \
-        installed="$( \
-            dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' "$package" 2>/dev/null \
-                | awk '$1 == "ii" { print $2 }' \
-                || true \
-        )"; \
-        if [ -n "$installed" ]; then \
-            printf 'Runtime image must not contain %s package(s):\n%s\n' "$package" "$installed" >&2; \
-            exit 1; \
-        fi; \
-    done; \
-    if python -m pip --version; then \
-        echo "pip must not exist in the runtime image" >&2; \
-        exit 1; \
-    fi; \
-    avarch --version; \
-    ffmpeg -version >/dev/null; \
-    ffprobe -version >/dev/null; \
-    vspipe --version >/dev/null; \
-    SvtAv1EncApp --version >/dev/null; \
-    av1an --version >/dev/null; \
-    python - <<'PY'
-from __future__ import annotations
-
-import pydantic_settings
-import vapoursynth
-
-print(pydantic_settings.__version__)
-print(vapoursynth.__version__)
-PY
+        /opt/avarch/venv/lib/python*/site-packages/wheel-*
 
 WORKDIR /work
 

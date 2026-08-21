@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from avarch.application.vapoursynth_identity import (
     GENERATOR_VERSION,
@@ -20,16 +20,10 @@ from avarch.contracts import (
     PLAN_SEMANTIC_HASH_CONTRACT,
     PROFILE_HASH_CONTRACT,
     PROMOTION_POLICY_HASH_CONTRACT,
-    RESOURCE_POLICY_HASH_CONTRACT,
     VALIDATION_POLICY_HASH_CONTRACT,
     WORK_KEY_CONTRACT,
 )
-from avarch.domain.encoder_args import (
-    EncoderArgumentError,
-    normalize_svt_operational_args,
-    parse_encoder_args,
-    svt_lp_definitions,
-)
+from avarch.domain.encoder_args import apply_svt_parallelism, parse_encoder_args
 from avarch.domain.planning import (
     TargetDimensionError,
     TargetDimensions,
@@ -203,15 +197,8 @@ def build_profile_hash(
     *,
     template_hash: str | None = None,
     script_hash: str | None = None,
-    available_cpu_count: int | None = None,
-    available_memory_bytes: int | None = None,
 ) -> str:
-    effective_profile = resolve_profile_runtime_defaults(
-        profile,
-        available_cpu_count=available_cpu_count,
-        available_memory_bytes=available_memory_bytes,
-    )
-    profile_payload = effective_profile.model_dump(mode="json")
+    profile_payload = profile.model_dump(mode="json")
     if isinstance(profile_payload.get("vapoursynth"), dict):
         profile_payload["vapoursynth"].pop("script", None)
         profile_payload["vapoursynth"].pop("template", None)
@@ -302,7 +289,6 @@ def build_execution_identity() -> ExecutionIdentity:
         av1an_contract_version=AV1AN_COMMAND_CONTRACT_VERSION,
         ffmpeg_mux_contract_version=FFMPEG_MUX_CONTRACT_VERSION,
         av1an_version_family=SUPPORTED_AV1AN_VERSION_FAMILY,
-        video_container="mkv",
         final_container="mkv",
         identity_hash="",
     )
@@ -345,7 +331,6 @@ def build_plan_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
     payload_data = plan.model_dump(mode="json")
     payload_data.pop("plan_hash", None)
     payload_data.pop("semantic_hash", None)
-    payload_data.pop("resource_policy_hash", None)
     return payload_data
 
 
@@ -357,7 +342,6 @@ def build_plan_hash(plan: TranscodePlan) -> str:
 
 
 def build_plan_semantic_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
-    encoder_args = _semantic_encoder_args(plan.av1an.encoder_args)
     return {
         "input_path": str(plan.input_path),
         "source_fs_fingerprint": plan.source_fs_fingerprint,
@@ -368,7 +352,7 @@ def build_plan_semantic_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
         "subtitles": plan.subtitles.model_dump(mode="json"),
         "vapoursynth_identity_hash": plan.vapoursynth.identity_hash,
         "encoder": plan.av1an.encoder,
-        "encoder_args": encoder_args,
+        "encoder_args": _semantic_encoder_args(plan.av1an.encoder_args),
         "pixel_format": plan.av1an.pixel_format,
         "validation_policy_hash": plan.validation.policy_hash,
         "promotion_policy_hash": plan.promotion.policy_hash,
@@ -383,29 +367,8 @@ def build_plan_semantic_hash(plan: TranscodePlan) -> str:
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
-def build_resource_policy_hash_payload(plan: TranscodePlan) -> dict[str, Any]:
-    return {
-        "av1an_workers": plan.av1an.workers,
-        "svt_lp": _effective_svt_lp(plan.av1an.encoder_args),
-        "av1an_resume_policy": plan.av1an.resume_policy,
-        "av1an_max_tries": plan.av1an.max_tries,
-    }
-
-
-def build_resource_policy_hash(plan: TranscodePlan) -> str:
-    payload = f"{RESOURCE_POLICY_HASH_CONTRACT}\0".encode() + canonical_json(
-        build_resource_policy_hash_payload(plan)
-    ).encode("utf-8")
-    return hashlib.blake2b(payload, digest_size=32).hexdigest()
-
-
 def finalize_plan_hash(plan: TranscodePlan) -> TranscodePlan:
-    plan = plan.model_copy(
-        update={
-            "semantic_hash": build_plan_semantic_hash(plan),
-            "resource_policy_hash": build_resource_policy_hash(plan),
-        }
-    )
+    plan = plan.model_copy(update={"semantic_hash": build_plan_semantic_hash(plan)})
     return plan.model_copy(update={"plan_hash": build_plan_hash(plan)})
 
 
@@ -416,21 +379,11 @@ def _semantic_encoder_args(arguments: list[str]) -> list[str]:
         token = arguments[index]
         option, separator, _value = token.partition("=")
         if option in {"--lp", "-lp"}:
-            if not separator:
-                index += 2
-            else:
-                index += 1
+            index += 1 if separator else 2
             continue
         result.append(token)
         index += 1
     return result
-
-
-def _effective_svt_lp(arguments: list[str]) -> int | str:
-    definitions = svt_lp_definitions(arguments)
-    if not definitions:
-        return "native"
-    return definitions[0].value
 
 
 def build_validation_policy_hash(policy: ValidationPolicy) -> str:
@@ -573,9 +526,6 @@ def select_audio(
         source_stream_index=stream.index,
         source_codec=stream.codec,
         source_language=stream.language,
-        source_channels=stream.channels,
-        source_title=stream.title,
-        source_commentary=stream.commentary,
         target_codec=profile.audio.codec,
         target_bitrate=profile.audio.bitrate,
         target_channels=profile.audio.channels,
@@ -662,14 +612,8 @@ def build_plan(
     resolved_template: ResolvedVapourSynthTemplate | None = None,
     resolved_filter: ResolvedVapourSynthFilter | None = None,
     generator_version: int = GENERATOR_VERSION,
-    available_cpu_count: int | None = None,
-    available_memory_bytes: int | None = None,
 ) -> TranscodePlan:
-    profile = resolve_profile_runtime_defaults(
-        context.profile,
-        available_cpu_count=available_cpu_count,
-        available_memory_bytes=available_memory_bytes,
-    )
+    profile = context.profile
     match = match_profile(profile, context.normalized_probe)
     if not match.matched:
         raise ProfileNotApplicableError(match.reasons)
@@ -713,8 +657,6 @@ def build_plan(
         profile,
         template_hash=template_hash,
         script_hash=script_hash,
-        available_cpu_count=available_cpu_count,
-        available_memory_bytes=available_memory_bytes,
     )
     execution_identity = build_execution_identity()
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
@@ -738,14 +680,15 @@ def build_plan(
     subtitles = select_subtitles(context.normalized_probe, profile)
     runtime_identity = runtime_identity or default_planning_runtime_identity()
     encoder_args = add_sdr_color_encoder_args(
-        normalize_svt_operational_args(
+        apply_svt_parallelism(
             parse_encoder_args(profile.av1an.video_args),
-            structured_svt_lp=profile.av1an.svt_lp,
+            svt_lp=profile.av1an.svt_lp,
         )
     )
 
     plan = TranscodePlan(
         plan_hash="",
+        semantic_hash="",
         input_path=input_path,
         output_path=paths.output_path,
         temp_dir=paths.work_dir,
@@ -806,7 +749,7 @@ def build_plan(
             working_directory=paths.work_dir,
             encoder=profile.av1an.encoder,
             encoder_args=encoder_args,
-            workers=resolve_av1an_workers(profile.av1an.workers),
+            workers=profile.av1an.workers,
         ),
         mux=FfmpegMuxSpec(
             video_input_path=paths.video_output_path,
@@ -842,33 +785,6 @@ def build_plan(
         artifacts=paths.artifacts,
     )
     return finalize_plan_hash(plan)
-
-
-def resolve_profile_runtime_defaults(
-    profile: EncodingProfile,
-    *,
-    available_cpu_count: int | None = None,
-    available_memory_bytes: int | None = None,
-) -> EncodingProfile:
-    resolve_av1an_workers(profile.av1an.workers)
-    try:
-        normalize_svt_operational_args(
-            parse_encoder_args(profile.av1an.video_args),
-            structured_svt_lp=profile.av1an.svt_lp,
-        )
-    except EncoderArgumentError as exc:
-        raise PlanningError(str(exc)) from exc
-    return profile.model_copy(update={"av1an": profile.av1an.model_copy()})
-
-
-def resolve_av1an_workers(
-    workers: int | str,
-) -> int | Literal["auto"]:
-    if workers == "auto":
-        return "auto"
-    if isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0:
-        raise PlanningError("Av1an workers must be a positive integer or 'auto'.")
-    return workers
 
 
 @dataclass(frozen=True, slots=True)

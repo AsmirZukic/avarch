@@ -33,7 +33,6 @@ class PromotionPhase(StrEnum):
     VERIFIED = "verified"
     COMMITTED = "committed"
     CLEANUP_COMPLETE = "cleanup_complete"
-    ROLLBACK_PENDING = "rollback_pending"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
 
@@ -53,13 +52,6 @@ class PromotionPolicy(BaseModel):
         PromotionMode.MOVE_ORIGINAL_TO_BACKUP.value,
         PromotionMode.REPLACE_ATOMIC.value,
     )
-
-    keep_original_name_suffix: Literal[".av1"] = ".av1"
-    backup_name_suffix: Literal[".avarch-original"] = ".avarch-original"
-
-    require_validation: Literal[True] = True
-    require_hardlink_for_replacement: Literal[True] = True
-    cleanup_encode_temp_after_success: Literal[True] = True
 
     policy_hash: str
 

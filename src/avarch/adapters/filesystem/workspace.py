@@ -3,11 +3,9 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-WORKSPACE_SCHEMA_VERSION = 1
 DEFAULT_VPY_REQUIREMENTS_TEXT = """schema_version = 1
 
 [python]
@@ -50,10 +48,6 @@ class WorkspaceContext:
         return self.root / ".avarch"
 
     @property
-    def workspace_toml(self) -> Path:
-        return self.avarch_dir / "workspace.toml"
-
-    @property
     def config_toml(self) -> Path:
         return self.avarch_dir / "config.toml"
 
@@ -87,23 +81,7 @@ class WorkspaceContext:
 
     @property
     def database_path(self) -> Path:
-        return self.data_dir / "avarch.adapters.sqlite.db"
-
-    @property
-    def logs_dir(self) -> Path:
-        return self.avarch_dir / "logs"
-
-    @property
-    def work_dir(self) -> Path:
-        return self.avarch_dir / "work"
-
-    @property
-    def tmp_dir(self) -> Path:
-        return self.avarch_dir / "tmp"
-
-    @property
-    def run_dir(self) -> Path:
-        return self.avarch_dir / "run"
+        return self.data_dir / "avarch.db"
 
     @classmethod
     def discover(cls, start: Path | None = None) -> WorkspaceContext:
@@ -113,7 +91,7 @@ class WorkspaceContext:
 
         for candidate in (current, *current.parents):
             avarch_dir = candidate / ".avarch"
-            if (avarch_dir / "workspace.toml").is_file():
+            if (avarch_dir / "config.toml").is_file():
                 return cls(candidate)
 
         raise WorkspaceNotFoundError(
@@ -160,7 +138,7 @@ def create_workspace(root: Path, *, force: bool = False) -> WorkspaceContext:
     except PermissionError as exc:
         raise WorkspaceCreateError(_permission_message(root, exc)) from exc
     try:
-        _populate_workspace_tree(temp_dir, workspace_id=uuid.uuid4())
+        _populate_workspace_tree(temp_dir)
         os.replace(temp_dir, context.avarch_dir)
     except PermissionError as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -187,20 +165,10 @@ def ensure_workspace_layout(context: WorkspaceContext) -> None:
         context.vpy_requirements_toml.write_text(DEFAULT_VPY_REQUIREMENTS_TEXT, encoding="utf-8")
 
 
-def _populate_workspace_tree(avarch_dir: Path, *, workspace_id: uuid.UUID) -> None:
+def _populate_workspace_tree(avarch_dir: Path) -> None:
     for directory in _workspace_directories(avarch_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    (avarch_dir / "workspace.toml").write_text(
-        "\n".join(
-            (
-                f"schema_version = {WORKSPACE_SCHEMA_VERSION}",
-                f'id = "{workspace_id}"',
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
     (avarch_dir / "vpy" / "requirements.toml").write_text(
         DEFAULT_VPY_REQUIREMENTS_TEXT,
         encoding="utf-8",
@@ -214,8 +182,4 @@ def _workspace_directories(avarch_dir: Path) -> tuple[Path, ...]:
         avarch_dir / "vpy",
         avarch_dir / "vpy" / "environments",
         avarch_dir / "data",
-        avarch_dir / "logs",
-        avarch_dir / "work",
-        avarch_dir / "tmp",
-        avarch_dir / "run",
     )

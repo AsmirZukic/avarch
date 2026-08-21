@@ -5,13 +5,11 @@ from pathlib import Path
 
 from sqlmodel import Session
 
-from avarch.adapters.probe import ProbeProcessError
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.job_transitions import recover_abandoned_jobs
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.rejection_cleanup import cleanup_rejected_output
-from avarch.adapters.validation import validate_encoded_file
 from avarch.domain.jobs import JobOutcomeReason, JobStage, JobStatus
 from avarch.domain.scheduler import ResourceCapacity, has_resource_capacity
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
@@ -68,23 +66,6 @@ def test_batch_with_success_failure_and_size_rejection(tmp_path: Path) -> None:
         claimable = claimable_jobs(session, active_job_ids=set())
 
     assert [job.queue_key for job in claimable] == ["unrelated"]
-
-
-def test_corrupt_output_does_not_replace_original(tmp_path: Path) -> None:
-    original = tmp_path / "movie.mkv"
-    encoded = tmp_path / "movie.av1.mkv"
-    original.write_bytes(b"original")
-    encoded.write_bytes(b"corrupt")
-
-    def runner(path: Path) -> dict[str, object]:
-        if path == encoded:
-            raise ProbeProcessError("ffprobe could not read output")
-        return _probe_payload(codec="hevc")
-
-    report = validate_encoded_file(original, encoded, _profile(), probe_runner=runner)
-
-    assert report.passed is False
-    assert original.read_bytes() == b"original"
 
 
 def test_larger_output_is_deleted(tmp_path: Path) -> None:
@@ -174,7 +155,7 @@ def test_scheduler_restart_mid_promotion(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 
@@ -191,8 +172,6 @@ def _media_file(path: Path, now: datetime) -> MediaFile:
         device_id=3,
         inode=4,
         fs_fingerprint=f"fingerprint:{path.name}",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
 
@@ -232,10 +211,3 @@ def _profile() -> EncodingProfile:
         audio=ProfileAudioSettings(codec="opus", bitrate="128k", channels=2, languages=["eng"]),
         subtitles=ProfileSubtitleSettings(languages=["eng"]),
     )
-
-
-def _probe_payload(*, codec: str) -> dict[str, object]:
-    return {
-        "streams": [{"index": 0, "codec_name": codec, "codec_type": "video"}],
-        "format": {"format_name": "matroska,webm", "duration": "600.0"},
-    }

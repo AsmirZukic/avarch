@@ -53,12 +53,6 @@ def test_plan_job_transition_rejects_impossible_transition() -> None:
         plan_job_transition(JobStatus.ENCODING, JobStatus.PROMOTED)
 
 
-def test_plan_job_transition_accepts_legacy_status_names() -> None:
-    transition = plan_job_transition("pending", "running")
-
-    assert transition.status == JobStatus.ENCODING
-
-
 def test_plan_job_transition_normalizes_reason_value() -> None:
     transition = plan_job_transition(
         JobStatus.VALIDATING,

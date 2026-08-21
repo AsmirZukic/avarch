@@ -340,9 +340,6 @@ def validate_promotion_preflight(
         source_fingerprint=source_snapshot.fs_fingerprint,
         source_stat=_stat_snapshot(source_path),
         validated_output_fingerprint=output_snapshot.fs_fingerprint,
-        validated_output_size=output_snapshot.size_bytes,
-        destination_free_bytes=free,
-        required_free_bytes=required,
         warnings=[],
     )
 
@@ -602,14 +599,12 @@ async def _execute_claimed_promotion(
             owner_token=owner_token,
         )
         raise PromotionVerificationError("Final digest does not match validated output.")
-    final_snapshot = create_file_snapshot(install_path)
     with Session(engine) as session, session.begin():
         try:
             update_promotion_verified(
                 session,
                 promotion_id=promotion_id,
                 final_digest=final_digest,
-                final_fingerprint=final_snapshot.fs_fingerprint,
                 now=_utc_now(),
             )
         except PromotionRecordNotFoundError as exc:
@@ -711,7 +706,6 @@ def _commit_verified_promotion(
             session,
             record=record,
             installed_path=installed_path,
-            final_fingerprint=final_snapshot.fs_fingerprint,
             media_snapshot=media_snapshot,
             now=now,
         )
@@ -747,11 +741,6 @@ def _cleanup_after_success(engine: Engine, promotion_id: int, plan: TranscodePla
         _delete_known_work_path(plan.av1an.temp_dir, work_dir=plan.temp_dir, recursive=True)
     except Exception as exc:
         errors.append(f"cleanup failed for {plan.av1an.temp_dir}: {exc}")
-    calibration_dir = plan.temp_dir / "calibration"
-    try:
-        _delete_known_work_path(calibration_dir, work_dir=plan.temp_dir, recursive=True)
-    except Exception as exc:
-        errors.append(f"cleanup failed for {calibration_dir}: {exc}")
     return "; ".join(errors)[:500] if errors else None
 
 

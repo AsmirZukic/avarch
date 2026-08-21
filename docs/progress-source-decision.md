@@ -1,17 +1,17 @@
 # Av1an Progress Source Decision
 
-**Status:** Adopted for first implementation  
+**Status:** Adopted
 **Date:** 2026-07-14  
 **Related fixtures:** `tests/fixtures/av1an_progress/`  
 **Av1an tested:** `av1an 0.5.2-unstable` from the Avarch Docker runtime
 
 ## Decision
 
-Use Av1an 0.5.2 TTY progress records as the first numeric encoding progress
+Use Av1an 0.5.2 TTY progress records as the numeric encoding progress
 source, guarded by Av1an version/capability checks and backed by phase-only
 fallback behavior.
 
-The first implementation will parse only the captured Av1an 0.5.x progress
+The parser accepts only the captured Av1an 0.5.x progress
 shape:
 
 ```text
@@ -116,7 +116,7 @@ diagnostics remain in the raw stdout/stderr logs.
 
 ## Limitations
 
-The first version exposes phase progress, not overall job progress. Encoding
+Avarch exposes phase progress, not overall job progress. Encoding
 percentage is the current encoding phase percentage only. Concatenation, muxing,
 validation, and promotion have phase/elapsed/heartbeat visibility unless a later
 source provides trustworthy numeric progress for those phases.

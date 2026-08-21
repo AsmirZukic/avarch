@@ -26,16 +26,6 @@ from avarch.domain.jobs import (
 )
 from avarch.serialization import canonical_json
 
-__all__ = [
-    "JobControlError",
-    "cancel_job",
-    "hold_job",
-    "release_job",
-    "request_job_retry",
-    "reset_retry_job",
-    "update_job_priority",
-]
-
 
 class JobControlError(RuntimeError):
     pass

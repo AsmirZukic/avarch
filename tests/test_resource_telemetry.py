@@ -70,9 +70,7 @@ def test_snapshot_timestamp_and_sample_timestamp_are_separate_values() -> None:
 
 
 def test_high_cpu_alone_is_not_warning_or_critical() -> None:
-    metrics = (
-        ResourceMetric(name="cpu", value=95.0, unit="percent", health=ResourceHealth.OK),
-    )
+    metrics = (ResourceMetric(name="cpu", value=95.0, unit="percent", health=ResourceHealth.OK),)
 
     assert sample_health(metrics) == ResourceHealth.OK
 

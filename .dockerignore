@@ -11,9 +11,7 @@ __pycache__/
 *.py[cod]
 
 .avarch/
-avarch.toml
 /media/
-/profiles/
 
 .codex/
 .agents/

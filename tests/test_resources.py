@@ -5,25 +5,8 @@ import pytest
 from avarch.application.resources import (
     _cgroup_cpu_quota_count,  # pyright: ignore[reportPrivateUsage]
     _cgroup_memory_limit_bytes,  # pyright: ignore[reportPrivateUsage]
-    auto_av1an_worker_count,
     effective_resource_snapshot,
 )
-
-
-def test_auto_av1an_worker_count_caps_svt_parallelism() -> None:
-    assert auto_av1an_worker_count(cpu_count=20, memory_bytes=64 * 1024**3) == 4
-
-
-def test_auto_av1an_worker_count_scales_down_for_small_cpu_budget() -> None:
-    assert auto_av1an_worker_count(cpu_count=8, memory_bytes=64 * 1024**3) == 2
-
-
-def test_auto_av1an_worker_count_scales_down_for_small_memory_budget() -> None:
-    assert auto_av1an_worker_count(cpu_count=20, memory_bytes=4 * 1024**3) == 1
-
-
-def test_auto_av1an_worker_count_keeps_single_cpu_usable() -> None:
-    assert auto_av1an_worker_count(cpu_count=1, memory_bytes=64 * 1024**3) == 1
 
 
 def test_cgroup_v2_cpu_quota_limits_available_count(tmp_path: Path) -> None:

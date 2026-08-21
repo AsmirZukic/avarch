@@ -32,16 +32,6 @@ def load_plan_artifact(path: Path) -> TranscodePlan:
         raise PlanArtifactLoadError(f"Unable to load plan artifact: {path}") from exc
 
 
-def validation_report_path_for_plan_artifact(path: Path | str | None) -> Path | None:
-    if path is None:
-        return None
-    try:
-        plan = load_plan_artifact(Path(path))
-    except PlanArtifactLoadError:
-        return None
-    return plan.runtime.validation_report
-
-
 def write_plan_artifacts(
     *,
     plan: TranscodePlan,

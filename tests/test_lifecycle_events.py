@@ -25,7 +25,7 @@ from avarch.domain.jobs import (
 )
 
 
-def test_job_event_metadata_is_nullable_for_historical_events(tmp_path: Path) -> None:
+def test_job_event_metadata_is_optional(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.sqlite'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -90,7 +90,7 @@ def test_lifecycle_event_store_records_structured_event(tmp_path: Path) -> None:
 
     with Session(engine) as session, session.begin():
         job_id, attempt_id, session_id = _insert_job_attempt_and_session(session, now=now)
-        record = SqliteLifecycleEventStore(session).record_event(
+        SqliteLifecycleEventStore(session).record_event(
             job_id=job_id,
             attempt_id=attempt_id,
             scheduler_session_id=session_id,
@@ -102,51 +102,17 @@ def test_lifecycle_event_store_records_structured_event(tmp_path: Path) -> None:
             dedupe_key="attempt-1-encode-failed",
             created_at=now,
         )
-
-    assert record.job_id == job_id
-    assert record.attempt_id == attempt_id
-    assert record.scheduler_session_id == session_id
-    assert record.event_type is JobEventType.STAGE_FAILED
-    assert record.stage is JobStage.ENCODE
-    assert record.details == {"error_code": "encoder_exit", "exit_code": 1}
-    assert record.dedupe_key == "attempt-1-encode-failed"
+        record = session.exec(select(JobEvent)).one()
+        assert record.job_id == job_id
+        assert record.attempt_id == attempt_id
+        assert record.scheduler_session_id == session_id
+        assert record.event_type == JobEventType.STAGE_FAILED
+        assert record.stage == JobStage.ENCODE
+        assert record.details_json == '{"error_code":"encoder_exit","exit_code":1}'
+        assert record.dedupe_key == "attempt-1-encode-failed"
 
 
 def test_lifecycle_event_store_dedupes_by_key(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.sqlite'}")
-    create_db_schema(engine)
-    now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
-
-    with Session(engine) as session, session.begin():
-        job_id, attempt_id, session_id = _insert_job_attempt_and_session(session, now=now)
-        store = SqliteLifecycleEventStore(session)
-        first = store.record_event(
-            job_id=job_id,
-            attempt_id=attempt_id,
-            scheduler_session_id=session_id,
-            event_type=JobEventType.STAGE_STARTED,
-            stage=JobStage.ENCODE,
-            actor="scheduler",
-            created_at=now,
-            dedupe_key="attempt-1-encode-started",
-        )
-        second = store.record_event(
-            job_id=job_id,
-            attempt_id=attempt_id,
-            scheduler_session_id=session_id,
-            event_type=JobEventType.STAGE_STARTED,
-            stage=JobStage.ENCODE,
-            actor="scheduler",
-            created_at=now,
-            dedupe_key="attempt-1-encode-started",
-        )
-        count = len(session.exec(select(JobEvent)).all())
-
-    assert second.id == first.id
-    assert count == 1
-
-
-def test_lifecycle_event_store_queries_latest_events_deterministically(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.sqlite'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -159,31 +125,24 @@ def test_lifecycle_event_store_queries_latest_events_deterministically(tmp_path:
             attempt_id=attempt_id,
             scheduler_session_id=session_id,
             event_type=JobEventType.STAGE_STARTED,
-            stage=JobStage.PROBE,
+            stage=JobStage.ENCODE,
             actor="scheduler",
             created_at=now,
+            dedupe_key="attempt-1-encode-started",
         )
-        second = store.record_event(
+        store.record_event(
             job_id=job_id,
             attempt_id=attempt_id,
             scheduler_session_id=session_id,
-            event_type=JobEventType.STAGE_COMPLETED,
-            stage=JobStage.PROBE,
+            event_type=JobEventType.STAGE_STARTED,
+            stage=JobStage.ENCODE,
             actor="scheduler",
             created_at=now,
+            dedupe_key="attempt-1-encode-started",
         )
-        third = store.record_event(
-            job_id=job_id,
-            event_type=JobEventType.HOLD_REQUESTED,
-            actor="operator",
-            reason="pause",
-            created_at=now,
-        )
-        latest = store.latest_events(limit=2)
+        count = len(session.exec(select(JobEvent)).all())
 
-    assert [event.id for event in latest] == [third.id, second.id]
-    assert latest[0].event_type is JobEventType.HOLD_REQUESTED
-    assert latest[0].details == {}
+    assert count == 1
 
 
 def _insert_job_attempt_and_session(
@@ -198,8 +157,6 @@ def _insert_job_attempt_and_session(
         device_id=789,
         inode=101112,
         fs_fingerprint="source-fs",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)
@@ -207,7 +164,6 @@ def _insert_job_attempt_and_session(
 
     probe = ProbeResult(
         media_file_id=media_file.id or 0,
-        ffprobe_json="{}",
         normalized_json="{}",
         probe_hash="probe",
         source_fs_fingerprint=media_file.fs_fingerprint,

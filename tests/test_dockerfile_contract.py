@@ -8,4 +8,4 @@ def test_dockerfile_pins_av1an_to_exact_version() -> None:
 
     assert 'ARG AVARCH_AV1AN_VERSION=">=0.5,<0.6"' not in dockerfile
     assert "ARG AVARCH_AV1AN_VERSION=0.5.1" in dockerfile
-    assert 'cargo install av1an --version "=${AVARCH_AV1AN_VERSION}" --locked' in dockerfile
+    assert 'install av1an --version "=${AVARCH_AV1AN_VERSION}" --locked' in dockerfile

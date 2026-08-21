@@ -23,17 +23,6 @@ class JobStatus(StrEnum):
 
     HELD = "held"
 
-    @classmethod
-    def _missing_(cls, value: object) -> JobStatus | None:
-        legacy = {
-            "pending": cls.QUEUED,
-            "running": cls.ENCODING,
-            "validated": cls.READY_TO_PROMOTE,
-            "completed": cls.PROMOTED,
-            "canceled": cls.CANCELLED,
-        }
-        return legacy.get(value) if isinstance(value, str) else None
-
 
 class JobOutcomeReason(StrEnum):
     SUCCESS = "success"
@@ -41,7 +30,6 @@ class JobOutcomeReason(StrEnum):
     SKIPPED_MINIMUM_SAVINGS_NOT_MET = "skipped_minimum_savings_not_met"
     FAILED_VALIDATION = "failed_validation"
     FAILED_PROMOTION = "failed_promotion"
-    FAILED_ENCODING = "failed_encoding"
     CANCELLED_BY_USER = "cancelled_by_user"
 
 
@@ -327,7 +315,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     ),
     JobStatus.CANCELLED: frozenset({JobStatus.CANCELLED, JobStatus.QUEUED}),
     JobStatus.HELD: frozenset({JobStatus.HELD, JobStatus.QUEUED, JobStatus.CANCELLED}),
-    }
+}
 
 
 def plan_completed_stage_transition(

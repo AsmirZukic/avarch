@@ -30,7 +30,6 @@ for package in perl "perl-modules-*" libio-compress-perl libhttp-tiny-perl libso
 done
 '
 
-docker run --rm --entrypoint python "$image" -c 'import pydantic_settings; print(pydantic_settings.__version__)'
 docker run --rm --entrypoint python "$image" -c 'import vapoursynth; print(vapoursynth.__version__)'
 
 docker run --rm --entrypoint sh -v "$work_dir:/tmp/avarch-smoke" "$image" -c '

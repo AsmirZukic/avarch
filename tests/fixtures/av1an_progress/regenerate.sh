@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-image="${AVARCH_PROGRESS_IMAGE:-avarch-progress-baseline}"
+image="${AVARCH_PROGRESS_IMAGE:-avarch-progress-fixtures}"
 fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 work_dir="$(mktemp -d)"
 
@@ -15,7 +15,7 @@ ffmpeg -hide_banner -loglevel error \
     -f lavfi -i testsrc2=size=160x90:rate=24:duration=5 \
     -an -pix_fmt yuv420p "$work_dir/source.mkv"
 
-common_args='-i /work/source.mkv --encoder svt-av1 --workers 1 --pix-format yuv420p --concat ffmpeg --max-tries 1 --audio-params -an --no-defaults --keep -n'
+common_args='-i /work/source.mkv --encoder svt-av1 --workers 1 --pix-format yuv420p --concat ffmpeg --max-tries 1 --audio-params -an --no-defaults -n'
 
 docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     -i /work/source.mkv \
@@ -29,28 +29,9 @@ docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     --max-tries 1 \
     --audio-params -an \
     --no-defaults \
-    --keep \
     -n \
     >"$fixture_dir/encode_non_tty_stdout.txt" \
     2>"$fixture_dir/encode_non_tty_stderr.txt"
-
-docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
-    -i /work/source.mkv \
-    -o /work/out-resume.ivf \
-    --temp /work/av1an-temp \
-    --encoder svt-av1 \
-    --video-params "--preset 10 --crf 55" \
-    --workers 1 \
-    --pix-format yuv420p \
-    --concat ffmpeg \
-    --max-tries 1 \
-    --audio-params -an \
-    --no-defaults \
-    --keep \
-    -n \
-    --resume \
-    >"$fixture_dir/encode_resume_stdout.txt" \
-    2>"$fixture_dir/encode_resume_stderr.txt"
 
 set +e
 docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
@@ -65,9 +46,8 @@ docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     --max-tries 1 \
     --audio-params -an \
     --no-defaults \
-    --keep \
     -n \
-    >"$fixture_dir/encode_failure_stdout.txt" \
+    >/dev/null \
     2>"$fixture_dir/encode_failure_stderr.txt"
 failure_code="$?"
 set -e
@@ -75,8 +55,3 @@ printf 'failure_code=%s\n' "$failure_code" >"$fixture_dir/encode_failure_exit.tx
 
 script -q -e -c "docker run --rm -t -v '$work_dir:/work' --entrypoint av1an '$image' $common_args -o /work/out-tty.ivf --temp /work/av1an-temp-tty --video-params '--preset 10 --crf 55'" /dev/null \
     >"$fixture_dir/encode_tty_raw.bin"
-
-(
-    cd "$work_dir"
-    find av1an-temp -maxdepth 3 \( -type f -o -type d \) | sort
-) >"$fixture_dir/temp_directory_manifest.txt"

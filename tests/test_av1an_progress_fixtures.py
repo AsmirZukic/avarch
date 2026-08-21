@@ -24,20 +24,10 @@ def test_tty_av1an_capture_preserves_control_bytes_and_numeric_progress() -> Non
     assert b"eta" in raw
 
 
-def test_resume_and_failure_captures_are_representative() -> None:
-    resume = (FIXTURE_DIR / "encode_resume_stderr.txt").read_text(encoding="utf-8")
+def test_failure_capture_is_representative() -> None:
     failure = (FIXTURE_DIR / "encode_failure_stderr.txt").read_text(encoding="utf-8")
     failure_exit = (FIXTURE_DIR / "encode_failure_exit.txt").read_text(encoding="utf-8")
 
-    assert "encoding resumed with 1/1 chunks completed" in resume
     assert failure_exit == "failure_code=1\n"
     assert "encoder failed" in failure
     assert "Unprocessed tokens: --definitely-not-an-svt-option" in failure
-
-
-def test_temp_manifest_records_stable_av1an_state_files() -> None:
-    manifest = (FIXTURE_DIR / "temp_directory_manifest.txt").read_text(encoding="utf-8")
-
-    assert "av1an-temp/chunks.json" in manifest
-    assert "av1an-temp/done.json" in manifest
-    assert "av1an-temp/scenes.json" in manifest

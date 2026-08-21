@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-DEFAULT_IMAGE="${AVARCH_DEFAULT_IMAGE:-avarch:latest}"
-IMAGE="${AVARCH_IMAGE:-$DEFAULT_IMAGE}"
+IMAGE="${AVARCH_IMAGE:-avarch:latest}"
 CONTAINER_WORKSPACE="/workspace"
 ENCODER_CONTAINER_NAME="avarch-encoder"
 AVARCH_LABEL="org.avarch.container"
@@ -16,7 +15,7 @@ die() {
 find_workspace() {
   current="${PWD:-$(pwd)}"
   while :; do
-    if [ -f "$current/.avarch/workspace.toml" ]; then
+    if [ -f "$current/.avarch/config.toml" ]; then
       printf '%s\n' "$current"
       return 0
     fi
@@ -104,7 +103,9 @@ validate_resource_limit_options() {
   fi
 }
 
-exec_docker_run() {
+run_docker() {
+  run_mode="$1"
+  shift
   security_opt=$(security_option)
   if [ -n "$security_opt" ]; then
     set -- --security-opt "$security_opt" "$@"
@@ -119,23 +120,8 @@ exec_docker_run() {
   if [ "${AVARCH_DOCKER_CPUS:-}" ]; then
     set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
   fi
-  exec docker run --rm --user "$uid:$gid" "$@"
-}
-
-docker_run() {
-  security_opt=$(security_option)
-  if [ -n "$security_opt" ]; then
-    set -- --security-opt "$security_opt" "$@"
-  fi
-  validate_resource_limit_options
-  if [ "${AVARCH_DOCKER_MEMORY:-}" ]; then
-    set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
-  fi
-  if [ "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
-    set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
-  fi
-  if [ "${AVARCH_DOCKER_CPUS:-}" ]; then
-    set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
+  if [ "$run_mode" = "exec" ]; then
+    exec docker run --rm --user "$uid:$gid" "$@"
   fi
   docker run --rm --user "$uid:$gid" "$@"
 }
@@ -175,7 +161,7 @@ foreground_live_command() {
 }
 
 workspace_volume() {
-  options=$(volume_options "$1")
+  options=$(volume_options)
   if [ -n "$options" ]; then
     printf '%s:%s:%s\n' "$1" "$CONTAINER_WORKSPACE" "$options"
   else
@@ -245,14 +231,9 @@ if foreground_live_command "$@"; then
   allocate_tty=1
 fi
 
-owner_dashboard=0
-if [ "$allocate_tty" = "1" ] && [ "${1:-}" = "scheduler" ] && [ "${2:-}" = "run" ]; then
-  owner_dashboard=1
-fi
-
 if [ "$scheduler_container" = "1" ] && [ "$detached_scheduler" = "1" ]; then
   volume=$(workspace_volume "$workspace")
-  docker_run \
+  run_docker return \
     -d \
     --name "$ENCODER_CONTAINER_NAME" \
     --label "$AVARCH_LABEL=encoder" \
@@ -264,26 +245,6 @@ if [ "$scheduler_container" = "1" ] && [ "$detached_scheduler" = "1" ]; then
     --managed-child \
     --mode detached
   exit 0
-fi
-
-if [ "$owner_dashboard" = "1" ]; then
-  volume=$(workspace_volume "$workspace")
-  docker_run \
-    -d \
-    --name "$ENCODER_CONTAINER_NAME" \
-    --label "$AVARCH_LABEL=encoder" \
-    --label "$WORKSPACE_LABEL=$workspace" \
-    -v "$volume" \
-    -w "$CONTAINER_WORKSPACE" \
-    "$IMAGE" \
-    "$@" \
-    --mode detached
-  exec_docker_run \
-    -i -t \
-    -v "$volume" \
-    -w "$CONTAINER_WORKSPACE" \
-    "$IMAGE" \
-    scheduler watch --owner
 fi
 
 set -- "$IMAGE" "$@"
@@ -304,4 +265,4 @@ if [ "$allocate_tty" = "1" ]; then
   set -- -i -t "$@"
 fi
 
-exec_docker_run "$@"
+run_docker exec "$@"

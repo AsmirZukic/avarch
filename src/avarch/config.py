@@ -5,9 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from avarch.application.resource_limits import ResourceLimitError, parse_memory_reserve
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogFormat = Literal["console", "json"]
@@ -22,7 +20,7 @@ class AppSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = "sqlite:///data/avarch.adapters.sqlite.db"
+    url: str = "sqlite:///data/avarch.db"
 
 
 class LoggingSettings(BaseModel):
@@ -38,40 +36,6 @@ class ResourceSettings(BaseModel):
     cheap_workers: int = Field(default=4, ge=1)
     av1an_jobs: int = Field(default=1, ge=1)
     file_ops: int = Field(default=1, ge=1)
-    cpu_reserve: float = Field(default=1.0, ge=0)
-    memory_reserve: int | str = "10%"
-    reservation_allocator: bool = True
-
-    @field_validator("memory_reserve")
-    @classmethod
-    def validate_memory_reserve(cls, value: int | str) -> int | str:
-        try:
-            parse_memory_reserve(value)
-        except ResourceLimitError as exc:
-            raise ValueError(str(exc)) from exc
-        return value
-
-    @model_validator(mode="after")
-    def block_unreserved_parallel_av1an(self) -> ResourceSettings:
-        if self.av1an_jobs > 1 and not self.reservation_allocator:
-            raise ValueError(
-                "resources.av1an_jobs greater than 1 requires resource reservations, "
-                "but resources.reservation_allocator is disabled"
-            )
-        return self
-
-
-class PerformanceSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    calibration_enabled: bool = True
-    calibration_max_seconds: float = Field(default=120.0, ge=0)
-    calibration_max_predicted_fraction: float = Field(default=0.01, ge=0)
-    calibration_min_predicted_seconds: float = Field(default=300.0, ge=0)
-    calibration_sample_seconds: float = Field(default=10.0, ge=5)
-    calibration_warmup_seconds: float = Field(default=1.0, ge=0)
-    calibration_max_candidates: int = Field(default=8, ge=2, le=12)
-    calibration_min_gain_fraction: float = Field(default=0.03, ge=0, le=1)
 
 
 class ProfileRegistrySettings(BaseModel):
@@ -142,7 +106,6 @@ class AppConfig(BaseModel):
     database: DatabaseSettings = DatabaseSettings()
     logging: LoggingSettings = LoggingSettings()
     resources: ResourceSettings = ResourceSettings()
-    performance: PerformanceSettings = PerformanceSettings()
     scanner: ScannerSettings = ScannerSettings()
     profile_registry: ProfileRegistrySettings = ProfileRegistrySettings()
 
@@ -151,7 +114,7 @@ WORKSPACE_CONFIG_TEXT = """[app]
 data_dir = "data"
 
 [database]
-url = "sqlite:///data/avarch.adapters.sqlite.db"
+url = "sqlite:///data/avarch.db"
 
 [logging]
 level = "INFO"
@@ -161,19 +124,6 @@ format = "console"
 cheap_workers = 4
 av1an_jobs = 1
 file_ops = 1
-cpu_reserve = 1.0
-memory_reserve = "10%"
-reservation_allocator = true
-
-[performance]
-calibration_enabled = true
-calibration_max_seconds = 120.0
-calibration_max_predicted_fraction = 0.01
-calibration_min_predicted_seconds = 300.0
-calibration_sample_seconds = 10.0
-calibration_warmup_seconds = 1.0
-calibration_max_candidates = 8
-calibration_min_gain_fraction = 0.03
 
 [scanner]
 roots = []

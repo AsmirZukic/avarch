@@ -65,13 +65,11 @@ class Attachment(BaseModel):
     index: int = Field(ge=0)
     codec: str | None = None
     filename: str | None = None
-    mimetype: str | None = None
 
 
 class Chapter(BaseModel):
     id: int
     start_seconds: float | None = None
-    end_seconds: float | None = None
     title: str | None = None
 
 

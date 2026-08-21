@@ -65,7 +65,6 @@ class ProbeStore(Protocol):
         self,
         *,
         media_file_id: int,
-        raw_probe: Mapping[str, Any],
         normalized_probe: NormalizedProbe,
         created_at: datetime,
     ) -> StoredProbeResult: ...
@@ -123,10 +122,9 @@ def run_probe_workflow(
             continue
 
         try:
-            raw_probe, normalized_probe = collector.collect(file_path)
+            _, normalized_probe = collector.collect(file_path)
             stored = store.store_probe_result(
                 media_file_id=media_file.id,
-                raw_probe=raw_probe,
                 normalized_probe=normalized_probe,
                 created_at=now,
             )

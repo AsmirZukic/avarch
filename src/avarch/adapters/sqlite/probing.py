@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from sqlmodel import Session
 
@@ -56,7 +55,6 @@ class SqliteProbeStore:
         self,
         *,
         media_file_id: int,
-        raw_probe: Mapping[str, Any],
         normalized_probe: NormalizedProbe,
         created_at: datetime,
     ) -> StoredProbeResult:
@@ -67,7 +65,6 @@ class SqliteProbeStore:
             result = store_probe_result(
                 self._session,
                 media_file=media_file,
-                raw_probe=raw_probe,
                 normalized_probe=normalized_probe,
                 created_at=created_at,
             )

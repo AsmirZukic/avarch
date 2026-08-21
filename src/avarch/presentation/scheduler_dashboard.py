@@ -15,7 +15,6 @@ from avarch.application.resource_telemetry import ResourceHealth
 from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     BlockedJobSummary,
-    EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     ResourceMetricSummary,
     SchedulerSessionRunSummary,
@@ -198,9 +197,6 @@ def _compact_dashboard(
                 ),
                 width,
             )
-            resources = _encode_resources(job.attempt)
-            if resources is not None:
-                _append_line(text, f"  {resources}", width)
     else:
         _append_line(text, "Active none", width)
     if snapshot.upcoming_jobs:
@@ -345,25 +341,19 @@ def _active_jobs_panel_height(snapshot: SchedulerSnapshot) -> int:
 def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
     if not snapshot.upcoming_jobs:
         return Panel("No upcoming jobs", title="Upcoming", border_style=NEUTRAL_BORDER)
-    renderables: list[RenderableType] = []
-    if snapshot.forecast is not None:
-        renderables.append(Text(_forecast_line(snapshot)))
     table = Table(expand=True)
     table.add_column("#", justify="right")
     table.add_column("File", overflow="fold")
     table.add_column("Profile")
     table.add_column("Stage")
-    table.add_column("Estimate")
     for job in snapshot.upcoming_jobs:
         table.add_row(
             str(job.selection_position or ""),
             _display_path(job.source_path),
             job.profile_name or UNAVAILABLE,
             f"{job.stage.value} · {job.selection_confidence or UNAVAILABLE}",
-            _upcoming_start(job),
         )
-    renderables.append(table)
-    return Panel(Group(*renderables), title="Upcoming Jobs", border_style=NEUTRAL_BORDER)
+    return Panel(table, title="Upcoming Jobs", border_style=NEUTRAL_BORDER)
 
 
 def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -379,67 +369,7 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
         table.add_row("encode chunks", chunks)
     if capacity.stale:
         table.add_row("freshness", "stale")
-    workers = (
-        f"{capacity.av1an_workers_configured} active"
-        if capacity.av1an_workers_configured is not None and capacity.av1an_active
-        else f"{capacity.av1an_workers_configured} configured"
-        if capacity.av1an_workers_configured is not None
-        else UNAVAILABLE
-    )
-    table.add_row("Av1an workers", workers)
-    decisions = tuple(
-        attempt.resource_decision
-        for job in snapshot.active_jobs
-        if job.stage == JobStage.ENCODE
-        and (attempt := job.attempt) is not None
-        and attempt.resource_decision is not None
-    )
-    if decisions:
-        table.add_row("SVT-AV1 LP", _capacity_svt_lp(decisions))
-        table.add_row("selection", _capacity_selection(decisions))
     return Panel(table, title="Capacity", border_style=NEUTRAL_BORDER)
-
-
-def _encode_resources(attempt: AttemptProgressSummary | None) -> str | None:
-    if attempt is None or attempt.resource_decision is None:
-        return None
-    decision = attempt.resource_decision
-    workers = decision.effective_workers
-    svt_lp = decision.effective_svt_lp
-    parts = [f"{workers} Av1an workers"]
-    if isinstance(workers, int):
-        parts.append(f"{workers} concurrent SVT-AV1 encoders")
-    parts.append(f"{svt_lp} LP each")
-    if isinstance(workers, int) and isinstance(svt_lp, int):
-        parts.append(f"{workers * svt_lp} LP nominal")
-    parts.append(decision.reason.replace("_", " "))
-    return " · ".join(parts)
-
-
-def _capacity_svt_lp(decisions: tuple[EncodeResourceDecisionSummary, ...]) -> str:
-    lp_values = {decision.effective_svt_lp for decision in decisions}
-    fully_bounded = all(
-        isinstance(decision.effective_workers, int)
-        and isinstance(decision.effective_svt_lp, int)
-        for decision in decisions
-    )
-    nominal = (
-        sum(
-            decision.effective_workers * decision.effective_svt_lp
-            for decision in decisions
-            if isinstance(decision.effective_workers, int)
-            and isinstance(decision.effective_svt_lp, int)
-        )
-        if fully_bounded
-        else None
-    )
-    lp = str(next(iter(lp_values))) if len(lp_values) == 1 else "mixed"
-    return f"{lp} each · {nominal} LP nominal" if nominal is not None else f"{lp} each"
-
-
-def _capacity_selection(decisions: tuple[EncodeResourceDecisionSummary, ...]) -> str:
-    reasons = {decision.reason.replace("_", " ") for decision in decisions}
-    return next(iter(reasons)) if len(reasons) == 1 else "mixed"
 
 
 def _active_chunk_usage(snapshot: SchedulerSnapshot) -> str | None:
@@ -550,56 +480,6 @@ def _resource_table() -> Table:
     return table
 
 
-def _forecast_line(snapshot: SchedulerSnapshot) -> str:
-    forecast = snapshot.forecast
-    if forecast is None:
-        return UNAVAILABLE
-    if not forecast.available:
-        return f"forecast unavailable · {_forecast_reason(forecast.reason)}"
-    if forecast.lower_seconds is None or forecast.upper_seconds is None:
-        return "forecast unavailable · incomplete estimate"
-    return (
-        f"forecast {_forecast_range(forecast.lower_seconds, forecast.upper_seconds)} · "
-        f"{forecast.confidence.value} confidence · n={forecast.sample_count}"
-    )
-
-
-def _upcoming_start(job: object) -> str:
-    lower = getattr(job, "estimated_start_lower_seconds", None)
-    upper = getattr(job, "estimated_start_upper_seconds", None)
-    if lower is None or upper is None:
-        return UNAVAILABLE
-    return f"starts in {_forecast_range(lower, upper)}"
-
-
-def _forecast_range(lower_seconds: int, upper_seconds: int) -> str:
-    lower = _forecast_duration(lower_seconds)
-    upper = _forecast_duration(upper_seconds)
-    return lower if lower == upper else f"{lower}-{upper}"
-
-
-def _forecast_duration(seconds: int) -> str:
-    seconds = max(0, seconds)
-    hours = seconds // 3600
-    if hours >= 24:
-        days, hours = divmod(hours, 24)
-        return f"{days}d {hours}h"
-    if hours > 0:
-        return f"{hours}h"
-    minutes = seconds // 60
-    return f"{minutes}m" if minutes > 0 else f"{seconds}s"
-
-
-def _forecast_reason(reason: str | None) -> str:
-    if reason == "insufficient_history":
-        return "insufficient history"
-    if reason == "multi_lane_capacity_not_supported":
-        return "multi-lane capacity unsupported"
-    if reason is None:
-        return UNAVAILABLE
-    return reason.replace("_", " ")
-
-
 def _session_panel(snapshot: SchedulerSnapshot) -> Panel:
     if snapshot.session is None:
         return Panel("No scheduler sessions", title="Session", border_style=NEUTRAL_BORDER)
@@ -701,14 +581,8 @@ def _alerts_panel(snapshot: SchedulerSnapshot) -> Panel:
         return Panel("No alerts", title="Alerts", border_style=NEUTRAL_BORDER)
     text = Text()
     for alert in snapshot.alerts:
-        style = "red" if alert.severity.value == "error" else "yellow"
-        text.append(f"{alert.code}: {alert.message}\n", style=style)
-    border = (
-        ERROR_BORDER
-        if any(alert.severity.value == "error" for alert in snapshot.alerts)
-        else WARNING_BORDER
-    )
-    return Panel(text, title="Alerts", border_style=border)
+        text.append(f"{alert.code}: {alert.message}\n", style="yellow")
+    return Panel(text, title="Alerts", border_style=WARNING_BORDER)
 
 
 def _resource_summary(snapshot: SchedulerSnapshot) -> str:

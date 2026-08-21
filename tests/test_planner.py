@@ -15,7 +15,6 @@ from avarch.application.planning import (
     build_plan,
     build_plan_hash_payload,
     build_plan_semantic_hash,
-    build_resource_policy_hash,
     build_work_key,
 )
 from avarch.profiles.models import ProfileDocument
@@ -67,12 +66,7 @@ def test_build_plan_preserves_auto_av1an_workers_as_native_intent(tmp_path: Path
         ),
     )
 
-    plan = build_plan(
-        context,
-        data_dir=tmp_path / ".avarch",
-        available_cpu_count=12,
-        available_memory_bytes=64 * 1024**3,
-    )
+    plan = build_plan(context, data_dir=tmp_path / ".avarch")
 
     assert plan.av1an.workers == "auto"
 
@@ -80,12 +74,7 @@ def test_build_plan_preserves_auto_av1an_workers_as_native_intent(tmp_path: Path
 def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
     context = _context(tmp_path)
 
-    plan = build_plan(
-        context,
-        data_dir=tmp_path / ".avarch",
-        available_cpu_count=12,
-        available_memory_bytes=64 * 1024**3,
-    )
+    plan = build_plan(context, data_dir=tmp_path / ".avarch")
 
     assert plan.av1an.workers == 2
 
@@ -154,8 +143,6 @@ def test_equivalent_current_plan_requires_matching_source_fingerprint(tmp_path: 
             device_id=2,
             inode=3,
             fs_fingerprint="new-fingerprint",
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)
@@ -164,7 +151,6 @@ def test_equivalent_current_plan_requires_matching_source_fingerprint(tmp_path: 
         assert media_file_id is not None
         probe = ProbeResult(
             media_file_id=media_file_id,
-            ffprobe_json="{}",
             normalized_json="{}",
             probe_hash="probe",
             source_fs_fingerprint="old-fingerprint",
@@ -234,7 +220,6 @@ def test_plan_hash_payload_excludes_plan_hash(tmp_path: Path) -> None:
 
     assert "plan_hash" not in payload
     assert "semantic_hash" not in payload
-    assert "resource_policy_hash" not in payload
     assert "vapoursynth" in payload
 
 
@@ -253,7 +238,8 @@ def test_semantic_hash_ignores_workers_and_svt_lp(tmp_path: Path) -> None:
             resolved_profile=_resolved_profile(
                 av1an={
                     "workers": 2,
-                    "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+                    "video_args": "--preset 6 --crf 28 --keyint 240",
+                    "svt_lp": 2,
                 }
             ),
         ),
@@ -265,7 +251,8 @@ def test_semantic_hash_ignores_workers_and_svt_lp(tmp_path: Path) -> None:
             resolved_profile=_resolved_profile(
                 av1an={
                     "workers": 4,
-                    "video_args": "--preset 6 --crf 28 --keyint 240 --lp 8",
+                    "video_args": "--preset 6 --crf 28 --keyint 240",
+                    "svt_lp": 8,
                 }
             ),
         ),
@@ -274,8 +261,6 @@ def test_semantic_hash_ignores_workers_and_svt_lp(tmp_path: Path) -> None:
 
     assert build_plan_semantic_hash(left) == build_plan_semantic_hash(right)
     assert left.semantic_hash == right.semantic_hash
-    assert build_resource_policy_hash(left) != build_resource_policy_hash(right)
-    assert left.resource_policy_hash != right.resource_policy_hash
     assert left.plan_hash != right.plan_hash
 
 
@@ -358,15 +343,12 @@ def _context(
         device_id=1,
         inode=1,
         fs_fingerprint="fs",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
         latest_probe_id=1,
     )
     probe_result = ProbeResult(
         id=1,
         media_file_id=1,
-        ffprobe_json="{}",
         normalized_json=canonical_json(normalized),
         probe_hash=probe_hash,
         source_fs_fingerprint="fs",
@@ -386,7 +368,8 @@ def _resolved_profile(av1an: dict[str, object] | None = None) -> ResolvedProfile
     av1an_settings: dict[str, object] = {
         "encoder": "svt-av1",
         "workers": 2,
-        "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+        "video_args": "--preset 6 --crf 28 --keyint 240",
+        "svt_lp": 2,
     }
     if av1an is not None:
         av1an_settings.update(av1an)
@@ -446,7 +429,8 @@ def _resolved_filter_profile(filter_path: Path) -> ResolvedProfile:
             "av1an": {
                 "encoder": "svt-av1",
                 "workers": 2,
-                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+                "video_args": "--preset 6 --crf 28 --keyint 240",
+                "svt_lp": 2,
             },
             "audio": {
                 "codec": "libopus",

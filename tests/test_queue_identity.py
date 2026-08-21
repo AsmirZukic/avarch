@@ -56,7 +56,7 @@ def test_null_probe_hash_is_distinct_from_real_probe_hash(tmp_path: Path) -> Non
 
 
 def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime.now(UTC)
     queue_key = _queue_key(tmp_path)
@@ -69,8 +69,6 @@ def test_existing_completed_job_is_found_by_queue_key(tmp_path: Path) -> None:
             device_id=3,
             inode=4,
             fs_fingerprint="fingerprint",
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)
