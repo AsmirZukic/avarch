@@ -14,7 +14,6 @@ from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     BlockedJobSummary,
     CapacitySummary,
-    EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     PipelineSummary,
     QueueForecastSummary,
@@ -70,11 +69,6 @@ def test_render_wide_scheduler_dashboard_contains_core_sections() -> None:
     assert "next.mkv" in output
     assert "Capacity" in output
     assert "encode jobs" in output
-    assert "4 Av1an workers" in output
-    assert "4 concurrent SVT-AV1 encoders" in output
-    assert "4 LP each" in output
-    assert "16 LP nominal" in output
-    assert "reused calibration" in output
     assert "Recent activity unavailable" in output
     assert "Resource telemetry unavailable" in output
 
@@ -579,16 +573,6 @@ def _active_job(job_id: int, source_path: str) -> ActiveJobSummary:
             elapsed_seconds=90,
             stale=True,
             last_update_age_seconds=18,
-            resource_decision=EncodeResourceDecisionSummary(
-                mode="auto",
-                effective_workers=4,
-                effective_svt_lp=4,
-                reason="reused_calibration",
-                confidence=0.8,
-                algorithm_version=1,
-                fallback=False,
-                evidence_count=5,
-            ),
         ),
         workflow_steps=(
             WorkflowStepSummary(stage=JobStage.PROBE, state=WorkflowStepState.COMPLETE),

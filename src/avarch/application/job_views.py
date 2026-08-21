@@ -25,35 +25,6 @@ class JobListItem:
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceDecisionView:
-    mode: str
-    effective_workers: str
-    effective_svt_lp: str
-    reason: str
-    confidence: float
-    algorithm_version: int
-    fallback: bool
-    evidence_count: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PerformanceObservationView:
-    schema_version: int
-    total_frames: int | None
-    observation_duration_seconds: float | None
-    aggregate_fps: float | None
-    peak_rss_bytes: int | None
-    peak_cgroup_memory_bytes: int | None
-    average_cpu_utilization_percent: float | None
-    cpu_throttled_events_delta: int | None
-    cpu_throttled_usec_delta: int | None
-    memory_oom_events_delta: int | None
-    memory_oom_kill_events_delta: int | None
-    incomplete: bool
-    resource_policy_hash: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class JobAttemptView:
     attempt_number: int
     stage: JobStage
@@ -61,8 +32,6 @@ class JobAttemptView:
     runner_id: str
     stdout_log: str | None
     stderr_log: str | None
-    resource_decision: ResourceDecisionView | None = None
-    performance: PerformanceObservationView | None = None
 
 
 @dataclass(frozen=True, slots=True)

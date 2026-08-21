@@ -25,7 +25,6 @@ from avarch.adapters.sqlite.models import Job, JobEvent, MediaFile, MediaFileSta
 from avarch.application.progress import ProgressSink
 from avarch.domain.jobs import JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
-from avarch.models.execution import ProcessResourceSummary
 
 NOW = datetime(2026, 7, 17, 13, 44, tzinfo=UTC)
 AV1AN_FIXTURE = Path(__file__).parent / "fixtures" / "av1an_progress" / "encode_tty_raw.bin"
@@ -37,31 +36,6 @@ class _CaptureSink(ProgressSink):
 
     def publish(self, snapshot: ProgressSnapshot) -> None:
         self.snapshots.append(snapshot)
-
-
-class _ResourceCaptureSink(_CaptureSink):
-    def __init__(self) -> None:
-        super().__init__()
-        self.summaries: list[ProcessResourceSummary] = []
-
-    def record_resource_summary(self, summary: ProcessResourceSummary) -> None:
-        self.summaries.append(summary)
-
-
-def test_scene_stage_sink_forwards_process_resource_summary(tmp_path: Path) -> None:
-    engine, job_id, attempt_id = _claimed_scene_detect_job(tmp_path)
-    downstream = _ResourceCaptureSink()
-    stage_sink = _SceneDetectStageProgressSink(
-        engine=engine,
-        job_id=job_id,
-        attempt_id=attempt_id,
-        downstream=downstream,
-    )
-    summary = ProcessResourceSummary(peak_rss_bytes=1234, attribution_available=True)
-
-    stage_sink.record_resource_summary(summary)
-
-    assert downstream.summaries == [summary]
 
 
 def test_real_av1an_stream_advances_scene_detect_to_encode_once(tmp_path: Path) -> None:

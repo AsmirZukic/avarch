@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 
 SVT_AV1_AUTO_CPUS_PER_WORKER = 3
@@ -11,117 +9,29 @@ SVT_AV1_AUTO_MAX_WORKERS = 4
 SVT_AV1_AUTO_BYTES_PER_WORKER = 3 * 1024 * 1024 * 1024
 
 
-class ResourceConfidence(StrEnum):
-    HIGH = "high"
-    LOW = "low"
-    DEGRADED = "degraded"
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceValue:
-    source: str
-    value: int | float | None
-    confidence: ResourceConfidence
-    reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceSnapshot:
-    effective_cpu_count: int | None
-    effective_cpu_quota: float | None
-    effective_memory_bytes: int | None
-    cpu_values: tuple[ResourceValue, ...]
-    memory_values: tuple[ResourceValue, ...]
-
-    @property
-    def degraded(self) -> bool:
-        values = (*self.cpu_values, *self.memory_values)
-        return not values or any(value.confidence != ResourceConfidence.HIGH for value in values)
-
-
 def available_cpu_count() -> int:
-    snapshot = effective_resource_snapshot()
-    if snapshot.effective_cpu_count is not None:
-        return max(1, snapshot.effective_cpu_count)
-    return 1
-
-
-def available_memory_bytes() -> int | None:
-    return effective_resource_snapshot().effective_memory_bytes
-
-
-def effective_resource_snapshot(
-    *,
-    sys_fs_cgroup: Path = Path("/sys/fs/cgroup"),
-) -> ResourceSnapshot:
-    cpu_values = _cpu_resource_values(sys_fs_cgroup=sys_fs_cgroup)
-    memory_values = _memory_resource_values(sys_fs_cgroup=sys_fs_cgroup)
-    cpu_quota = next(
-        (
-            value.value
-            for value in cpu_values
-            if value.source in {"cgroup_v2", "cgroup_v1"} and isinstance(value.value, float)
-        ),
-        None,
-    )
-    cpu_candidates = [
-        value.value for value in cpu_values if isinstance(value.value, int) and value.value > 0
-    ]
-    if isinstance(cpu_quota, float) and cpu_quota > 0:
-        cpu_candidates.append(max(1, math.floor(cpu_quota)))
-    memory_candidates = [
-        value.value for value in memory_values if isinstance(value.value, int) and value.value > 0
-    ]
-    return ResourceSnapshot(
-        effective_cpu_count=min(cpu_candidates) if cpu_candidates else None,
-        effective_cpu_quota=cpu_quota,
-        effective_memory_bytes=min(memory_candidates) if memory_candidates else None,
-        cpu_values=tuple(cpu_values),
-        memory_values=tuple(memory_values),
-    )
-
-
-def _cpu_resource_values(*, sys_fs_cgroup: Path) -> list[ResourceValue]:
     candidates: list[int] = []
-    values: list[ResourceValue] = []
-    cpuset_count = _cgroup_cpuset_count(sys_fs_cgroup=sys_fs_cgroup)
-    if cpuset_count is not None:
-        candidates.append(cpuset_count)
-        values.append(ResourceValue("cpuset", cpuset_count, ResourceConfidence.HIGH))
     affinity_count = _cpu_affinity_count()
     if affinity_count is not None:
         candidates.append(affinity_count)
-        values.append(ResourceValue("affinity", affinity_count, ResourceConfidence.HIGH))
-    quota = _cgroup_cpu_quota(sys_fs_cgroup=sys_fs_cgroup)
-    if quota is not None:
-        quota_count = _cgroup_cpu_quota_count(sys_fs_cgroup=sys_fs_cgroup) or max(
-            1,
-            math.floor(quota),
-        )
+    quota_count = _cgroup_cpu_quota_count()
+    if quota_count is not None:
         candidates.append(quota_count)
-        source = "cgroup_v2" if (sys_fs_cgroup / "cpu.max").exists() else "cgroup_v1"
-        values.append(ResourceValue(source, quota, ResourceConfidence.HIGH))
     os_count = os.cpu_count()
     if os_count is not None:
         candidates.append(os_count)
-        values.append(ResourceValue("host_fallback", os_count, ResourceConfidence.LOW))
-    if not values:
-        values.append(ResourceValue("unknown", None, ResourceConfidence.DEGRADED, "unavailable"))
-    return values
+    return max(1, min(candidates)) if candidates else 1
 
 
-def _memory_resource_values(*, sys_fs_cgroup: Path) -> list[ResourceValue]:
-    values: list[ResourceValue] = []
-    cgroup_limit = _cgroup_memory_limit_bytes(sys_fs_cgroup=sys_fs_cgroup)
+def available_memory_bytes() -> int | None:
+    candidates: list[int] = []
+    cgroup_limit = _cgroup_memory_limit_bytes()
     if cgroup_limit is not None:
-        source = "cgroup_v2" if (sys_fs_cgroup / "memory.max").exists() else "cgroup_v1"
-        values.append(ResourceValue(source, cgroup_limit, ResourceConfidence.HIGH))
+        candidates.append(cgroup_limit)
     physical_memory = _physical_memory_bytes()
     if physical_memory is not None:
-        values.append(ResourceValue("host_fallback", physical_memory, ResourceConfidence.LOW))
-    if not values:
-        values.append(ResourceValue("unknown", None, ResourceConfidence.DEGRADED, "unavailable"))
-    return values
+        candidates.append(physical_memory)
+    return min(candidates) if candidates else None
 
 
 def auto_av1an_worker_count(
@@ -154,42 +64,35 @@ def _cpu_affinity_count() -> int | None:
 
 
 def _cgroup_cpu_quota_count(*, sys_fs_cgroup: Path = Path("/sys/fs/cgroup")) -> int | None:
-    quota = _cgroup_cpu_quota(sys_fs_cgroup=sys_fs_cgroup)
-    if quota is None:
-        return None
-    return max(1, math.floor(quota))
-
-
-def _cgroup_cpu_quota(*, sys_fs_cgroup: Path = Path("/sys/fs/cgroup")) -> float | None:
-    v2_quota = _cgroup_v2_cpu_quota(sys_fs_cgroup / "cpu.max")
-    if v2_quota is not None:
-        return v2_quota
-    return _cgroup_v1_cpu_quota(
+    v2_count = _cgroup_v2_cpu_quota_count(sys_fs_cgroup / "cpu.max")
+    if v2_count is not None:
+        return v2_count
+    return _cgroup_v1_cpu_quota_count(
         sys_fs_cgroup / "cpu" / "cpu.cfs_quota_us",
         sys_fs_cgroup / "cpu" / "cpu.cfs_period_us",
     )
 
 
-def _cgroup_v2_cpu_quota(path: Path) -> float | None:
+def _cgroup_v2_cpu_quota_count(path: Path) -> int | None:
     try:
         quota_text, period_text, *_ = path.read_text(encoding="utf-8").split()
     except (OSError, ValueError):
         return None
     if quota_text == "max":
         return None
-    return _quota_to_cpu_quota(quota_text, period_text)
+    return _quota_to_cpu_count(quota_text, period_text)
 
 
-def _cgroup_v1_cpu_quota(quota_path: Path, period_path: Path) -> float | None:
+def _cgroup_v1_cpu_quota_count(quota_path: Path, period_path: Path) -> int | None:
     try:
         quota_text = quota_path.read_text(encoding="utf-8").strip()
         period_text = period_path.read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    return _quota_to_cpu_quota(quota_text, period_text)
+    return _quota_to_cpu_count(quota_text, period_text)
 
 
-def _quota_to_cpu_quota(quota_text: str, period_text: str) -> float | None:
+def _quota_to_cpu_count(quota_text: str, period_text: str) -> int | None:
     try:
         quota = int(quota_text)
         period = int(period_text)
@@ -197,45 +100,7 @@ def _quota_to_cpu_quota(quota_text: str, period_text: str) -> float | None:
         return None
     if quota <= 0 or period <= 0:
         return None
-    return quota / period
-
-
-def _cgroup_cpuset_count(*, sys_fs_cgroup: Path = Path("/sys/fs/cgroup")) -> int | None:
-    for path in (
-        sys_fs_cgroup / "cpuset.cpus.effective",
-        sys_fs_cgroup / "cpuset.cpus",
-    ):
-        count = _read_cpuset_count(path)
-        if count is not None:
-            return count
-    return None
-
-
-def _read_cpuset_count(path: Path) -> int | None:
-    try:
-        value = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    cpus: set[int] = set()
-    for part in value.split(","):
-        if not part:
-            continue
-        if "-" in part:
-            start_text, end_text = part.split("-", maxsplit=1)
-            try:
-                start = int(start_text)
-                end = int(end_text)
-            except ValueError:
-                return None
-            if start > end:
-                return None
-            cpus.update(range(start, end + 1))
-            continue
-        try:
-            cpus.add(int(part))
-        except ValueError:
-            return None
-    return len(cpus) or None
+    return max(1, math.floor(quota / period))
 
 
 def _cgroup_memory_limit_bytes(*, sys_fs_cgroup: Path = Path("/sys/fs/cgroup")) -> int | None:

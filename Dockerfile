@@ -1,6 +1,6 @@
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.10.7
-ARG AVARCH_AV1AN_VERSION=0.5.1
+ARG AVARCH_AV1AN_VERSION_REQ=">=0.5,<0.6"
 ARG SVT_AV1_VERSION=2.3.0
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
@@ -9,7 +9,7 @@ FROM rust:1.88-slim AS rust-toolchain
 
 FROM python:${PYTHON_VERSION}-slim AS python-builder
 
-ARG AVARCH_AV1AN_VERSION
+ARG AVARCH_AV1AN_VERSION_REQ
 ARG SVT_AV1_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -132,7 +132,7 @@ PY
 RUN chmod -R a+rX "${XDG_CONFIG_HOME}"
 
 RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-    cargo install av1an --version "=${AVARCH_AV1AN_VERSION}" --locked \
+    cargo install av1an --version "${AVARCH_AV1AN_VERSION_REQ}" --locked \
     && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
 RUN avarch --version \
