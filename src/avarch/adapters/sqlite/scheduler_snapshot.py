@@ -81,7 +81,6 @@ class SqliteSchedulerSnapshotQuery:
             session=self._session_summary(),
             active_jobs=self._active_jobs(captured_at=captured_at),
             capacity=self._capacity_summary(now=captured_at),
-            storage_saved_bytes=self._storage_saved_bytes(),
             upcoming_jobs=self._upcoming_jobs(),
             blocked_jobs=self._blocked_jobs(),
             recent_events=self._recent_events(),
@@ -263,20 +262,6 @@ class SqliteSchedulerSnapshotQuery:
             .limit(8)
         ).all()
         return tuple(_lifecycle_event_summary(event) for event in events)
-
-    def _storage_saved_bytes(self) -> int:
-        details_rows = self._session.exec(
-            select(JobEvent.details_json).where(
-                JobEvent.event_type == JobEventType.STAGE_COMPLETED,
-                JobEvent.stage == JobStage.PROMOTE,
-            )
-        ).all()
-        saved = 0
-        for details_json in details_rows:
-            value = _event_details(details_json).get("saved_bytes")
-            if isinstance(value, int):
-                saved += value
-        return saved
 
     def _blocked_jobs(self) -> tuple[BlockedJobSummary, ...]:
         rows = self._session.exec(

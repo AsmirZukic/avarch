@@ -18,6 +18,7 @@ from avarch.application.scheduler_snapshot import (
     EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     ResourceMetricSummary,
+    ResourceTelemetrySummary,
     SchedulerSessionRunSummary,
     SchedulerSnapshot,
     WorkflowStepState,
@@ -56,13 +57,11 @@ def render_scheduler_dashboard(
         )
     header = _header(snapshot, mode=mode)
     footer = _footer(snapshot, mode, shortcuts_available=shortcuts_available)
-    if width >= 150 and height is not None:
+    if width >= 120 and height is not None:
         return _live_layout_dashboard(snapshot, header=header, footer=footer)
-    if height is not None:
-        return _live_stacked_dashboard(snapshot, header=header, footer=footer)
     main = _main_group(snapshot)
     side = _side_group(snapshot)
-    if width >= 150:
+    if width >= 120:
         return Group(header, _grid_body(main, side), footer)
     return Group(header, main, side, footer)
 
@@ -85,7 +84,7 @@ def _live_layout_dashboard(
     )
     main_sections = [
         Layout(_pipeline_panel(snapshot), size=10),
-        Layout(_active_jobs_panel(snapshot), size=_active_jobs_panel_height(snapshot)),
+        Layout(_active_jobs_panel(snapshot), ratio=1, minimum_size=7),
     ]
     if snapshot.watch_details is not None:
         main_sections.append(Layout(_details_panel(snapshot), size=9))
@@ -93,7 +92,7 @@ def _live_layout_dashboard(
         main_sections.append(Layout(_log_tail_panel(snapshot), ratio=1, minimum_size=5))
     main_sections.extend(
         (
-            Layout(_upcoming_panel(snapshot), ratio=1, minimum_size=8),
+            Layout(_upcoming_panel(snapshot), size=6),
             Layout(_blocked_panel(snapshot), size=4),
         )
     )
@@ -105,36 +104,6 @@ def _live_layout_dashboard(
         Layout(_activity_panel(snapshot), ratio=1, minimum_size=5),
         Layout(_alerts_panel(snapshot), size=4),
     )
-    return layout
-
-
-def _live_stacked_dashboard(
-    snapshot: SchedulerSnapshot,
-    *,
-    header: RenderableType,
-    footer: RenderableType,
-) -> Layout:
-    layout = Layout()
-    sections = [
-        Layout(header, name="header", size=6),
-        Layout(_pipeline_panel(snapshot), name="pipeline", size=10),
-        Layout(
-            _active_jobs_panel(snapshot),
-            name="active",
-            size=_active_jobs_panel_height(snapshot),
-        ),
-    ]
-    if snapshot.watch_details is not None:
-        sections.append(Layout(_details_panel(snapshot), name="details", size=9))
-    if snapshot.watch_log_tail is not None:
-        sections.append(Layout(_log_tail_panel(snapshot), name="logs", ratio=1, minimum_size=5))
-    sections.extend(
-        (
-            Layout(_upcoming_panel(snapshot), name="upcoming", ratio=1, minimum_size=8),
-            Layout(footer, name="footer", size=3),
-        )
-    )
-    layout.split_column(*sections)
     return layout
 
 
@@ -226,7 +195,7 @@ def _compact_dashboard(
         ),
         width,
     )
-    _append_line(text, _resource_summary(snapshot), width)
+    _append_line(text, _resource_summary(snapshot.resources), width)
     if snapshot.blocked_jobs:
         _append_line(text, f"Blocked {len(snapshot.blocked_jobs)}", width)
         for job in snapshot.blocked_jobs[:3]:
@@ -325,21 +294,18 @@ def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
 
     table = Table.grid(expand=True, padding=(0, 2))
     table.add_column(style="bold", width=10)
-    table.add_column(ratio=1, overflow="fold")
+    table.add_column(ratio=1)
     for job in snapshot.active_jobs:
         table.add_row("File", _display_path(job.source_path))
         table.add_row("Profile", job.profile_name or UNAVAILABLE)
         table.add_row("Workflow", _workflow_steps(job.workflow_steps))
+        resources = _encode_resources(job.attempt)
+        if resources is not None:
+            table.add_row("Resources", resources)
         table.add_row("Progress", _progress(job.attempt))
         if job != snapshot.active_jobs[-1]:
             table.add_row("", "")
     return Panel(table, title="Active Jobs", border_style=ACTIVE_BORDER)
-
-
-def _active_jobs_panel_height(snapshot: SchedulerSnapshot) -> int:
-    if not snapshot.active_jobs:
-        return 3
-    return min(12, 3 + (5 * len(snapshot.active_jobs)))
 
 
 def _upcoming_panel(snapshot: SchedulerSnapshot) -> Panel:
@@ -517,18 +483,24 @@ def _log_tail_panel(snapshot: SchedulerSnapshot) -> Panel:
 
 
 def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
-    saved_row = ("space saved", format_size(snapshot.storage_saved_bytes), "", "")
     if snapshot.resources is None:
-        table = _resource_table()
-        table.add_row(*saved_row)
-        table.add_row("Resource telemetry unavailable", "", "", "")
-        return Panel(table, title="Resources", border_style=NEUTRAL_BORDER)
+        return Panel(
+            "Resource telemetry unavailable",
+            title="Resources",
+            border_style=NEUTRAL_BORDER,
+        )
     resources = snapshot.resources
-    table = _resource_table()
-    table.add_row(*saved_row)
     if resources.health == ResourceHealth.UNAVAILABLE and not resources.metrics:
-        table.add_row("Resource telemetry unavailable", "", "", "")
-        return Panel(table, title="Resources", border_style=NEUTRAL_BORDER)
+        return Panel(
+            "Resource telemetry unavailable",
+            title="Resources",
+            border_style=NEUTRAL_BORDER,
+        )
+    table = Table.grid(padding=(0, 2))
+    table.add_column()
+    table.add_column(justify="right")
+    table.add_column()
+    table.add_column()
     for metric in resources.metrics:
         table.add_row(
             _resource_label(metric),
@@ -539,15 +511,6 @@ def _resource_panel(snapshot: SchedulerSnapshot) -> Panel:
     if resources.stale:
         table.add_row("freshness", "stale", "", "")
     return Panel(table, title="Resources", border_style=_resource_border(resources.health))
-
-
-def _resource_table() -> Table:
-    table = Table.grid(padding=(0, 2))
-    table.add_column()
-    table.add_column(justify="right")
-    table.add_column()
-    table.add_column()
-    return table
 
 
 def _forecast_line(snapshot: SchedulerSnapshot) -> str:
@@ -711,17 +674,10 @@ def _alerts_panel(snapshot: SchedulerSnapshot) -> Panel:
     return Panel(text, title="Alerts", border_style=border)
 
 
-def _resource_summary(snapshot: SchedulerSnapshot) -> str:
-    resources = snapshot.resources
-    saved = f"space saved {format_size(snapshot.storage_saved_bytes)}"
+def _resource_summary(resources: ResourceTelemetrySummary | None) -> str:
     if resources is None or resources.health == ResourceHealth.UNAVAILABLE:
-        return f"Resource telemetry unavailable · {saved}"
-    parts = [
-        _resource_compact(metric)
-        for metric in sorted(resources.metrics, key=_resource_compact_priority)
-        if metric.available
-    ]
-    parts.insert(0, saved)
+        return "Resource telemetry unavailable"
+    parts = [_resource_compact(metric) for metric in resources.metrics if metric.available]
     if resources.stale:
         parts.append("stale")
     return "Resources " + " · ".join(parts) if parts else "Resource telemetry unavailable"
@@ -731,14 +687,6 @@ def _resource_compact(metric: ResourceMetricSummary) -> str:
     label = _resource_label(metric)
     value = _resource_value(metric)
     return f"{label} {value}"
-
-
-def _resource_compact_priority(metric: ResourceMetricSummary) -> int:
-    return {
-        "cpu": 0,
-        "output write rate": 1,
-        "memory": 2,
-    }.get(metric.name, 3)
 
 
 def _resource_label(metric: ResourceMetricSummary) -> str:

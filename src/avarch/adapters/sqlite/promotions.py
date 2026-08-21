@@ -117,7 +117,7 @@ def recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> Pr
     record = latest_promotion_record(session, job_id=job_id)
     if record is None:
         raise PromotionRecoveryLookupError("No promotion record exists for this job.")
-    if record.status == PromotionStatus.COMPLETED and record.cleanup_completed:
+    if record.status == PromotionStatus.COMPLETED:
         raise PromotionRecoveryLookupError("Promotion is already completed.")
     if (
         record.lease_expires_at is not None
