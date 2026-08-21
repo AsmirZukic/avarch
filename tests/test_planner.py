@@ -14,8 +14,6 @@ from avarch.application.planning import (
     add_sdr_color_encoder_args,
     build_plan,
     build_plan_hash_payload,
-    build_plan_semantic_hash,
-    build_resource_policy_hash,
     build_work_key,
 )
 from avarch.profiles.models import ProfileDocument
@@ -56,7 +54,7 @@ def test_build_plan_tags_sdr_av1_output_color(tmp_path: Path) -> None:
     ]
 
 
-def test_build_plan_preserves_auto_av1an_workers_as_native_intent(tmp_path: Path) -> None:
+def test_build_plan_resolves_auto_av1an_workers(tmp_path: Path) -> None:
     context = _context(
         tmp_path,
         resolved_profile=_resolved_profile(
@@ -74,7 +72,7 @@ def test_build_plan_preserves_auto_av1an_workers_as_native_intent(tmp_path: Path
         available_memory_bytes=64 * 1024**3,
     )
 
-    assert plan.av1an.workers == "auto"
+    assert plan.av1an.workers == 3
 
 
 def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
@@ -88,32 +86,6 @@ def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
     )
 
     assert plan.av1an.workers == 2
-
-
-def test_build_plan_appends_structured_svt_lp(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        resolved_profile=_resolved_profile(
-            av1an={
-                "workers": 2,
-                "video_args": "--preset 6 --crf 28 --keyint 240",
-                "svt_lp": 4,
-            }
-        ),
-    )
-
-    plan = build_plan(context, data_dir=tmp_path / ".avarch")
-
-    assert plan.av1an.encoder_args[:8] == [
-        "--preset",
-        "6",
-        "--crf",
-        "28",
-        "--keyint",
-        "240",
-        "--lp",
-        "4",
-    ]
 
 
 def test_sdr_color_encoder_args_preserve_user_options() -> None:
@@ -233,8 +205,6 @@ def test_plan_hash_payload_excludes_plan_hash(tmp_path: Path) -> None:
     payload = build_plan_hash_payload(plan)
 
     assert "plan_hash" not in payload
-    assert "semantic_hash" not in payload
-    assert "resource_policy_hash" not in payload
     assert "vapoursynth" in payload
 
 
@@ -244,62 +214,6 @@ def test_plan_hash_payload_includes_promotion_policy(tmp_path: Path) -> None:
     payload = build_plan_hash_payload(plan)
 
     assert payload["promotion"]["policy_hash"] == plan.promotion.policy_hash
-
-
-def test_semantic_hash_ignores_workers_and_svt_lp(tmp_path: Path) -> None:
-    left = build_plan(
-        _context(
-            tmp_path,
-            resolved_profile=_resolved_profile(
-                av1an={
-                    "workers": 2,
-                    "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
-                }
-            ),
-        ),
-        data_dir=tmp_path / ".left-avarch",
-    )
-    right = build_plan(
-        _context(
-            tmp_path,
-            resolved_profile=_resolved_profile(
-                av1an={
-                    "workers": 4,
-                    "video_args": "--preset 6 --crf 28 --keyint 240 --lp 8",
-                }
-            ),
-        ),
-        data_dir=tmp_path / ".right-avarch",
-    )
-
-    assert build_plan_semantic_hash(left) == build_plan_semantic_hash(right)
-    assert left.semantic_hash == right.semantic_hash
-    assert build_resource_policy_hash(left) != build_resource_policy_hash(right)
-    assert left.resource_policy_hash != right.resource_policy_hash
-    assert left.plan_hash != right.plan_hash
-
-
-def test_semantic_hash_changes_when_quality_args_change(tmp_path: Path) -> None:
-    left = build_plan(
-        _context(
-            tmp_path,
-            resolved_profile=_resolved_profile(
-                av1an={"workers": 2, "video_args": "--preset 6 --crf 28 --keyint 240"}
-            ),
-        ),
-        data_dir=tmp_path / ".left-avarch",
-    )
-    right = build_plan(
-        _context(
-            tmp_path,
-            resolved_profile=_resolved_profile(
-                av1an={"workers": 2, "video_args": "--preset 6 --crf 30 --keyint 240"}
-            ),
-        ),
-        data_dir=tmp_path / ".right-avarch",
-    )
-
-    assert left.semantic_hash != right.semantic_hash
 
 
 def test_work_key_uses_promotion_policy_hash(tmp_path: Path) -> None:

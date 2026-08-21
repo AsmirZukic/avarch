@@ -7,7 +7,6 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Thread
 from typing import BinaryIO
 
 from sqlalchemy.engine import Engine
@@ -151,32 +150,14 @@ async def stage_validated_output(
     expected_mode: int,
     heartbeat: PromotionHeartbeat,
 ) -> StagedOutput:
-    results: list[StagedOutput] = []
-    errors: list[BaseException] = []
-
-    def target() -> None:
-        try:
-            results.append(
-                _stage_validated_output_sync(
-                    source_output=source_output,
-                    staging_path=staging_path,
-                    expected_fingerprint=expected_fingerprint,
-                    expected_mode=expected_mode,
-                    heartbeat=heartbeat,
-                )
-            )
-        except BaseException as exc:
-            errors.append(exc)
-
-    thread = Thread(target=target, name="avarch-promotion-stage", daemon=True)
-    thread.start()
-    while thread.is_alive():
-        await asyncio.sleep(0.05)
-    if errors:
-        raise errors[0]
-    if not results:
-        raise PromotionFilesystemError("Promotion staging exited without a result.")
-    return results[0]
+    return await asyncio.to_thread(
+        _stage_validated_output_sync,
+        source_output=source_output,
+        staging_path=staging_path,
+        expected_fingerprint=expected_fingerprint,
+        expected_mode=expected_mode,
+        heartbeat=heartbeat,
+    )
 
 
 def _stage_validated_output_sync(
@@ -521,15 +502,6 @@ async def _execute_claimed_promotion(
     with Session(engine) as session:
         record = _promotion_record(session, promotion_id)
         plan = _load_job_plan(_promotion_job(session, record.job_id))
-        if (
-            PromotionStatus(record.status) == PromotionStatus.COMPLETED
-            and not record.cleanup_completed
-        ):
-            return _complete_success_cleanup(
-                engine=engine,
-                promotion_id=promotion_id,
-                plan=plan,
-            )
         source_path = Path(record.source_path)
         output_path = Path(record.validated_output_path)
         final_path = Path(record.final_path)
@@ -621,15 +593,6 @@ async def _execute_claimed_promotion(
         _commit_verified_promotion(session, record=record, now=_utc_now())
         promotion_id = _require_id(record)
 
-    return _complete_success_cleanup(engine=engine, promotion_id=promotion_id, plan=plan)
-
-
-def _complete_success_cleanup(
-    *,
-    engine: Engine,
-    promotion_id: int,
-    plan: TranscodePlan,
-) -> PromotionRecord:
     cleanup_error = _cleanup_after_success(engine, promotion_id, plan)
     with Session(engine) as session, session.begin():
         try:

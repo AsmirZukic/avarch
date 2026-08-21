@@ -15,7 +15,7 @@ ffmpeg -hide_banner -loglevel error \
     -f lavfi -i testsrc2=size=160x90:rate=24:duration=5 \
     -an -pix_fmt yuv420p "$work_dir/source.mkv"
 
-common_args='-i /work/source.mkv --encoder svt-av1 --workers 1 --pix-format yuv420p --concat ffmpeg --max-tries 1 --audio-params -an --no-defaults --keep -n'
+common_args='-i /work/source.mkv --encoder svt-av1 --workers 1 --pix-format yuv420p --concat ffmpeg --cache-mode temp --max-tries 1 --audio-params -an --no-defaults --keep -n'
 
 docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     -i /work/source.mkv \
@@ -26,6 +26,7 @@ docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     --workers 1 \
     --pix-format yuv420p \
     --concat ffmpeg \
+    --cache-mode temp \
     --max-tries 1 \
     --audio-params -an \
     --no-defaults \
@@ -43,6 +44,7 @@ docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     --workers 1 \
     --pix-format yuv420p \
     --concat ffmpeg \
+    --cache-mode temp \
     --max-tries 1 \
     --audio-params -an \
     --no-defaults \
@@ -62,6 +64,7 @@ docker run --rm -v "$work_dir:/work" --entrypoint av1an "$image" \
     --workers 1 \
     --pix-format yuv420p \
     --concat ffmpeg \
+    --cache-mode temp \
     --max-tries 1 \
     --audio-params -an \
     --no-defaults \

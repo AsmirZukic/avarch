@@ -34,35 +34,18 @@ class ResourceCapacity:
     cheap_workers: int
     av1an_jobs: int
     file_ops: int
-    cpu_budget: float | None = None
-    memory_budget_bytes: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class JobResourceReservation:
-    cpu: float | None = None
-    memory_bytes: int | None = None
-    exclusive: bool = False
-
-    def __post_init__(self) -> None:
-        if self.cpu is not None and self.cpu < 0:
-            raise ValueError("reservation CPU must not be negative")
-        if self.memory_bytes is not None and self.memory_bytes < 0:
-            raise ValueError("reservation memory must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveJob:
     job_id: int
     stage: JobStage
-    reservation: JobResourceReservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ClaimableJob:
     job_id: int
     stage: JobStage
-    reservation: JobResourceReservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,60 +109,13 @@ def select_launchable_jobs(
     capacity: ResourceCapacity,
 ) -> tuple[ClaimableJob, ...]:
     selected: list[ClaimableJob] = []
-    planned_jobs = list(active_jobs)
+    planned_stages = [job.stage for job in active_jobs]
     for job in claimable_jobs:
-        if not _has_job_capacity(job, planned_jobs, capacity=capacity):
+        if not has_resource_capacity(job.stage, planned_stages, capacity=capacity):
             continue
         selected.append(job)
-        planned_jobs.append(
-            ActiveJob(job_id=job.job_id, stage=job.stage, reservation=job.reservation)
-        )
+        planned_stages.append(job.stage)
     return tuple(selected)
-
-
-def _has_job_capacity(
-    job: ClaimableJob,
-    active_jobs: Iterable[ActiveJob],
-    *,
-    capacity: ResourceCapacity,
-) -> bool:
-    active_jobs = tuple(active_jobs)
-    active_stages = [active.stage for active in active_jobs]
-    if not has_resource_capacity(job.stage, active_stages, capacity=capacity):
-        return False
-    if resource_for_stage(job.stage) is not ResourceClass.HEAVY_AV1AN:
-        return True
-    reservation = job.reservation
-    if reservation is None:
-        return True
-    active_reservations = tuple(
-        active.reservation
-        for active in active_jobs
-        if resource_for_stage(active.stage) is ResourceClass.HEAVY_AV1AN
-        and active.reservation is not None
-    )
-    if reservation.exclusive:
-        return not active_reservations and not any(
-            resource_for_stage(active.stage) is ResourceClass.HEAVY_AV1AN
-            for active in active_jobs
-        )
-    if any(active.exclusive for active in active_reservations):
-        return False
-    if capacity.cpu_budget is not None:
-        requested_cpu = reservation.cpu
-        if requested_cpu is None:
-            return False
-        active_cpu = sum(active.cpu or 0.0 for active in active_reservations)
-        if active_cpu + requested_cpu > capacity.cpu_budget:
-            return False
-    if capacity.memory_budget_bytes is not None:
-        requested_memory = reservation.memory_bytes
-        if requested_memory is None:
-            return False
-        active_memory = sum(active.memory_bytes or 0 for active in active_reservations)
-        if active_memory + requested_memory > capacity.memory_budget_bytes:
-            return False
-    return True
 
 
 def classify_queue_clear_job(

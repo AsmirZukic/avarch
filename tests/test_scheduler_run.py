@@ -15,7 +15,7 @@ from avarch.application.scheduler_run import (
 )
 from avarch.config import AppConfig
 from avarch.domain.jobs import JobStage
-from avarch.domain.scheduler import ClaimableJob, JobResourceReservation, SchedulerMode
+from avarch.domain.scheduler import ClaimableJob, SchedulerMode
 
 
 def test_run_scheduler_reraises_worker_cancellation_after_cleanup(
@@ -87,23 +87,6 @@ def test_run_scheduler_launches_distinct_resource_classes_concurrently(
     assert store.capacity_usages[-1].file_ops_active == 0
     assert store.session_end_reasons == ["normal"]
     assert store.released is True
-
-
-def test_run_scheduler_passes_claimable_reservation_to_worker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("avarch.application.scheduler_run.SCHEDULER_CONTROL_POLL_SECONDS", 0)
-    monkeypatch.setattr("avarch.application.scheduler_run.SCHEDULER_POLL_SECONDS", 0)
-    monkeypatch.setattr("avarch.application.scheduler_run.SCHEDULER_IDLE_EXIT_SECONDS", 0)
-    store = _ReservedStore()
-    workers = _ReservationRecordingWorkers()
-    runtime = _ReservationRuntime(store, workers)
-
-    asyncio.run(
-        run_scheduler(cast(SchedulerRuntime, runtime), config=AppConfig(), runner_id="runner")
-    )
-
-    assert workers.reservations == [JobResourceReservation(cpu=2.0, memory_bytes=1024)]
 
 
 def test_run_scheduler_reports_terminal_count_deltas(
@@ -295,9 +278,8 @@ class _PauseWorkers:
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None:
-        del stage, job_id, runner_id, config, reservation
+        del stage, job_id, runner_id, config
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -331,9 +313,8 @@ class _Workers:
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None:
-        del stage, job_id, runner_id, config, reservation
+        del stage, job_id, runner_id, config
         raise asyncio.CancelledError
 
 
@@ -361,9 +342,8 @@ class _SlowWorkers:
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None:
-        del stage, job_id, runner_id, config, reservation
+        del stage, job_id, runner_id, config
         self.started.set()
         try:
             await asyncio.Event().wait()
@@ -478,64 +458,13 @@ class _RecordingWorkers:
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None:
-        del job_id, runner_id, config, reservation
+        del job_id, runner_id, config
         self.started.append(stage)
         self._active += 1
         self.peak_active = max(self.peak_active, self._active)
         await asyncio.sleep(0)
         self._active -= 1
-
-
-class _ReservedStore(_ConcurrentStore):
-    def claimable_jobs(self, *, active_job_ids: set[int]) -> list[ClaimableJob]:
-        del active_job_ids
-        if self._claimable_returned:
-            return []
-        self._claimable_returned = True
-        return [
-            ClaimableJob(
-                job_id=1,
-                stage=JobStage.ENCODE,
-                reservation=JobResourceReservation(cpu=2.0, memory_bytes=1024),
-            )
-        ]
-
-
-class _ReservationRecordingWorkers:
-    def __init__(self) -> None:
-        self.reservations: list[JobResourceReservation | None] = []
-
-    async def run_job(
-        self,
-        *,
-        stage: JobStage,
-        job_id: int,
-        runner_id: str,
-        config: AppConfig,
-        reservation: JobResourceReservation | None = None,
-    ) -> None:
-        del stage, job_id, runner_id, config
-        self.reservations.append(reservation)
-        await asyncio.sleep(0)
-
-
-class _ReservationRuntime:
-    def __init__(
-        self,
-        store: _ReservedStore,
-        workers: _ReservationRecordingWorkers,
-    ) -> None:
-        self._store = store
-        self._workers = workers
-
-    def store(self, *, config: AppConfig) -> _ReservedStore:
-        del config
-        return self._store
-
-    def workers(self) -> _ReservationRecordingWorkers:
-        return self._workers
 
 
 class _ConcurrentRuntime:

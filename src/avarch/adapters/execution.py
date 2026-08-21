@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol, cast
+from typing import BinaryIO, Literal, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -26,7 +26,6 @@ from avarch.adapters.progress.av1an_tty import (
     Av1anTtyProgressSample,
     av1an_tty_progress_supported,
 )
-from avarch.adapters.system.process_telemetry import LinuxProcessTelemetryObserver
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
 from avarch.application.progress import ProgressSink, publish_progress_safely
 from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
@@ -37,11 +36,8 @@ from avarch.models.execution import (
     InvalidExecutionPlanError,
     MuxStageError,
     ProcessCancellationToken,
-    ProcessFailureReason,
-    ProcessResourceSummary,
     ProcessResult,
     ProcessTerminationReason,
-    ResourceExhaustionError,
     StaleExecutionPlanError,
     ToolUnavailableError,
     UnsupportedToolVersionError,
@@ -121,22 +117,7 @@ class ProcessOutputRecord:
     text: str
 
 
-@dataclass(frozen=True, slots=True)
-class EncodingToolchainVersions:
-    av1an: str
-    svt_av1: str
-    vapoursynth: str
-
-
 ProcessOutputCallback = Callable[[ProcessOutputRecord], None]
-
-
-class ProcessTelemetryObserver(Protocol):
-    def before_start(self) -> None: ...
-
-    def sample(self, root_pid: int) -> None: ...
-
-    def after_exit(self, root_pid: int | None) -> ProcessResourceSummary: ...
 
 
 def serialize_encoder_arguments(arguments: Sequence[str]) -> str:
@@ -175,11 +156,13 @@ def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -
         "--video-params",
         serialize_encoder_arguments(spec.encoder_args),
         "--workers",
-        _render_av1an_workers(spec.workers),
+        str(spec.workers),
         "--pix-format",
         spec.pixel_format,
         "--concat",
         spec.concat_method,
+        "--cache-mode",
+        spec.cache_mode,
         "--max-tries",
         str(spec.max_tries),
         "--audio-params",
@@ -191,12 +174,6 @@ def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -
     if resume:
         command.append("--resume")
     return command
-
-
-def _render_av1an_workers(workers: int | Literal["auto"]) -> str:
-    if workers == "auto":
-        return "0"
-    return str(workers)
 
 
 def build_ffmpeg_mux_command(spec: FfmpegMuxSpec, temporary_output: Path) -> list[str]:
@@ -510,8 +487,10 @@ def _preflight_av1an_version(executable: str) -> None:
         if diagnostic:
             raise ToolUnavailableError(f"{exc}\n\nVapourSynth diagnostic:\n{diagnostic}") from exc
         raise
-    version = parse_av1an_version(version_text)
-    major, minor, *_rest = version.split(".")
+    match = re.search(r"\bav1an\D+(\d+)\.(\d+)(?:\.\d+)?", version_text, re.IGNORECASE)
+    if match is None:
+        raise UnsupportedToolVersionError("Unable to detect Av1an version.")
+    major, minor = match.groups()
     if f"{major}.{minor}.x" != SUPPORTED_AV1AN_VERSION_FAMILY:
         raise UnsupportedToolVersionError(
             f"Unsupported Av1an version family {major}.{minor}.x; "
@@ -614,52 +593,6 @@ def _tool_version_output(
     return output
 
 
-def capture_encoding_toolchain_versions(
-    *,
-    av1an_executable: str = "av1an",
-    svt_av1_executable: str = "SvtAv1EncApp",
-    vspipe_executable: str = "vspipe",
-) -> EncodingToolchainVersions:
-    return EncodingToolchainVersions(
-        av1an=parse_av1an_version(_tool_version_output(av1an_executable)),
-        svt_av1=parse_svt_av1_version(_tool_version_output(svt_av1_executable)),
-        vapoursynth=parse_vapoursynth_version(
-            _tool_version_output(vspipe_executable, version_args=("--version",))
-        ),
-    )
-
-
-def parse_av1an_version(output: str) -> str:
-    match = re.search(r"\bav1an\D+(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b", output, re.IGNORECASE)
-    if match is None:
-        raise UnsupportedToolVersionError("Unable to detect Av1an version.")
-    return match.group(1)
-
-
-def parse_svt_av1_version(output: str) -> str:
-    patterns = (
-        r"\bSVT[- ]AV1(?: Encoder)?(?: Lib)?\s+v?(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b",
-        r"\bSvtAv1EncApp(?: Encoder)?\s+v?(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match is not None:
-            return match.group(1)
-    raise UnsupportedToolVersionError("Unable to detect SVT-AV1 version.")
-
-
-def parse_vapoursynth_version(output: str) -> str:
-    patterns = (
-        r"\bVapourSynth(?: Video Processing Library)?\s+R?(\d+(?:\.\d+){0,2})\b",
-        r"\bVapourSynth\s+API\s+(\d+)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match is not None:
-            return match.group(1)
-    raise UnsupportedToolVersionError("Unable to detect VapourSynth version.")
-
-
 def _run_process(
     command: Sequence[str],
     *,
@@ -673,7 +606,6 @@ def _run_process(
     progress_phase: ProgressPhase | Callable[[], ProgressPhase] | None = None,
     output_callback: ProcessOutputCallback | None = None,
     stderr_tty: bool = False,
-    process_observer: ProcessTelemetryObserver | None = None,
 ) -> int:
     heartbeat_callback = (
         _process_heartbeat_callback(progress_sink, progress_phase)
@@ -703,43 +635,14 @@ def _run_process(
             stderr_callback=callback,
             cancellation_token=cancellation_token,
             stderr_tty=stderr_tty,
-            process_observer=(
-                process_observer
-                if process_observer is not None
-                else _default_process_observer()
-            ),
         )
     finally:
         periodic_heartbeat_stop.set()
         if periodic_heartbeat is not None:
             periodic_heartbeat.join()
-    _publish_resource_summary(progress_sink, result.resource_summary)
     if result.termination_reason is not ProcessTerminationReason.EXITED:
         raise ExecutionInterruptedError(f"Interrupted while running {command[0]}")
-    if result.failure_reason is ProcessFailureReason.RESOURCE_OOM:
-        raise ResourceExhaustionError(
-            f"{command[0]} failed due to resource exhaustion (cgroup OOM kill).",
-            resource_summary=result.resource_summary,
-        )
     return result.return_code
-
-
-def _publish_resource_summary(
-    progress_sink: ProgressSink | None,
-    summary: ProcessResourceSummary | None,
-) -> None:
-    if progress_sink is None or summary is None:
-        return
-    callback = getattr(progress_sink, "record_resource_summary", None)
-    if callable(callback):
-        with suppress(Exception):
-            callback(summary)
-
-
-def _default_process_observer() -> ProcessTelemetryObserver | None:
-    if os.name != "posix":
-        return None
-    return LinuxProcessTelemetryObserver()
 
 
 def _combined_process_output_callback(
@@ -786,7 +689,10 @@ class _Av1anProgressCollector:
             return self._phase
 
     def _publish_if_accepted(self, sample: Av1anTtyProgressSample) -> None:
-        if self._phase == ProgressPhase.ENCODING and sample.phase == ProgressPhase.SCENE_DETECTION:
+        if (
+            self._phase == ProgressPhase.ENCODING
+            and sample.phase == ProgressPhase.SCENE_DETECTION
+        ):
             return
         if sample.phase == ProgressPhase.ENCODING:
             self._phase = ProgressPhase.ENCODING
@@ -899,7 +805,6 @@ def run_managed_process(
     cancellation_token: ProcessCancellationToken | None = None,
     termination_grace_seconds: float = 10.0,
     stderr_tty: bool = False,
-    process_observer: ProcessTelemetryObserver | None = None,
 ) -> ProcessResult:
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
@@ -926,8 +831,6 @@ def run_managed_process(
             stderr_master_fd, stderr_slave_fd = pty.openpty()
             stderr_target = stderr_slave_fd
         try:
-            if process_observer is not None:
-                process_observer.before_start()
             process = subprocess.Popen(
                 list(command),
                 cwd=cwd,
@@ -991,8 +894,6 @@ def run_managed_process(
         termination_requested_at: datetime | None = None
         try:
             while True:
-                if process_observer is not None:
-                    process_observer.sample(process.pid)
                 exit_code = process.poll()
                 if exit_code is not None:
                     break
@@ -1008,11 +909,8 @@ def run_managed_process(
                         exit_code = process.wait()
                     break
                 if cancellation_token is None:
-                    try:
-                        exit_code = process.wait(timeout=0.05)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
+                    exit_code = process.wait()
+                    break
                 cancellation_token.wait(timeout_seconds=0.05)
             for reader in readers:
                 reader.join()
@@ -1036,9 +934,6 @@ def run_managed_process(
         _MANAGED_PROCESSES.unregister(process)
     result_command = tuple(command)
     finished_at = _utc_now()
-    resource_summary = (
-        process_observer.after_exit(process.pid) if process_observer is not None else None
-    )
     if forced_kill:
         return ProcessResult.killed(
             command=result_command,
@@ -1046,7 +941,6 @@ def run_managed_process(
             started_at=started_at,
             finished_at=finished_at,
             termination_requested_at=termination_requested_at,
-            resource_summary=resource_summary,
         )
     if cancelled:
         return ProcessResult.cancelled(
@@ -1055,14 +949,12 @@ def run_managed_process(
             started_at=started_at,
             finished_at=finished_at,
             termination_requested_at=termination_requested_at,
-            resource_summary=resource_summary,
         )
     return ProcessResult.exited(
         command=result_command,
         return_code=exit_code,
         started_at=started_at,
         finished_at=finished_at,
-        resource_summary=resource_summary,
     )
 
 
