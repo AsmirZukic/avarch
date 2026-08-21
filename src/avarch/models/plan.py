@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from avarch.contracts import (
     AV1AN_COMMAND_SCHEMA_VERSION,
@@ -124,7 +124,7 @@ class Av1anCommandSpec(BaseModel):
 
     encoder: Literal["svt-av1"]
     encoder_args: list[str]
-    workers: StrictInt | Literal["auto"]
+    workers: int
 
     pixel_format: Literal["yuv420p10le"] = "yuv420p10le"
     concat_method: Literal["ffmpeg"] = "ffmpeg"
@@ -137,15 +137,6 @@ class Av1anCommandSpec(BaseModel):
     never_overwrite: Literal[True] = True
 
     resume_policy: Av1anResumePolicy = "auto"
-
-    @field_validator("workers")
-    @classmethod
-    def validate_workers(cls, value: int | Literal["auto"]) -> int | Literal["auto"]:
-        if value == "auto":
-            return value
-        if value <= 0:
-            raise ValueError("workers must be positive or 'auto'")
-        return value
 
 
 class FfmpegMuxSpec(BaseModel):
@@ -267,8 +258,6 @@ class VapourSynthPlan(BaseModel):
 class TranscodePlan(BaseModel):
     schema_version: Literal[5] = TRANSCODE_PLAN_SCHEMA_VERSION
     plan_hash: str
-    semantic_hash: str | None = None
-    resource_policy_hash: str | None = None
 
     input_path: Path
     output_path: Path

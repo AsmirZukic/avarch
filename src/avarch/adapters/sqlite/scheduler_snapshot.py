@@ -27,7 +27,6 @@ from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     BlockedJobSummary,
     CapacitySummary,
-    EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     PipelineSummary,
     SchedulerAlert,
@@ -601,86 +600,7 @@ def _attempt_progress_summary(
             and last_update_age_seconds > PROGRESS_STALE_AFTER_SECONDS
         ),
         last_update_age_seconds=last_update_age_seconds,
-        resource_decision=_resource_decision_from_command(attempt.command_json),
     )
-
-
-def _resource_decision_from_command(
-    command_json: str | None,
-) -> EncodeResourceDecisionSummary | None:
-    payload = _command_payload(command_json)
-    if payload is None:
-        return None
-    decision = payload.get("resource_decision")
-    if not isinstance(decision, dict):
-        return None
-    values = cast(dict[str, object], decision)
-    try:
-        workers = _positive_int_or_text(values["effective_workers"])
-        svt_lp = _positive_int_or_text(values["effective_svt_lp"])
-        confidence = _finite_float(values["confidence"])
-        algorithm_version = _positive_int(values["algorithm_version"])
-        fallback = values["fallback"]
-        evidence_count = values.get("evidence_count")
-        if not isinstance(fallback, bool):
-            return None
-        if evidence_count is not None and (
-            isinstance(evidence_count, bool)
-            or not isinstance(evidence_count, int)
-            or evidence_count < 0
-        ):
-            return None
-        return EncodeResourceDecisionSummary(
-            mode=str(values["mode"]),
-            effective_workers=workers,
-            effective_svt_lp=svt_lp,
-            reason=str(values["reason"]),
-            confidence=confidence,
-            algorithm_version=algorithm_version,
-            fallback=fallback,
-            evidence_count=evidence_count,
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _command_payload(command_json: str | None) -> dict[str, object] | None:
-    if command_json is None:
-        return None
-    try:
-        value: object = json.loads(command_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    return cast(dict[str, object], value)
-
-
-def _positive_int_or_text(value: object) -> int | str:
-    if isinstance(value, bool):
-        raise TypeError
-    if isinstance(value, int):
-        if value <= 0:
-            raise ValueError
-        return value
-    if isinstance(value, str) and value:
-        return value
-    raise TypeError
-
-
-def _positive_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise TypeError
-    return value
-
-
-def _finite_float(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError
-    result = float(value)
-    if not 0 <= result <= 1:
-        raise ValueError
-    return result
 
 
 def _attempt_phase(

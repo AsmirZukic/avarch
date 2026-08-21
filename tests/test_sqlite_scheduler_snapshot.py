@@ -344,19 +344,7 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
             started_at=now - timedelta(minutes=4),
         )
         running_attempt.command_json = json.dumps(
-            {
-                "av1an_argv": ["av1an", "-i", "source.mkv", "--workers", "4"],
-                "resource_decision": {
-                    "mode": "auto",
-                    "effective_workers": 4,
-                    "effective_svt_lp": 4,
-                    "reason": "reused_calibration",
-                    "confidence": 0.8,
-                    "algorithm_version": 1,
-                    "fallback": False,
-                    "evidence_count": 5,
-                },
-            }
+            {"av1an_argv": ["av1an", "-i", "source.mkv", "--workers", "4"]}
         )
         session.add(running_attempt)
         _job(
@@ -401,12 +389,6 @@ def test_scheduler_snapshot_upcoming_jobs_reuse_capacity_selection(tmp_path: Pat
         "current_snapshot",
     ]
     assert snapshot.capacity.av1an_workers_configured == 4
-    decision = snapshot.active_jobs[0].attempt.resource_decision  # type: ignore[union-attr]
-    assert decision is not None
-    assert decision.effective_workers == 4
-    assert decision.effective_svt_lp == 4
-    assert decision.reason == "reused_calibration"
-    assert decision.evidence_count == 5
 
 
 def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path: Path) -> None:

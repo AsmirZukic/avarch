@@ -15,7 +15,6 @@ from avarch.application.resource_telemetry import ResourceHealth
 from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     BlockedJobSummary,
-    EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     ResourceMetricSummary,
     ResourceTelemetrySummary,
@@ -98,7 +97,7 @@ def _live_layout_dashboard(
     )
     layout["main"].split_column(*main_sections)
     layout["side"].split_column(
-        Layout(_capacity_panel(snapshot), size=10),
+        Layout(_capacity_panel(snapshot), size=6),
         Layout(_session_panel(snapshot), size=5),
         Layout(_resource_panel(snapshot), size=5),
         Layout(_activity_panel(snapshot), ratio=1, minimum_size=5),
@@ -167,9 +166,6 @@ def _compact_dashboard(
                 ),
                 width,
             )
-            resources = _encode_resources(job.attempt)
-            if resources is not None:
-                _append_line(text, f"  {resources}", width)
     else:
         _append_line(text, "Active none", width)
     if snapshot.upcoming_jobs:
@@ -299,9 +295,6 @@ def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
         table.add_row("File", _display_path(job.source_path))
         table.add_row("Profile", job.profile_name or UNAVAILABLE)
         table.add_row("Workflow", _workflow_steps(job.workflow_steps))
-        resources = _encode_resources(job.attempt)
-        if resources is not None:
-            table.add_row("Resources", resources)
         table.add_row("Progress", _progress(job.attempt))
         if job != snapshot.active_jobs[-1]:
             table.add_row("", "")
@@ -353,59 +346,7 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
         else UNAVAILABLE
     )
     table.add_row("Av1an workers", workers)
-    decisions = tuple(
-        attempt.resource_decision
-        for job in snapshot.active_jobs
-        if job.stage == JobStage.ENCODE
-        and (attempt := job.attempt) is not None
-        and attempt.resource_decision is not None
-    )
-    if decisions:
-        table.add_row("SVT-AV1 LP", _capacity_svt_lp(decisions))
-        table.add_row("selection", _capacity_selection(decisions))
     return Panel(table, title="Capacity", border_style=NEUTRAL_BORDER)
-
-
-def _encode_resources(attempt: AttemptProgressSummary | None) -> str | None:
-    if attempt is None or attempt.resource_decision is None:
-        return None
-    decision = attempt.resource_decision
-    workers = decision.effective_workers
-    svt_lp = decision.effective_svt_lp
-    parts = [f"{workers} Av1an workers"]
-    if isinstance(workers, int):
-        parts.append(f"{workers} concurrent SVT-AV1 encoders")
-    parts.append(f"{svt_lp} LP each")
-    if isinstance(workers, int) and isinstance(svt_lp, int):
-        parts.append(f"{workers * svt_lp} LP nominal")
-    parts.append(decision.reason.replace("_", " "))
-    return " · ".join(parts)
-
-
-def _capacity_svt_lp(decisions: tuple[EncodeResourceDecisionSummary, ...]) -> str:
-    lp_values = {decision.effective_svt_lp for decision in decisions}
-    fully_bounded = all(
-        isinstance(decision.effective_workers, int)
-        and isinstance(decision.effective_svt_lp, int)
-        for decision in decisions
-    )
-    nominal = (
-        sum(
-            decision.effective_workers * decision.effective_svt_lp
-            for decision in decisions
-            if isinstance(decision.effective_workers, int)
-            and isinstance(decision.effective_svt_lp, int)
-        )
-        if fully_bounded
-        else None
-    )
-    lp = str(next(iter(lp_values))) if len(lp_values) == 1 else "mixed"
-    return f"{lp} each · {nominal} LP nominal" if nominal is not None else f"{lp} each"
-
-
-def _capacity_selection(decisions: tuple[EncodeResourceDecisionSummary, ...]) -> str:
-    reasons = {decision.reason.replace("_", " ") for decision in decisions}
-    return next(iter(reasons)) if len(reasons) == 1 else "mixed"
 
 
 def _active_chunk_usage(snapshot: SchedulerSnapshot) -> str | None:

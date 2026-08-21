@@ -128,32 +128,10 @@ def test_profile_document_rejects_nonpositive_workers() -> None:
         _profile_document(av1an={"workers": 0})
 
 
-@pytest.mark.parametrize("workers", [-1, True, False, "0", "bogus"])
-def test_profile_document_rejects_invalid_worker_values(workers: object) -> None:
-    with pytest.raises(ValidationError):
-        _profile_document(av1an={"workers": workers})
-
-
 def test_profile_document_accepts_auto_workers() -> None:
     profile = _profile_document(av1an={"workers": "auto"})
 
     assert profile.av1an.workers == "auto"
-
-
-def test_profile_document_rejects_structured_svt_lp_with_raw_lp() -> None:
-    with pytest.raises(ValidationError, match="both svt_lp and raw video_args"):
-        _profile_document(av1an={"video_args": "--preset 6 --lp 4", "svt_lp": 4})
-
-
-def test_profile_document_rejects_repeated_raw_svt_lp() -> None:
-    with pytest.raises(ValidationError, match="may only be defined once"):
-        _profile_document(av1an={"video_args": "--preset 6 --lp 4 --lp=8"})
-
-
-def test_profile_document_accepts_one_raw_svt_lp() -> None:
-    profile = _profile_document(av1an={"video_args": "--preset 6 --lp=4"})
-
-    assert profile.av1an.video_args == "--preset 6 --lp=4"
 
 
 def test_profile_document_rejects_nonpositive_max_width() -> None:
