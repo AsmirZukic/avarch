@@ -22,7 +22,6 @@ from rich.table import Table
 from rich.text import Text
 
 from avarch import __version__
-from avarch.application.calibration_service import plan_calibration
 from avarch.application.database_admin import (
     DatabaseAdminError,
     check_database_health,
@@ -107,7 +106,6 @@ from avarch.application.resource_telemetry import (
     apply_resource_health,
     safe_sample_resources,
 )
-from avarch.application.resources import effective_resource_snapshot
 from avarch.application.scheduler_control import (
     SchedulerControlWorkflowError,
     drain_scheduler,
@@ -245,7 +243,6 @@ from avarch.config import (
     resolve_data_dir,
 )
 from avarch.domain.jobs import JobStage, JobStatus, ManualValidationAction
-from avarch.domain.resource_policy import ResourceIntent, ResourcePolicyError, parse_resource_intent
 from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
@@ -282,8 +279,6 @@ files_app = typer.Typer(help="Inventory file commands.")
 plans_app = typer.Typer(help="Plan commands.")
 workspace_app = typer.Typer(help="Workspace commands.")
 config_app = typer.Typer(help="Configuration commands.")
-system_app = typer.Typer(help="System diagnostics.")
-performance_app = typer.Typer(help="Performance calibration commands.")
 workflow_app = typer.Typer(help="Workflow commands.")
 profiles_app = typer.Typer(help="Profile commands.")
 vpy_app = typer.Typer(help="VapourSynth commands.")
@@ -527,7 +522,8 @@ def files_list(
     typer.echo("STATUS   SIZE        PATH")
     for media_file in media_files:
         typer.echo(
-            f"{media_file.status:<8} {format_size(media_file.size_bytes):>10}  {media_file.path}"
+            f"{media_file.status:<8} {format_size(media_file.size_bytes):>10}  "
+            f"{media_file.path}"
         )
 
 
@@ -1127,15 +1123,12 @@ async def _run_scheduler_watch_live(
         database_url=database_url,
         workspace_root=workspace_root,
     )
-    with (
-        PosixKeySource() as key_source,
-        Live(
-            console=console,
-            auto_refresh=False,
-            transient=False,
-            screen=True,
-        ) as live,
-    ):
+    with PosixKeySource() as key_source, Live(
+        console=console,
+        auto_refresh=False,
+        transient=False,
+        screen=True,
+    ) as live:
         loop = SchedulerWatchLoop(
             snapshot_query=query,
             renderer=lambda snapshot, width: render_scheduler_dashboard(
@@ -1441,56 +1434,6 @@ def jobs_show(
             f"  {attempt.attempt_number:<3} {job_stage_value(attempt.stage):<9} "
             f"{attempt_status_value(attempt.status):<11} {attempt.runner_id}"
         )
-        if attempt.resource_decision is not None:
-            decision = attempt.resource_decision
-            fallback = " fallback" if decision.fallback else ""
-            evidence = (
-                f", evidence={decision.evidence_count}"
-                if decision.evidence_count is not None
-                else ""
-            )
-            actual_workers = (
-                ", av1an_selected_workers=unknown"
-                if decision.effective_workers == "auto"
-                else ""
-            )
-            typer.echo(
-                "      resources: "
-                f"{decision.mode}{fallback}, workers={decision.effective_workers}, "
-                f"svt_lp={decision.effective_svt_lp}, reason={decision.reason}, "
-                f"confidence={decision.confidence:.2f}, algorithm=v{decision.algorithm_version}"
-                f"{evidence}{actual_workers}"
-            )
-        if attempt.performance is not None:
-            performance = attempt.performance
-            memory = (
-                format_size(performance.peak_cgroup_memory_bytes)
-                if performance.peak_cgroup_memory_bytes is not None
-                else (
-                    format_size(performance.peak_rss_bytes)
-                    if performance.peak_rss_bytes is not None
-                    else "—"
-                )
-            )
-            fps = (
-                f"{performance.aggregate_fps:.2f}"
-                if performance.aggregate_fps is not None
-                else "—"
-            )
-            cpu = (
-                f"{performance.average_cpu_utilization_percent:.1f}%"
-                if performance.average_cpu_utilization_percent is not None
-                else "—"
-            )
-            throttled = performance.cpu_throttled_events_delta
-            oom = performance.memory_oom_kill_events_delta
-            completeness = "incomplete" if performance.incomplete else "complete"
-            typer.echo(
-                "      performance: "
-                f"fps={fps}, peak_memory={memory}, avg_cpu={cpu}, "
-                f"throttled_events={throttled if throttled is not None else '—'}, "
-                f"oom_kills={oom if oom is not None else '—'}, {completeness}"
-            )
     typer.echo("")
     typer.echo("Events:")
     for event in job.events:
@@ -3071,101 +3014,6 @@ def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None
         typer.echo(text.rstrip())
 
 
-@system_app.command("resources")
-def system_resources() -> None:
-    """Show the effective CPU and memory envelope detected by Avarch."""
-    snapshot = effective_resource_snapshot()
-    cpu = (
-        str(snapshot.effective_cpu_count) if snapshot.effective_cpu_count is not None else "unknown"
-    )
-    quota = (
-        f"{snapshot.effective_cpu_quota:.2f}"
-        if snapshot.effective_cpu_quota is not None
-        else "unknown"
-    )
-    memory = (
-        format_size(snapshot.effective_memory_bytes)
-        if snapshot.effective_memory_bytes is not None
-        else "unknown"
-    )
-    typer.echo("Resources")
-    typer.echo(f"  effective CPUs:   {cpu}")
-    typer.echo(f"  CPU quota:        {quota}")
-    typer.echo(f"  effective memory: {memory}")
-    typer.echo(f"  CPU sources:      {_resource_source_summary(snapshot.cpu_values)}")
-    typer.echo(f"  memory sources:   {_resource_source_summary(snapshot.memory_values)}")
-    typer.echo(f"  degraded:         {'yes' if snapshot.degraded else 'no'}")
-
-
-@performance_app.command("calibration-policy")
-def performance_calibration_policy(
-    predicted_seconds: Annotated[
-        float | None,
-        typer.Option("--predicted-seconds", help="Predicted encode duration in seconds."),
-    ] = None,
-    mode: Annotated[
-        Literal["auto", "native", "manual"],
-        typer.Option("--mode", help="Resource mode to evaluate."),
-    ] = "auto",
-    workers: Annotated[
-        int | None,
-        typer.Option("--workers", help="Manual worker count for manual mode."),
-    ] = None,
-    svt_lp: Annotated[
-        int | None,
-        typer.Option("--svt-lp", help="Manual SVT logical processor count."),
-    ] = None,
-    explicit: Annotated[
-        bool,
-        typer.Option("--explicit", help="Treat calibration as explicitly requested."),
-    ] = False,
-) -> None:
-    try:
-        intent = _cli_resource_intent(mode=mode, workers=workers, svt_lp=svt_lp)
-    except ResourcePolicyError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    calibration_plan = plan_calibration(
-        settings=AppConfig().performance,
-        intent=intent,
-        predicted_encode_seconds=predicted_seconds,
-        explicit_request=explicit,
-    )
-    typer.echo("Calibration policy")
-    typer.echo(
-        f"  decision: {'run' if calibration_plan.decision.should_benchmark else 'skip'}"
-    )
-    typer.echo(f"  reason:   {calibration_plan.decision.reason.value}")
-    typer.echo(f"  budget:   {calibration_plan.decision.budget_seconds:g}s")
-
-
-def _cli_resource_intent(
-    *,
-    mode: Literal["auto", "native", "manual"],
-    workers: int | None,
-    svt_lp: int | None,
-) -> ResourceIntent:
-    if mode == "manual":
-        if workers is None:
-            raise ResourcePolicyError("manual resource mode requires --workers")
-        return parse_resource_intent(mode=mode, workers=workers, svt_lp=svt_lp)
-    if workers is not None or svt_lp is not None:
-        raise ResourcePolicyError("--workers and --svt-lp require --mode manual")
-    return parse_resource_intent(mode=mode, workers="auto")
-
-
-def _resource_source_summary(values: tuple[object, ...]) -> str:
-    parts: list[str] = []
-    for value in values:
-        source = getattr(value, "source", "unknown")
-        raw_value = getattr(value, "value", None)
-        confidence = getattr(value, "confidence", None)
-        confidence_text = getattr(confidence, "value", str(confidence))
-        rendered_value = "unknown" if raw_value is None else str(raw_value)
-        parts.append(f"{source}={rendered_value} ({confidence_text})")
-    return ", ".join(parts) if parts else "unknown"
-
-
 app.add_typer(db_app, name="db")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(jobs_app, name="jobs")
@@ -3173,8 +3021,6 @@ app.add_typer(files_app, name="files")
 app.add_typer(plans_app, name="plans")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(config_app, name="config")
-app.add_typer(system_app, name="system")
-app.add_typer(performance_app, name="performance")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(profiles_app, name="profiles")
 vpy_app.add_typer(vpy_scaffold_app, name="scaffold")

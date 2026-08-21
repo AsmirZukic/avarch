@@ -95,17 +95,6 @@ class WorkflowStepSummary(SnapshotModel):
     state: WorkflowStepState
 
 
-class EncodeResourceDecisionSummary(SnapshotModel):
-    mode: str
-    effective_workers: int | str
-    effective_svt_lp: int | str
-    reason: str
-    confidence: float = Field(ge=0, le=1)
-    algorithm_version: int = Field(ge=1, strict=True)
-    fallback: bool
-    evidence_count: int | None = Field(default=None, ge=0, strict=True)
-
-
 class AttemptProgressSummary(SnapshotModel):
     attempt_id: int = Field(ge=0, strict=True)
     attempt_number: int = Field(ge=1, strict=True)
@@ -127,7 +116,6 @@ class AttemptProgressSummary(SnapshotModel):
     written_output_bytes: int | None = Field(default=None, ge=0, strict=True)
     stale: bool = False
     last_update_age_seconds: int | None = Field(default=None, ge=0, strict=True)
-    resource_decision: EncodeResourceDecisionSummary | None = None
 
 
 class ActiveJobSummary(SnapshotModel):
@@ -257,7 +245,6 @@ class SchedulerSnapshot(SnapshotModel):
     session: SessionSummary | None = None
     active_jobs: tuple[ActiveJobSummary, ...]
     capacity: CapacitySummary
-    storage_saved_bytes: int = Field(default=0, strict=True)
     resources: ResourceTelemetrySummary | None = None
     upcoming_jobs: tuple[UpcomingJobSummary, ...] = ()
     blocked_jobs: tuple[BlockedJobSummary, ...] = ()

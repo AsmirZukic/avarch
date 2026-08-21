@@ -19,7 +19,7 @@ from avarch.adapters.sqlite.models import (
     SchedulerSession,
     SchedulerState,
 )
-from avarch.adapters.sqlite.queue import claimable_jobs
+from avarch.adapters.sqlite.queue import claimable_jobs, select_launchable_queue_jobs
 from avarch.adapters.sqlite.scheduler_state import lease_active
 from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
@@ -27,7 +27,6 @@ from avarch.application.scheduler_snapshot import (
     AttemptProgressSummary,
     BlockedJobSummary,
     CapacitySummary,
-    EncodeResourceDecisionSummary,
     LifecycleEventSummary,
     PipelineSummary,
     SchedulerAlert,
@@ -43,7 +42,7 @@ from avarch.application.scheduler_snapshot import (
 )
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase, ProgressUnit
-from avarch.domain.scheduler import SchedulerMode
+from avarch.domain.scheduler import ActiveJob, ResourceCapacity, SchedulerMode, resource_for_stage
 
 _ACTIVE_STATUSES = {
     JobStatus.ENCODING,
@@ -81,7 +80,6 @@ class SqliteSchedulerSnapshotQuery:
             session=self._session_summary(),
             active_jobs=self._active_jobs(captured_at=captured_at),
             capacity=self._capacity_summary(now=captured_at),
-            storage_saved_bytes=self._storage_saved_bytes(),
             upcoming_jobs=self._upcoming_jobs(),
             blocked_jobs=self._blocked_jobs(),
             recent_events=self._recent_events(),
@@ -228,14 +226,37 @@ class SqliteSchedulerSnapshotQuery:
         )
 
     def _selected_upcoming_jobs(self, *, limit: int) -> list[Job]:
-        active_job_ids = {
-            _required_id(job.id)
+        capacity = self._resource_capacity()
+        if capacity is None:
+            return claimable_jobs(session=self._session, active_job_ids=set())[:limit]
+        return select_launchable_queue_jobs(
+            self._session,
+            active_jobs=self._active_jobs_for_selection(),
+            capacity=capacity,
+            limit=limit,
+        )
+
+    def _resource_capacity(self) -> ResourceCapacity | None:
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.capacity_cheap_workers is None:
+            return None
+        return ResourceCapacity(
+            cheap_workers=state.capacity_cheap_workers,
+            av1an_jobs=state.capacity_av1an_jobs or 0,
+            file_ops=state.capacity_file_ops or 0,
+        )
+
+    def _active_jobs_for_selection(self) -> list[ActiveJob]:
+        active_jobs = [
+            ActiveJob(job_id=_required_id(job.id), stage=JobStage(job.stage))
             for job in self._session.exec(
                 select(Job).where(col(Job.status).in_(_ACTIVE_STATUSES))
             ).all()
-            if job.id is not None
-        }
-        return claimable_jobs(session=self._session, active_job_ids=active_job_ids)[:limit]
+        ]
+        state = self._session.get(SchedulerState, 1)
+        if state is None or state.capacity_cheap_workers is None:
+            return active_jobs
+        return _pad_active_jobs_from_capacity_state(active_jobs, state)
 
     def _session_summary(self) -> SessionSummary | None:
         sessions = tuple(
@@ -263,20 +284,6 @@ class SqliteSchedulerSnapshotQuery:
             .limit(8)
         ).all()
         return tuple(_lifecycle_event_summary(event) for event in events)
-
-    def _storage_saved_bytes(self) -> int:
-        details_rows = self._session.exec(
-            select(JobEvent.details_json).where(
-                JobEvent.event_type == JobEventType.STAGE_COMPLETED,
-                JobEvent.stage == JobStage.PROMOTE,
-            )
-        ).all()
-        saved = 0
-        for details_json in details_rows:
-            value = _event_details(details_json).get("saved_bytes")
-            if isinstance(value, int):
-                saved += value
-        return saved
 
     def _blocked_jobs(self) -> tuple[BlockedJobSummary, ...]:
         rows = self._session.exec(
@@ -489,6 +496,32 @@ def _blocked_details(
     return {}
 
 
+def _pad_active_jobs_from_capacity_state(
+    active_jobs: list[ActiveJob],
+    state: SchedulerState,
+) -> list[ActiveJob]:
+    padded = list(active_jobs)
+    active_by_resource = {
+        "cheap": 0,
+        "heavy_av1an": 0,
+        "file_op": 0,
+    }
+    for job in active_jobs:
+        active_by_resource[resource_for_stage(job.stage).value] += 1
+    synthetic_id = -1
+    for stage, target in (
+        (JobStage.VALIDATE, state.capacity_cheap_active or 0),
+        (JobStage.ENCODE, state.capacity_av1an_active or 0),
+        (JobStage.PROMOTE, state.capacity_file_ops_active or 0),
+    ):
+        resource = resource_for_stage(stage).value
+        while active_by_resource[resource] < target:
+            padded.append(ActiveJob(job_id=synthetic_id, stage=stage))
+            synthetic_id -= 1
+            active_by_resource[resource] += 1
+    return padded
+
+
 def _av1an_workers_from_command(command_json: str | None) -> int | None:
     if command_json is None:
         return None
@@ -567,86 +600,7 @@ def _attempt_progress_summary(
             and last_update_age_seconds > PROGRESS_STALE_AFTER_SECONDS
         ),
         last_update_age_seconds=last_update_age_seconds,
-        resource_decision=_resource_decision_from_command(attempt.command_json),
     )
-
-
-def _resource_decision_from_command(
-    command_json: str | None,
-) -> EncodeResourceDecisionSummary | None:
-    payload = _command_payload(command_json)
-    if payload is None:
-        return None
-    decision = payload.get("resource_decision")
-    if not isinstance(decision, dict):
-        return None
-    values = cast(dict[str, object], decision)
-    try:
-        workers = _positive_int_or_text(values["effective_workers"])
-        svt_lp = _positive_int_or_text(values["effective_svt_lp"])
-        confidence = _finite_float(values["confidence"])
-        algorithm_version = _positive_int(values["algorithm_version"])
-        fallback = values["fallback"]
-        evidence_count = values.get("evidence_count")
-        if not isinstance(fallback, bool):
-            return None
-        if evidence_count is not None and (
-            isinstance(evidence_count, bool)
-            or not isinstance(evidence_count, int)
-            or evidence_count < 0
-        ):
-            return None
-        return EncodeResourceDecisionSummary(
-            mode=str(values["mode"]),
-            effective_workers=workers,
-            effective_svt_lp=svt_lp,
-            reason=str(values["reason"]),
-            confidence=confidence,
-            algorithm_version=algorithm_version,
-            fallback=fallback,
-            evidence_count=evidence_count,
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _command_payload(command_json: str | None) -> dict[str, object] | None:
-    if command_json is None:
-        return None
-    try:
-        value: object = json.loads(command_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    return cast(dict[str, object], value)
-
-
-def _positive_int_or_text(value: object) -> int | str:
-    if isinstance(value, bool):
-        raise TypeError
-    if isinstance(value, int):
-        if value <= 0:
-            raise ValueError
-        return value
-    if isinstance(value, str) and value:
-        return value
-    raise TypeError
-
-
-def _positive_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise TypeError
-    return value
-
-
-def _finite_float(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError
-    result = float(value)
-    if not 0 <= result <= 1:
-        raise ValueError
-    return result
 
 
 def _attempt_phase(

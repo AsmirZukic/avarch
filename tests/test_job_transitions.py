@@ -27,10 +27,8 @@ from avarch.adapters.sqlite.models import (
     JobEvent,
     MediaFile,
     MediaFileStatus,
-    ResourceReservation,
     SchedulerSession,
 )
-from avarch.adapters.sqlite.resource_reservations import release_attempt_reservation
 from avarch.domain.jobs import (
     AttemptStatus,
     JobEventType,
@@ -38,12 +36,6 @@ from avarch.domain.jobs import (
     JobStage,
     JobStatus,
     ResourceClass,
-)
-from avarch.domain.scheduler import JobResourceReservation
-from avarch.models.execution import (
-    ProcessFailureReason,
-    ProcessResourceSummary,
-    ResourceExhaustionError,
 )
 
 
@@ -71,48 +63,6 @@ def test_claim_creates_attempt(tmp_path: Path) -> None:
 
     assert attempt.stage == JobStage.PROBE
     assert attempt.resource_class == ResourceClass.CHEAP
-
-
-def test_claim_heavy_stage_creates_active_resource_reservation(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        attempt_id = attempt.id
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.job_id == job_id
-    assert reservation.attempt_id == attempt_id
-    assert reservation.resource_class == ResourceClass.HEAVY_AV1AN
-    assert reservation.exclusive is True
-    assert reservation.status == "active"
-    assert reservation.created_at == now.replace(tzinfo=None)
-
-
-def test_claim_heavy_stage_persists_explicit_bounded_resource_reservation(
-    tmp_path: Path,
-) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        claim_job_stage(
-            session,
-            job_id=job_id,
-            runner_id="runner",
-            now=now,
-            reservation=JobResourceReservation(cpu=2.5, memory_bytes=4 * 1024**3),
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.resource_class == ResourceClass.HEAVY_AV1AN
-    assert reservation.cpu_reserved == 2.5
-    assert reservation.memory_bytes_reserved == 4 * 1024**3
-    assert reservation.exclusive is False
-    assert reservation.status == "active"
 
 
 def test_claim_increments_attempt_count(tmp_path: Path) -> None:
@@ -164,54 +114,6 @@ def test_completion_advances_stage(tmp_path: Path) -> None:
     assert job is not None
     assert job.status == JobStatus.QUEUED
     assert job.stage == JobStage.PLAN
-
-
-def test_completion_releases_resource_reservation(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        complete_job_stage(
-            session,
-            job_id=job_id,
-            attempt_id=attempt.id or 0,
-            next_stage=JobStage.VALIDATE,
-            now=now + timedelta(seconds=1),
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert reservation.status == "released"
-    assert reservation.release_reason == "completed"
-    assert reservation.released_at == (now + timedelta(seconds=1)).replace(tzinfo=None)
-
-
-def test_resource_reservation_release_is_idempotent(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        attempt_id = attempt.id or 0
-        first = release_attempt_reservation(
-            session,
-            attempt_id=attempt_id,
-            now=now + timedelta(seconds=1),
-            reason="first",
-        )
-        second = release_attempt_reservation(
-            session,
-            attempt_id=attempt_id,
-            now=now + timedelta(seconds=2),
-            reason="second",
-        )
-        session.commit()
-        reservation = session.exec(select(ResourceReservation)).one()
-
-    assert first is True
-    assert second is False
-    assert reservation.release_reason == "first"
 
 
 def test_claim_and_completion_record_stage_lifecycle_events(tmp_path: Path) -> None:
@@ -365,49 +267,6 @@ def test_failure_records_stage_failed_event_with_stable_details(tmp_path: Path) 
     assert failed.stage == JobStage.ENCODE
     assert failed.details_json is not None
     assert json.loads(failed.details_json) == {"error_type": "ValueError", "exit_code": 2}
-
-
-def test_resource_failure_records_classification_details(tmp_path: Path) -> None:
-    engine, job_id = _stored_job(tmp_path, stage=JobStage.ENCODE)
-    now = datetime.now(UTC)
-    error = ResourceExhaustionError(
-        "resource exhaustion",
-        resource_summary=ProcessResourceSummary(
-            peak_rss_bytes=1024,
-            memory_oom_kill_events_delta=1,
-        ),
-    )
-
-    with Session(engine) as session:
-        attempt = claim_job_stage(session, job_id=job_id, runner_id="runner", now=now)
-        fail_job_stage(
-            session,
-            job_id=job_id,
-            attempt_id=attempt.id or 0,
-            error=error,
-            exit_code=None,
-            now=now + timedelta(seconds=1),
-        )
-        session.commit()
-        failed = session.exec(
-            select(JobEvent).where(JobEvent.event_type == JobEventType.STAGE_FAILED)
-        ).one()
-
-    assert failed.details_json is not None
-    assert json.loads(failed.details_json) == {
-        "error_type": "ResourceExhaustionError",
-        "failure_reason": ProcessFailureReason.RESOURCE_OOM.value,
-        "resource_summary": {
-            "attribution_available": False,
-            "cpu_throttled_events_delta": None,
-            "cpu_throttled_usec_delta": None,
-            "memory_oom_events_delta": None,
-            "memory_oom_kill_events_delta": 1,
-            "peak_rss_bytes": 1024,
-            "peak_swap_bytes": None,
-            "swap_current_bytes_delta": None,
-        },
-    }
 
 
 def test_interruption_returns_job_to_pending(tmp_path: Path) -> None:

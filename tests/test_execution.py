@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import os
 import shlex
-import sys
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -20,9 +18,6 @@ from avarch.adapters.execution import (
     build_ffmpeg_mux_command,
     create_mux_temporary_path,
     execute_plan,
-    parse_av1an_version,
-    parse_svt_av1_version,
-    parse_vapoursynth_version,
     preflight_execution,
     serialize_encoder_arguments,
     should_resume_av1an,
@@ -34,10 +29,7 @@ from avarch.domain.progress import ProgressPhase, ProgressSource
 from avarch.models.execution import (
     ExecutionInterruptedError,
     ProcessCancellationToken,
-    ProcessResourceSummary,
-    ResourceExhaustionError,
     ToolUnavailableError,
-    UnsupportedToolVersionError,
     WorkDirectoryConflictError,
 )
 from avarch.models.plan import (
@@ -115,6 +107,8 @@ def test_build_av1an_command_uses_fixed_contract_order(tmp_path: Path) -> None:
         "yuv420p10le",
         "--concat",
         "ffmpeg",
+        "--cache-mode",
+        "temp",
         "--max-tries",
         "3",
         "--audio-params",
@@ -124,73 +118,6 @@ def test_build_av1an_command_uses_fixed_contract_order(tmp_path: Path) -> None:
         "-n",
         "--resume",
     ]
-
-
-def test_build_av1an_command_renders_native_auto_workers_as_zero(tmp_path: Path) -> None:
-    spec = Av1anCommandSpec(
-        input_path=tmp_path / "movie.vpy",
-        video_output_path=tmp_path / "video-only.mkv",
-        temp_dir=tmp_path / "av1an",
-        working_directory=tmp_path,
-        encoder="svt-av1",
-        encoder_args=["--crf", "28"],
-        workers="auto",
-    )
-
-    command = build_av1an_command(spec, resume=False)
-
-    assert command[command.index("--workers") + 1] == "0"
-    assert "--cache-mode" not in command
-
-
-def test_run_process_classifies_sigkill_with_oom_evidence(tmp_path: Path) -> None:
-    class FakeObserver:
-        def before_start(self) -> None:
-            pass
-
-        def sample(self, root_pid: int) -> None:
-            assert root_pid > 0
-
-        def after_exit(self, root_pid: int | None) -> ProcessResourceSummary:
-            assert root_pid is not None
-            return ProcessResourceSummary(memory_oom_kill_events_delta=1)
-
-    with pytest.raises(ResourceExhaustionError, match="resource exhaustion"):
-        execution_module._run_process(  # pyright: ignore[reportPrivateUsage]
-            [
-                sys.executable,
-                "-c",
-                "import os, signal; os.kill(os.getpid(), signal.SIGKILL)",
-            ],
-            cwd=tmp_path,
-            stdout_log=tmp_path / "stdout.log",
-            stderr_log=tmp_path / "stderr.log",
-            plan_hash="plan",
-            command_hash="command",
-            process_observer=FakeObserver(),
-        )
-
-
-def test_tool_version_parsers_capture_exact_versions() -> None:
-    assert parse_av1an_version("av1an 0.5.1\n") == "0.5.1"
-    assert parse_svt_av1_version("SVT-AV1 Encoder Lib v2.3.0\n") == "2.3.0"
-    assert parse_vapoursynth_version("VapourSynth Video Processing Library R70\n") == "70"
-
-
-@pytest.mark.parametrize(
-    ("parser", "output"),
-    [
-        (parse_av1an_version, "av1an development build"),
-        (parse_svt_av1_version, "SVT-AV1 unknown"),
-        (parse_vapoursynth_version, "vspipe version unavailable"),
-    ],
-)
-def test_tool_version_parsers_reject_unparseable_output(
-    parser: Callable[[str], str],
-    output: str,
-) -> None:
-    with pytest.raises(UnsupportedToolVersionError):
-        parser(output)
 
 
 def test_should_resume_av1an_requires_av1an_resume_manifests(tmp_path: Path) -> None:
@@ -461,8 +388,8 @@ def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
     heartbeats = [
         snapshot
         for snapshot in sink.snapshots
-        if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
-        and snapshot.phase == ProgressPhase.SCENE_DETECTION
+            if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+            and snapshot.phase == ProgressPhase.SCENE_DETECTION
     ]
     assert heartbeats
     assert all(snapshot.current is None for snapshot in heartbeats)
@@ -503,7 +430,9 @@ def test_execute_plan_ignores_malformed_av1an_progress_output(
     assert execute_plan(plan, progress_sink=sink) == "completed"
 
     assert not [
-        snapshot for snapshot in sink.snapshots if snapshot.source == ProgressSource.AV1AN_OUTPUT
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
     ]
 
 
@@ -520,7 +449,9 @@ def test_execute_plan_falls_back_to_phase_progress_when_av1an_parser_disabled(
 
     assert ProgressPhase.SCENE_DETECTION in [snapshot.phase for snapshot in sink.snapshots]
     assert not [
-        snapshot for snapshot in sink.snapshots if snapshot.source == ProgressSource.AV1AN_OUTPUT
+        snapshot
+        for snapshot in sink.snapshots
+        if snapshot.source == ProgressSource.AV1AN_OUTPUT
     ]
 
 
@@ -669,12 +600,10 @@ if [ "__AV1AN_START_DELAY__" != "0" ]; then
   sleep "__AV1AN_START_DELAY__"
 fi
 printf video > "$out"
-""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no")
-        .replace(
+""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no").replace(
             "__AV1AN_NOISE__",
             "yes" if av1an_noise else "no",
-        )
-        .replace(
+        ).replace(
             "__AV1AN_START_DELAY__",
             av1an_start_delay_literal,
         ),
