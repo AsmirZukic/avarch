@@ -187,7 +187,7 @@ def test_rejection_contains_reason() -> None:
 
 
 def _engine(tmp_path: Path) -> Engine:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 
@@ -207,8 +207,6 @@ def _insert_media_file(
         device_id=path.stat().st_dev,
         inode=path.stat().st_ino,
         fs_fingerprint=fingerprint,
-        discovered_at=_now(),
-        last_seen_at=_now(),
         status=status,
     )
     with Session(engine) as session:
@@ -224,7 +222,6 @@ def _store_probe(engine: Engine, media_file: MediaFile) -> ProbeResult:
         probe_result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={"format": {}},
             normalized_probe=_normalized_probe(),
             created_at=_now(),
         )
@@ -242,7 +239,6 @@ def _insert_probe_result(
     normalized_probe = _normalized_probe()
     probe_result = ProbeResult(
         media_file_id=media_file.id or 0,
-        ffprobe_json="{}",
         normalized_json=canonical_json(normalized_probe),
         probe_hash=build_probe_hash(normalized_probe),
         source_fs_fingerprint=source_fs_fingerprint,
@@ -304,7 +300,8 @@ def _resolved_profile() -> ResolvedProfile:
             "av1an": {
                 "encoder": "svt-av1",
                 "workers": 2,
-                "video_args": "--preset 6 --crf 28 --keyint 240 --lp 2",
+                "video_args": "--preset 6 --crf 28 --keyint 240",
+                "svt_lp": 2,
             },
             "audio": {
                 "codec": "libopus",

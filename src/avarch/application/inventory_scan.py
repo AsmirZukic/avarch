@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -28,7 +27,6 @@ class InventoryScanWorkflow(Protocol):
         root: Path,
         config: AppConfig,
         workspace_root: Path | None,
-        scanned_at: datetime,
     ) -> InventoryScanResult: ...
 
 
@@ -38,11 +36,9 @@ def scan_inventory_root(
     root: Path,
     config: AppConfig,
     workspace_root: Path | None,
-    scanned_at: datetime,
 ) -> InventoryScanResult:
     return workflow.scan_root(
         root=root,
         config=config,
         workspace_root=workspace_root,
-        scanned_at=scanned_at,
     )

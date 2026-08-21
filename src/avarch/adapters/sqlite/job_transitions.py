@@ -8,11 +8,6 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
 
-from avarch.adapters.sqlite.resource_reservations import (
-    acquire_attempt_reservation,
-    reconcile_stale_reservations,
-    release_attempt_reservation,
-)
 from avarch.adapters.sqlite.stage_events import (
     current_scheduler_session_id,
     record_stage_event,
@@ -36,7 +31,7 @@ from avarch.domain.jobs import (
     plan_skipped_transition,
     plan_validation_result_transition,
 )
-from avarch.domain.scheduler import JobResourceReservation, resource_for_stage
+from avarch.domain.scheduler import resource_for_stage
 from avarch.models.execution import ProcessFailureReason, ProcessResourceSummary
 from avarch.serialization import canonical_json
 
@@ -46,33 +41,6 @@ if TYPE_CHECKING:
 from avarch.adapters.sqlite.models import Job as SQLiteJob
 from avarch.adapters.sqlite.models import JobAttempt as SQLiteJobAttempt
 from avarch.adapters.sqlite.models import JobEvent
-
-__all__ = [
-    "JobClaimError",
-    "RecoverySummary",
-    "JobTransitionError",
-    "add_job_event",
-    "attach_probe_and_advance",
-    "cancel_claimed_job",
-    "claim_job_stage",
-    "clear_hold_fields",
-    "complete_scene_detect_stage",
-    "complete_job_stage",
-    "fail_job_stage",
-    "fail_job_after_external",
-    "interrupt_job_stage",
-    "interrupt_running_job",
-    "mark_job_skipped",
-    "record_validation_result_transition",
-    "queue_rejected_output_cleanup",
-    "require_attempt",
-    "require_job",
-    "recover_abandoned_jobs",
-    "reset_job_for_retry",
-    "restore_missing_scene_detect_stage",
-    "skip_claimed_job",
-    "transition_job",
-]
 
 
 class JobClaimError(RuntimeError):
@@ -109,7 +77,6 @@ def claim_job_stage(
     job_id: int,
     runner_id: str,
     now: datetime,
-    reservation: JobResourceReservation | None = None,
 ) -> JobAttempt:
     job = require_job(session, job_id)
     if not job_can_be_claimed_for_stage(job.status, job.stage):
@@ -138,17 +105,6 @@ def claim_job_stage(
     session.flush()
     if attempt.id is None:
         raise JobClaimError("Attempt id was not assigned after claim.")
-    effective_reservation = reservation or _default_reservation_for_resource(resource_class)
-    if effective_reservation is not None:
-        acquire_attempt_reservation(
-            session,
-            job_id=job_id,
-            attempt_id=attempt.id,
-            scheduler_session_id=scheduler_session_id,
-            resource_class=resource_class,
-            reservation=effective_reservation,
-            now=now,
-        )
     record_stage_event(
         session,
         job_id=job_id,
@@ -216,16 +172,8 @@ def complete_scene_detect_stage(
     session.add(attempt)
 
 
-def restore_missing_scene_detect_stage(session: Session, *, job: Job) -> bool:
-    if JobStage(job.stage) != JobStage.ENCODE:
-        return False
-    job_id = _require_id(job)
-    if _scene_detection_completed(session, job_id=job_id):
-        return True
-    job.stage = JobStage.SCENE_DETECT
-    session.add(job)
-    session.flush()
-    return False
+def scene_detection_completed(session: Session, *, job: Job) -> bool:
+    return _scene_detection_completed(session, job_id=_require_id(job))
 
 
 def complete_job_stage(
@@ -244,7 +192,6 @@ def complete_job_stage(
 
     attempt.status = AttemptStatus.COMPLETED
     attempt.finished_at = now
-    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="completed")
     job.last_error_type = None
     job.last_error_message = None
     job.claimed_by = None
@@ -310,7 +257,6 @@ def fail_job_stage(
     attempt.error_message = str(error)
     attempt.exit_code = exit_code
     attempt.finished_at = now
-    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="failed")
     transition = plan_failed_stage_transition(job.status, now=now)
     job.status = transition.status
     job.claimed_by = None
@@ -379,7 +325,6 @@ def interrupt_job_stage(
     attempt.status = AttemptStatus.INTERRUPTED
     attempt.finished_at = now
     attempt.exit_code = 130
-    release_attempt_reservation(session, attempt_id=attempt_id, now=now, reason="interrupted")
     transition = plan_interrupted_stage_transition(
         job.status,
         hold_requested=job.hold_requested_at is not None,
@@ -553,7 +498,6 @@ def recover_abandoned_jobs(
     now: datetime,
     encoded_output_exists: Callable[[Job], bool],
 ) -> RecoverySummary:
-    reconcile_stale_reservations(session, now=now)
     recovered_jobs = 0
     interrupted_attempts = 0
     jobs = list(session.exec(select(SQLiteJob).where(SQLiteJob.status == JobStatus.ENCODING)).all())
@@ -728,12 +672,6 @@ def cancel_claimed_job(
     attempt.status = AttemptStatus.CANCELED
     attempt.finished_at = now
     attempt.exit_code = 130
-    release_attempt_reservation(
-        session,
-        attempt_id=_require_id(attempt),
-        now=now,
-        reason="cancelled",
-    )
     transition = plan_canceled_transition(job.status, now=now)
     job.status = transition.status
     job.claimed_by = None
@@ -808,14 +746,6 @@ def _latest_running_attempt(session: Session, *, job_id: int) -> JobAttempt | No
         .where(SQLiteJobAttempt.job_id == job_id, SQLiteJobAttempt.status == AttemptStatus.RUNNING)
         .order_by(col(SQLiteJobAttempt.attempt_number).desc())
     ).first()
-
-
-def _default_reservation_for_resource(
-    resource_class: object,
-) -> JobResourceReservation | None:
-    if resource_class == resource_for_stage(JobStage.ENCODE):
-        return JobResourceReservation(exclusive=True)
-    return None
 
 
 def _scene_detection_completed(session: Session, *, job_id: int) -> bool:

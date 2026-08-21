@@ -5,7 +5,6 @@ import shlex
 import sys
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,15 +20,11 @@ from avarch.adapters.execution import (
     create_mux_temporary_path,
     execute_plan,
     parse_av1an_version,
-    parse_svt_av1_version,
-    parse_vapoursynth_version,
     preflight_execution,
     serialize_encoder_arguments,
-    should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser
-from avarch.application.progress import NoopProgressSink, RecordingProgressSink
 from avarch.domain.progress import ProgressPhase, ProgressSource
 from avarch.models.execution import (
     ExecutionInterruptedError,
@@ -38,7 +33,6 @@ from avarch.models.execution import (
     ResourceExhaustionError,
     ToolUnavailableError,
     UnsupportedToolVersionError,
-    WorkDirectoryConflictError,
 )
 from avarch.models.plan import (
     AudioPlan,
@@ -55,6 +49,7 @@ from avarch.models.plan import (
 )
 from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import DecodeSamplePolicy
+from tests.progress_support import RecordingProgressSink
 
 
 @pytest.mark.parametrize(
@@ -95,7 +90,7 @@ def test_build_av1an_command_uses_fixed_contract_order(tmp_path: Path) -> None:
         workers=6,
     )
 
-    command = build_av1an_command(spec, resume=True)
+    command = build_av1an_command(spec)
 
     assert command == [
         "av1an",
@@ -120,13 +115,11 @@ def test_build_av1an_command_uses_fixed_contract_order(tmp_path: Path) -> None:
         "--audio-params",
         "-an",
         "--no-defaults",
-        "--keep",
         "-n",
-        "--resume",
     ]
 
 
-def test_build_av1an_command_renders_native_auto_workers_as_zero(tmp_path: Path) -> None:
+def test_build_av1an_command_allows_explicit_auto_workers(tmp_path: Path) -> None:
     spec = Av1anCommandSpec(
         input_path=tmp_path / "movie.vpy",
         video_output_path=tmp_path / "video-only.mkv",
@@ -137,9 +130,9 @@ def test_build_av1an_command_renders_native_auto_workers_as_zero(tmp_path: Path)
         workers="auto",
     )
 
-    command = build_av1an_command(spec, resume=False)
+    command = build_av1an_command(spec)
 
-    assert command[command.index("--workers") + 1] == "0"
+    assert "--workers" not in command
     assert "--cache-mode" not in command
 
 
@@ -171,65 +164,13 @@ def test_run_process_classifies_sigkill_with_oom_evidence(tmp_path: Path) -> Non
         )
 
 
-def test_tool_version_parsers_capture_exact_versions() -> None:
+def test_av1an_version_parser_captures_exact_version() -> None:
     assert parse_av1an_version("av1an 0.5.1\n") == "0.5.1"
-    assert parse_svt_av1_version("SVT-AV1 Encoder Lib v2.3.0\n") == "2.3.0"
-    assert parse_vapoursynth_version("VapourSynth Video Processing Library R70\n") == "70"
 
 
-@pytest.mark.parametrize(
-    ("parser", "output"),
-    [
-        (parse_av1an_version, "av1an development build"),
-        (parse_svt_av1_version, "SVT-AV1 unknown"),
-        (parse_vapoursynth_version, "vspipe version unavailable"),
-    ],
-)
-def test_tool_version_parsers_reject_unparseable_output(
-    parser: Callable[[str], str],
-    output: str,
-) -> None:
+def test_av1an_version_parser_rejects_unparseable_output() -> None:
     with pytest.raises(UnsupportedToolVersionError):
-        parser(output)
-
-
-def test_should_resume_av1an_requires_av1an_resume_manifests(tmp_path: Path) -> None:
-    spec = Av1anCommandSpec(
-        input_path=tmp_path / "movie.vpy",
-        video_output_path=tmp_path / "video-only.mkv",
-        temp_dir=tmp_path / "av1an",
-        working_directory=tmp_path,
-        encoder="svt-av1",
-        encoder_args=["--crf", "28"],
-        workers=6,
-    )
-
-    assert should_resume_av1an(spec) is False
-    spec.temp_dir.mkdir()
-    assert should_resume_av1an(spec) is False
-    (spec.temp_dir / "scenes.json").write_text("{}", encoding="utf-8")
-    assert should_resume_av1an(spec) is False
-    (spec.temp_dir / "chunks.json").write_text("{}", encoding="utf-8")
-    assert should_resume_av1an(spec) is False
-    (spec.temp_dir / "done.json").write_text("{}", encoding="utf-8")
-    assert should_resume_av1an(spec) is True
-
-
-def test_should_resume_av1an_rejects_file_temp_path(tmp_path: Path) -> None:
-    temp_path = tmp_path / "av1an"
-    temp_path.write_text("not a directory", encoding="utf-8")
-    spec = Av1anCommandSpec(
-        input_path=tmp_path / "movie.vpy",
-        video_output_path=tmp_path / "video-only.mkv",
-        temp_dir=temp_path,
-        working_directory=tmp_path,
-        encoder="svt-av1",
-        encoder_args=["--crf", "28"],
-        workers=6,
-    )
-
-    with pytest.raises(WorkDirectoryConflictError):
-        should_resume_av1an(spec)
+        parse_av1an_version("av1an development build")
 
 
 def test_build_ffmpeg_mux_command_maps_global_source_indexes(tmp_path: Path) -> None:
@@ -368,7 +309,22 @@ def test_execute_plan_accepts_progress_sink_without_requiring_adapter(
     plan = _sample_plan(tmp_path)
     assert execute_plan(plan) == "completed"
 
-    assert execute_plan(plan, progress_sink=NoopProgressSink()) == "already_complete"
+    assert execute_plan(plan, progress_sink=RecordingProgressSink()) == "already_complete"
+
+
+def test_execute_plan_discards_partial_av1an_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tools(tmp_path, monkeypatch)
+    plan = _sample_plan(tmp_path)
+    plan.av1an.temp_dir.mkdir(parents=True)
+    stale_chunk = plan.av1an.temp_dir / "chunks.json"
+    stale_chunk.write_text("stale", encoding="utf-8")
+
+    assert execute_plan(plan) == "completed"
+
+    assert not stale_chunk.exists()
 
 
 def test_execute_plan_reports_scene_detection_before_av1an_execution(
@@ -781,6 +737,7 @@ def _sample_plan(tmp_path: Path) -> TranscodePlan:
     final_output = work_dir / "movie.av1.mkv"
     return TranscodePlan(
         plan_hash="plan-hash",
+        semantic_hash="semantic-hash",
         input_path=source.resolve(),
         output_path=final_output,
         temp_dir=work_dir,
@@ -811,19 +768,15 @@ def _sample_plan(tmp_path: Path) -> TranscodePlan:
             source_stream_index=1,
             source_codec="aac",
             source_language="eng",
-            source_channels=6,
-            source_title="Main",
-            source_commentary=False,
             target_codec="libopus",
             target_bitrate="128k",
             target_channels=2,
         ),
         subtitles=SubtitlePlan(streams=[]),
         execution_identity=ExecutionIdentity(
-            av1an_contract_version=2,
+            av1an_contract_version=4,
             ffmpeg_mux_contract_version=1,
             av1an_version_family="0.5.x",
-            video_container="mkv",
             final_container="mkv",
             identity_hash="identity-hash",
         ),

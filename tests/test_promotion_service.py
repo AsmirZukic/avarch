@@ -52,18 +52,6 @@ def test_promotion_replaces_original_with_encoded_file(tmp_path: Path) -> None:
     assert not encoded.exists()
 
 
-def test_successful_promotion_removes_calibration_work_dir(tmp_path: Path) -> None:
-    config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
-    calibration_output = tmp_path / "work" / "calibration" / "key" / "candidate.mkv"
-    calibration_output.parent.mkdir(parents=True)
-    calibration_output.write_bytes(b"temporary calibration output")
-
-    result = asyncio.run(promote_job(job_id, config=config, mode=PromotionMode.REPLACE_ATOMIC))
-
-    assert result.promoted is True
-    assert not (tmp_path / "work" / "calibration").exists()
-
-
 def test_promotion_claim_records_promoting_progress(tmp_path: Path) -> None:
     config, job_id, _source, _encoded = _ready_job(tmp_path, output_bytes=b"encoded")
     engine = create_db_engine(config.database.url)
@@ -365,7 +353,7 @@ def _ready_job(
     *,
     output_bytes: bytes,
 ) -> tuple[AppConfig, int, Path, Path]:
-    database_path = tmp_path / "avarch.adapters.sqlite.db"
+    database_path = tmp_path / "avarch.db"
     config = AppConfig(database=DatabaseSettings(url=f"sqlite:///{database_path}"))
     engine = create_db_engine(config.database.url)
     create_db_schema(engine)
@@ -436,8 +424,6 @@ def _ready_job(
             device_id=source_snapshot.device_id,
             inode=source_snapshot.inode,
             fs_fingerprint=source_snapshot.fs_fingerprint,
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)
@@ -550,7 +536,6 @@ def _insert_active_target_lock(session: Session, *, target: Path, now: datetime)
             validated_output_fingerprint="output-fingerprint",
             validated_output_digest=None,
             staging_digest=None,
-            final_fingerprint=None,
             final_digest=None,
             journal_path=str(target.with_name("journal.json")),
             owner_token="other-owner",

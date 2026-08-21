@@ -14,11 +14,6 @@ from avarch.domain.progress import (
     ProgressUnit,
 )
 
-__all__ = [
-    "ProgressPersistenceError",
-    "SqliteProgressStore",
-]
-
 
 class ProgressPersistenceError(RuntimeError):
     pass

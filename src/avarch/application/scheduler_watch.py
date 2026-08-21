@@ -59,18 +59,13 @@ class SchedulerWatchLoop:
     max_consecutive_failures: int = 3
     stop_after_iterations: int | None = None
     resource_sampler: ResourceSampler | None = None
-    resource_policy: ResourceTelemetryPolicy = field(default_factory=ResourceTelemetryPolicy)
+    telemetry_policy: ResourceTelemetryPolicy = field(default_factory=ResourceTelemetryPolicy)
     resource_stale_after_seconds: int = 10
     key_source: KeySource | None = None
     watch_controller: WatchController | None = None
     watch_control_state: SchedulerWatchControlState = field(
         default_factory=SchedulerWatchControlState
     )
-    ctrl_c_stops_scheduler: bool = False
-    stop_when_scheduler_stops: bool = False
-    startup_grace_iterations: int = 20
-    _observed_scheduler_active: bool = field(default=False, init=False)
-    _stopped_iterations: int = field(default=0, init=False)
 
     async def run(self) -> None:
         iterations = 0
@@ -92,8 +87,6 @@ class SchedulerWatchLoop:
                     snapshot = self.watch_control_state.apply_to_snapshot(snapshot)
                     self.sink.render(self.renderer(snapshot, width))
                     if should_stop:
-                        return
-                    if self._scheduler_finished(snapshot):
                         return
                 except Exception as exc:
                     consecutive_failures += 1
@@ -117,7 +110,7 @@ class SchedulerWatchLoop:
             self.resource_sampler,
             clock=lambda: snapshot.captured_at,
         )
-        sample = apply_resource_health(sample, policy=self.resource_policy)
+        sample = apply_resource_health(sample, policy=self.telemetry_policy)
         return snapshot.model_copy(
             update={
                 "resources": resource_telemetry_summary(
@@ -147,15 +140,11 @@ class SchedulerWatchLoop:
             self.watch_controller.detach()
             return True
         if key == KEY_CTRL_C:
-            if self.ctrl_c_stops_scheduler:
-                action = self.watch_controller.stop(reason="owner dashboard")
-                self.watch_control_state.record_action(action)
-                return False
             self.watch_controller.detach()
             return True
         if key == KEY_PAUSE:
             if snapshot.scheduler.state == SchedulerRuntimeState.RUNNING:
-                action = self.watch_controller.pause(reason="watch")
+                action = self.watch_controller.pause()
                 self.watch_control_state.record_action(action)
             elif snapshot.scheduler.state == SchedulerRuntimeState.PAUSED:
                 action = self.watch_controller.resume()
@@ -184,25 +173,6 @@ class SchedulerWatchLoop:
             if action is not None:
                 self.watch_control_state.record_action(action)
         return False
-
-    def _scheduler_finished(self, snapshot: SchedulerSnapshot) -> bool:
-        if not self.stop_when_scheduler_stops:
-            return False
-        if snapshot.scheduler.state in {
-            SchedulerRuntimeState.RUNNING,
-            SchedulerRuntimeState.PAUSED,
-            SchedulerRuntimeState.DRAINING,
-            SchedulerRuntimeState.STOPPING,
-        }:
-            self._observed_scheduler_active = True
-            self._stopped_iterations = 0
-            return False
-        if snapshot.scheduler.state != SchedulerRuntimeState.STOPPED:
-            return False
-        self._stopped_iterations += 1
-        return self._observed_scheduler_active or (
-            self._stopped_iterations >= self.startup_grace_iterations
-        )
 
 
 def validate_live_watch_terminal(*, stdout_is_tty: bool) -> None:

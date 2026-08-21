@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from avarch.adapters.sqlite.models import (
 )
 from avarch.adapters.sqlite.progress import SqliteProgressStore
 from avarch.adapters.sqlite.scheduler_snapshot import SqliteSchedulerSnapshotQuery
-from avarch.application.scheduler_blockers import JobEligibilityReason
+from avarch.application.scheduler_snapshot import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.domain.scheduler import SchedulerMode
@@ -345,21 +344,6 @@ def test_scheduler_snapshot_upcoming_jobs_keep_queue_order_when_capacity_is_full
             status=AttemptStatus.RUNNING,
             started_at=now - timedelta(minutes=4),
         )
-        running_attempt.command_json = json.dumps(
-            {
-                "av1an_argv": ["av1an", "-i", "source.mkv", "--workers", "4"],
-                "resource_decision": {
-                    "mode": "auto",
-                    "effective_workers": 4,
-                    "effective_svt_lp": 4,
-                    "reason": "reused_calibration",
-                    "confidence": 0.8,
-                    "algorithm_version": 1,
-                    "fallback": False,
-                    "evidence_count": 5,
-                },
-            }
-        )
         session.add(running_attempt)
         _job(
             session,
@@ -404,13 +388,6 @@ def test_scheduler_snapshot_upcoming_jobs_keep_queue_order_when_capacity_is_full
         "current_snapshot",
         "current_snapshot",
     ]
-    assert snapshot.capacity.av1an_workers_configured == 4
-    decision = snapshot.active_jobs[0].attempt.resource_decision  # type: ignore[union-attr]
-    assert decision is not None
-    assert decision.effective_workers == 4
-    assert decision.effective_svt_lp == 4
-    assert decision.reason == "reused_calibration"
-    assert decision.evidence_count == 5
 
 
 def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path: Path) -> None:
@@ -464,7 +441,6 @@ def test_scheduler_snapshot_alerts_for_stale_paused_and_draining_modes(tmp_path:
     assert draining.scheduler.state.value == "draining"
     assert [alert.code for alert in draining.alerts] == ["scheduler_draining"]
     assert stale.resources is None
-    assert stale.forecast is None
     assert stale.recent_events == ()
     assert stale.session is None
 
@@ -707,8 +683,6 @@ def _job(
         device_id=1,
         inode=len(path),
         fs_fingerprint=f"fingerprint-{path}",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media)

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
 
 from sqlmodel import Session
 
@@ -16,7 +14,6 @@ def store_probe_result(
     session: Session,
     *,
     media_file: MediaFile,
-    raw_probe: Mapping[str, Any],
     normalized_probe: NormalizedProbe,
     created_at: datetime,
 ) -> ProbeResult:
@@ -25,7 +22,6 @@ def store_probe_result(
 
     probe_result = ProbeResult(
         media_file_id=media_file.id,
-        ffprobe_json=canonical_json(raw_probe),
         normalized_json=canonical_json(normalized_probe),
         probe_hash=build_probe_hash(normalized_probe),
         source_fs_fingerprint=media_file.fs_fingerprint,

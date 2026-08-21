@@ -9,12 +9,6 @@ from avarch.adapters.sqlite.inventory import PathResolver, select_inventory_file
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus, MediaPlan
 from avarch.adapters.sqlite.planning import current_plan_for_file, find_plan
 from avarch.domain.jobs import JobStage, JobStatus, job_has_passed_validation
-from avarch.domain.scheduler import (
-    ActiveJob,
-    ClaimableJob,
-    ResourceCapacity,
-    select_launchable_jobs,
-)
 
 
 class QueueSelectionError(ValueError):
@@ -50,48 +44,6 @@ def queue_key_conflicts_with_other_job(
     return (
         session.exec(select(Job).where(Job.queue_key == queue_key, Job.id != job_id)).first()
         is not None
-    )
-
-
-def enqueue_candidate_media_files(
-    session: Session,
-    *,
-    media_file_ids: tuple[int, ...] | None,
-) -> list[MediaFile]:
-    statement = select(MediaFile).order_by(MediaFile.path)
-    if media_file_ids is not None:
-        statement = statement.where(col(MediaFile.id).in_(media_file_ids))
-    return list(session.exec(statement).all())
-
-
-def create_queue_job(
-    session: Session,
-    *,
-    media_file: MediaFile,
-    profile_name: str,
-    profile_hash: str,
-    queue_key: str,
-    probe_result_id: int | None,
-    probe_hash: str | None,
-    priority: int,
-    now: datetime,
-) -> None:
-    session.add(
-        Job(
-            media_file_id=_require_id(media_file),
-            profile_name=profile_name,
-            profile_hash=profile_hash,
-            source_fs_fingerprint=media_file.fs_fingerprint,
-            queue_key=queue_key,
-            probe_result_id=probe_result_id,
-            probe_hash=probe_hash,
-            status=JobStatus.QUEUED,
-            stage=JobStage.PLAN if probe_result_id is not None else JobStage.PROBE,
-            priority=priority,
-            attempts=0,
-            created_at=now,
-            updated_at=now,
-        )
     )
 
 
@@ -134,28 +86,6 @@ def claimable_jobs(session: Session, *, active_job_ids: set[int]) -> list[Job]:
             )
         )
     ]
-
-
-def select_launchable_queue_jobs(
-    session: Session,
-    *,
-    active_jobs: list[ActiveJob],
-    capacity: ResourceCapacity,
-    limit: int,
-) -> list[Job]:
-    active_job_ids = {job.job_id for job in active_jobs}
-    candidates = claimable_jobs(session, active_job_ids=active_job_ids)
-    jobs_by_id = {job.id: job for job in candidates if job.id is not None}
-    selected = select_launchable_jobs(
-        (
-            ClaimableJob(job_id=job.id, stage=job.stage)
-            for job in candidates
-            if job.id is not None
-        ),
-        active_jobs=active_jobs,
-        capacity=capacity,
-    )
-    return [jobs_by_id[job.job_id] for job in selected[:limit] if job.job_id in jobs_by_id]
 
 
 def select_queue_jobs(
@@ -299,10 +229,3 @@ def _status_value(status: MediaFileStatus | str) -> str:
     if isinstance(status, MediaFileStatus):
         return status.value
     return status
-
-
-def _require_id(value: object) -> int:
-    identifier = getattr(value, "id", None)
-    if not isinstance(identifier, int):
-        raise QueueSelectionError("Expected a persisted row id.")
-    return identifier

@@ -12,27 +12,6 @@ from avarch.adapters.sqlite.probes import get_canonical_probe_result, store_prob
 from avarch.models.probe import NormalizedProbe
 
 
-def test_store_probe_result_persists_raw_json(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    media_file = _insert_media_file(engine)
-
-    with Session(engine) as session:
-        stored_media_file = session.get_one(MediaFile, media_file.id)
-        result = store_probe_result(
-            session,
-            media_file=stored_media_file,
-            raw_probe={"b": 1, "a": 2},
-            normalized_probe=NormalizedProbe(),
-            created_at=_now(),
-        )
-        session.commit()
-        session.refresh(result)
-
-        stored = session.get_one(ProbeResult, result.id)
-
-    assert stored.ffprobe_json == '{"a":2,"b":1}'
-
-
 def test_store_probe_result_persists_normalized_json(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     media_file = _insert_media_file(engine)
@@ -42,7 +21,6 @@ def test_store_probe_result_persists_normalized_json(tmp_path: Path) -> None:
         result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(container="matroska,webm"),
             created_at=_now(),
         )
@@ -61,7 +39,6 @@ def test_store_probe_result_persists_hash(tmp_path: Path) -> None:
         result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(),
             created_at=_now(),
         )
@@ -80,7 +57,6 @@ def test_successful_probe_stores_source_fs_fingerprint(tmp_path: Path) -> None:
         result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(),
             created_at=_now(),
         )
@@ -99,7 +75,6 @@ def test_successful_probe_sets_latest_probe_id(tmp_path: Path) -> None:
         result = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(),
             created_at=_now(),
         )
@@ -119,14 +94,12 @@ def test_second_successful_probe_replaces_latest_probe_pointer(tmp_path: Path) -
         first = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(duration_seconds=1.0),
             created_at=_now(),
         )
         second = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(duration_seconds=2.0),
             created_at=_now(),
         )
@@ -152,14 +125,12 @@ def test_previous_probe_result_remains_stored(tmp_path: Path) -> None:
         first = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(duration_seconds=1.0),
             created_at=_now(),
         )
         second = store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(duration_seconds=2.0),
             created_at=_now(),
         )
@@ -191,7 +162,6 @@ def test_canonical_probe_rejects_stale_source_fingerprint(tmp_path: Path) -> Non
         store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe={},
             normalized_probe=NormalizedProbe(),
             created_at=_now(),
         )
@@ -216,7 +186,6 @@ def test_canonical_probe_rejects_pointer_to_another_media_file(tmp_path: Path) -
         probe_result = store_probe_result(
             session,
             media_file=second,
-            raw_probe={},
             normalized_probe=NormalizedProbe(),
             created_at=_now(),
         )
@@ -233,7 +202,7 @@ def test_canonical_probe_rejects_pointer_to_another_media_file(tmp_path: Path) -
 
 
 def _engine(tmp_path: Path) -> Engine:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 
@@ -251,8 +220,6 @@ def _insert_media_file(
         device_id=3,
         inode=4,
         fs_fingerprint=fingerprint,
-        discovered_at=_now(),
-        last_seen_at=_now(),
         status=MediaFileStatus.PRESENT,
     )
     with Session(engine) as session:

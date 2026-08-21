@@ -124,9 +124,7 @@ def echo_job_progress_details(view: JobProgressView) -> None:
         typer.echo(f"  source:           {_source_label(view.source)}")
     if view.heartbeat_age is not None:
         suffix = " (stale)" if view.heartbeat_stale else ""
-        typer.echo(
-            f"  last heartbeat:   {format_compact_duration(view.heartbeat_age)} ago{suffix}"
-        )
+        typer.echo(f"  last heartbeat:   {format_compact_duration(view.heartbeat_age)} ago{suffix}")
     if view.advance_age is not None:
         suffix = " (not advancing)" if view.not_advancing else ""
         typer.echo(f"  last advance:     {format_compact_duration(view.advance_age)} ago{suffix}")

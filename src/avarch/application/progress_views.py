@@ -95,7 +95,7 @@ def job_progress_view(
             advanced_at=None,
         )
 
-    timing_now = _compatible_now(snapshot.observed_at, now)
+    timing_now = _align_timezone(snapshot.observed_at, now)
     timing = derive_progress_timing(
         snapshot,
         now=timing_now,
@@ -151,7 +151,7 @@ def _eta_from_snapshot(snapshot: ProgressSnapshot) -> timedelta | None:
     return timedelta(seconds=remaining / rate)
 
 
-def _compatible_now(reference: datetime, now: datetime) -> datetime:
+def _align_timezone(reference: datetime, now: datetime) -> datetime:
     if reference.tzinfo is None and now.tzinfo is not None:
         return now.replace(tzinfo=None)
     if reference.tzinfo is not None and now.tzinfo is None:

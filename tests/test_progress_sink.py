@@ -1,24 +1,7 @@
 from datetime import UTC, datetime
 
-from avarch.application.progress import (
-    NoopProgressSink,
-    RecordingProgressSink,
-    publish_progress_safely,
-)
+from avarch.application.progress import publish_progress_safely
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
-
-
-def test_noop_progress_sink_accepts_snapshots() -> None:
-    NoopProgressSink().publish(_snapshot())
-
-
-def test_recording_progress_sink_records_snapshots() -> None:
-    sink = RecordingProgressSink()
-    snapshot = _snapshot()
-
-    sink.publish(snapshot)
-
-    assert sink.snapshots == (snapshot,)
 
 
 def test_publish_progress_safely_swallows_sink_failure() -> None:

@@ -9,7 +9,5 @@ Treat that document as the adopted architectural contract. Keep behavior-preserv
 small and test-backed, preserve public CLI behavior unless explicitly changed, and do not bypass the
 central job state model as it is introduced.
 
-When porting behavior to the new architecture, migrate callers and delete the replaced path in the
-same green slice whenever possible. Do not leave duplicate modules, re-exports, compatibility
-facades, or old workflow paths behind after their callers have moved; temporary shims need a clear
-next-slice removal point.
+When moving behavior, update every caller and delete the replaced path in the same green slice.
+Keep only one reachable implementation for each workflow.

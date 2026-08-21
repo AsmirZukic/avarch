@@ -179,7 +179,7 @@ def test_progress_store_round_trips_structured_metrics(tmp_path: Path) -> None:
 
 
 def test_save_snapshot_rejects_nonexistent_attempt(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     observed = datetime(2026, 7, 1, 12, tzinfo=UTC)
 
@@ -570,7 +570,7 @@ def test_retry_after_terminal_progress_keeps_previous_attempt_progress(
 
 
 def _stored_running_attempt(tmp_path: Path) -> tuple[Engine, int, int]:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, 11, tzinfo=UTC)
 
@@ -582,8 +582,6 @@ def _stored_running_attempt(tmp_path: Path) -> tuple[Engine, int, int]:
             device_id=789,
             inode=101112,
             fs_fingerprint="source-fs",
-            discovered_at=now,
-            last_seen_at=now,
             status=MediaFileStatus.PRESENT,
         )
         session.add(media_file)
@@ -594,7 +592,6 @@ def _stored_running_attempt(tmp_path: Path) -> tuple[Engine, int, int]:
 
         probe = ProbeResult(
             media_file_id=media_file_id,
-            ffprobe_json="{}",
             normalized_json="{}",
             probe_hash="probe-hash",
             source_fs_fingerprint=media_file.fs_fingerprint,

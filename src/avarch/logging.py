@@ -63,8 +63,6 @@ def configure_logging(level: str = "INFO", log_format: str = "console") -> None:
 
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
-    logging.getLogger("alembic").setLevel(logging.WARNING)
-
     for handler in root_logger.handlers:
         handler.setFormatter(formatter)
         handler.setLevel(numeric_level)

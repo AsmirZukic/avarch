@@ -64,14 +64,12 @@ def test_probe_smoke_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert "Container: matroska,webm" in probe_result.output
     assert _probe_result_count(config_path) == 1
     first_probe = _latest_probe_result(config_path)
-    assert '"format"' in first_probe.ffprobe_json
     assert '"container":"matroska,webm"' in first_probe.normalized_json
     assert first_probe.probe_hash in probe_result.output
 
     after = _media_file(config_path, media_file)
     assert after.status == before.status
     assert after.fs_fingerprint == before.fs_fingerprint
-    assert after.last_seen_at == before.last_seen_at
 
     inspect_result = runner.invoke(app, ["files", "show", "--file", str(media_file)])
     assert inspect_result.exit_code == 0

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import Session
@@ -22,7 +21,6 @@ class SqliteInventoryScanWorkflow:
         root: Path,
         config: AppConfig,
         workspace_root: Path | None,
-        scanned_at: datetime,
     ) -> InventoryScanResult:
         try:
             snapshots = scan_root(
@@ -35,7 +33,6 @@ class SqliteInventoryScanWorkflow:
                     session,
                     root=root,
                     snapshots=snapshots,
-                    scanned_at=scanned_at,
                     workspace_root=workspace_root,
                 )
         except ScanError as exc:

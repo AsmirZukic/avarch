@@ -8,7 +8,6 @@ from sqlmodel import Session, select
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import SchedulerSession
 from avarch.adapters.sqlite.scheduler_sessions import (
-    current_scheduler_session,
     end_scheduler_session,
     start_scheduler_session,
 )
@@ -136,12 +135,9 @@ def test_next_scheduler_start_marks_stale_open_session_interrupted(tmp_path: Pat
     with Session(engine) as session:
         stale_stored = session.get(SchedulerSession, stale_id)
         fresh_stored = session.get(SchedulerSession, fresh_id)
-        current = current_scheduler_session(session, workspace_id="workspace-1")
 
     assert stale_stored is not None
     assert stale_stored.end_reason == "interrupted"
     assert stale_stored.ended_at == (now + timedelta(minutes=1)).replace(tzinfo=None)
     assert fresh_stored is not None
     assert fresh_stored.ended_at is None
-    assert current is not None
-    assert current.id == fresh_id

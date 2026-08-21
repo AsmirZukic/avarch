@@ -21,7 +21,6 @@ source = "vapoursynth"
 
 [av1an]
 encoder = "svt-av1"
-workers = "auto"
 video_args = "--preset 6 --crf 28 --keyint 240"
 
 [audio]

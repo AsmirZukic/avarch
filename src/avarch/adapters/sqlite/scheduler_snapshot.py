@@ -21,17 +21,15 @@ from avarch.adapters.sqlite.models import (
 )
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.scheduler_state import lease_active
-from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.application.scheduler_snapshot import (
     ActiveJobSummary,
     AttemptProgressSummary,
     BlockedJobSummary,
     CapacitySummary,
-    EncodeResourceDecisionSummary,
+    JobEligibilityReason,
     LifecycleEventSummary,
     PipelineSummary,
     SchedulerAlert,
-    SchedulerAlertSeverity,
     SchedulerRuntimeState,
     SchedulerRuntimeSummary,
     SchedulerSessionRunSummary,
@@ -87,7 +85,6 @@ class SqliteSchedulerSnapshotQuery:
             recent_events=self._recent_events(),
             alerts=self._alerts(now=captured_at),
             resources=None,
-            forecast=None,
         )
 
     def _scheduler_summary(self, *, now: datetime) -> SchedulerRuntimeSummary:
@@ -124,11 +121,6 @@ class SqliteSchedulerSnapshotQuery:
         return PipelineSummary(
             queued=counts[JobStatus.QUEUED],
             active=sum(counts[status] for status in _ACTIVE_STATUSES),
-            encoded=counts[JobStatus.ENCODED],
-            validating=counts[JobStatus.VALIDATING],
-            ready_to_promote=counts[JobStatus.READY_TO_PROMOTE],
-            promoting=counts[JobStatus.PROMOTING],
-            cleaning=counts[JobStatus.CLEANING],
             completed=counts[JobStatus.PROMOTED],
             failed=counts[JobStatus.FAILED],
             validation_failed=counts[JobStatus.VALIDATION_FAILED],
@@ -149,25 +141,9 @@ class SqliteSchedulerSnapshotQuery:
             av1an_active=state.capacity_av1an_active or 0,
             file_ops=state.capacity_file_ops or 0,
             file_ops_active=state.capacity_file_ops_active or 0,
-            av1an_workers_configured=self._active_av1an_workers_configured(),
             observed_at=state.capacity_observed_at,
             stale=stale,
         )
-
-    def _active_av1an_workers_configured(self) -> int | None:
-        rows = self._session.exec(
-            select(JobAttempt.command_json)
-            .where(col(JobAttempt.stage).in_([JobStage.SCENE_DETECT, JobStage.ENCODE]))
-            .where(JobAttempt.status == AttemptStatus.RUNNING)
-        ).all()
-        workers = tuple(
-            worker_count
-            for command_json in rows
-            if (worker_count := _av1an_workers_from_command(command_json)) is not None
-        )
-        if not workers:
-            return None
-        return sum(workers)
 
     def _active_jobs(self, *, captured_at: datetime) -> tuple[ActiveJobSummary, ...]:
         rows = list(
@@ -181,11 +157,7 @@ class SqliteSchedulerSnapshotQuery:
         job_ids = tuple(job.id for job, _media in rows if job.id is not None)
         attempts_by_job = self._latest_attempts_by_job(job_ids)
         progress_by_attempt = self._progress_by_attempt(
-            tuple(
-                attempt.id
-                for attempt in attempts_by_job.values()
-                if attempt.id is not None
-            )
+            tuple(attempt.id for attempt in attempts_by_job.values() if attempt.id is not None)
         )
         return tuple(
             _active_job_summary(
@@ -219,7 +191,6 @@ class SqliteSchedulerSnapshotQuery:
                 stage=JobStage(job.stage),
                 status=JobStatus(job.status),
                 priority=job.priority,
-                queued_at=job.created_at,
                 selection_position=index,
                 selection_confidence="current_snapshot",
             )
@@ -283,9 +254,7 @@ class SqliteSchedulerSnapshotQuery:
             select(Job, MediaFile)
             .join(MediaFile, cast(ColumnElement[bool], MediaFile.id == Job.media_file_id))
             .where(
-                col(Job.status).not_in(
-                    [JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED]
-                )
+                col(Job.status).not_in([JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED])
             )
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
             .limit(20)
@@ -317,28 +286,22 @@ class SqliteSchedulerSnapshotQuery:
         if state.runner_id is not None and not lease_active(state, now=now):
             alerts.append(
                 SchedulerAlert(
-                    severity=SchedulerAlertSeverity.WARNING,
                     code="stale_scheduler_lease",
                     message="Scheduler lease is stale.",
-                    observed_at=now,
                 )
             )
         if mode == SchedulerMode.PAUSED:
             alerts.append(
                 SchedulerAlert(
-                    severity=SchedulerAlertSeverity.INFO,
                     code="scheduler_paused",
                     message="Scheduler is paused.",
-                    observed_at=now,
                 )
             )
         if mode == SchedulerMode.DRAINING:
             alerts.append(
                 SchedulerAlert(
-                    severity=SchedulerAlertSeverity.INFO,
                     code="scheduler_draining",
                     message="Scheduler is draining.",
-                    observed_at=now,
                 )
             )
         return tuple(alerts)
@@ -371,7 +334,9 @@ class SqliteSchedulerSnapshotQuery:
         return {
             progress.attempt_id: progress
             for progress in self._session.exec(
-                select(JobAttemptProgress).where(col(JobAttemptProgress.attempt_id).in_(attempt_ids))
+                select(JobAttemptProgress).where(
+                    col(JobAttemptProgress.attempt_id).in_(attempt_ids)
+                )
             ).all()
         }
 
@@ -404,8 +369,6 @@ def _active_job_summary(
         status=JobStatus(job.status),
         stage=job_stage,
         priority=job.priority,
-        queued_at=job.created_at,
-        started_at=job.started_at,
         attempt=attempt_progress,
         workflow_steps=project_workflow_steps(
             job_status=JobStatus(job.status),
@@ -444,7 +407,6 @@ def _session_run_summary(session: SchedulerSession) -> SchedulerSessionRunSummar
 
 def _lifecycle_event_summary(event: JobEvent) -> LifecycleEventSummary:
     return LifecycleEventSummary(
-        event_id=_required_id(event.id),
         job_id=event.job_id,
         attempt_id=event.attempt_id,
         scheduler_session_id=event.scheduler_session_id,
@@ -487,34 +449,6 @@ def _blocked_details(
     if reason == JobEligibilityReason.PLAN_MISSING:
         return {"stage": JobStage(job.stage).value}
     return {}
-
-
-def _av1an_workers_from_command(command_json: str | None) -> int | None:
-    if command_json is None:
-        return None
-    try:
-        value: object = json.loads(command_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    payload = cast(dict[str, object], value)
-    argv = payload.get("av1an_argv")
-    if not isinstance(argv, list):
-        return None
-    args = [str(arg) for arg in cast(list[object], argv)]
-    try:
-        index = args.index("--workers")
-    except ValueError:
-        return None
-    next_index = index + 1
-    if next_index >= len(args):
-        return None
-    try:
-        workers = int(args[next_index])
-    except ValueError:
-        return None
-    return workers if workers > 0 else None
 
 
 def _attempt_progress_summary(
@@ -567,86 +501,7 @@ def _attempt_progress_summary(
             and last_update_age_seconds > PROGRESS_STALE_AFTER_SECONDS
         ),
         last_update_age_seconds=last_update_age_seconds,
-        resource_decision=_resource_decision_from_command(attempt.command_json),
     )
-
-
-def _resource_decision_from_command(
-    command_json: str | None,
-) -> EncodeResourceDecisionSummary | None:
-    payload = _command_payload(command_json)
-    if payload is None:
-        return None
-    decision = payload.get("resource_decision")
-    if not isinstance(decision, dict):
-        return None
-    values = cast(dict[str, object], decision)
-    try:
-        workers = _positive_int_or_text(values["effective_workers"])
-        svt_lp = _positive_int_or_text(values["effective_svt_lp"])
-        confidence = _finite_float(values["confidence"])
-        algorithm_version = _positive_int(values["algorithm_version"])
-        fallback = values["fallback"]
-        evidence_count = values.get("evidence_count")
-        if not isinstance(fallback, bool):
-            return None
-        if evidence_count is not None and (
-            isinstance(evidence_count, bool)
-            or not isinstance(evidence_count, int)
-            or evidence_count < 0
-        ):
-            return None
-        return EncodeResourceDecisionSummary(
-            mode=str(values["mode"]),
-            effective_workers=workers,
-            effective_svt_lp=svt_lp,
-            reason=str(values["reason"]),
-            confidence=confidence,
-            algorithm_version=algorithm_version,
-            fallback=fallback,
-            evidence_count=evidence_count,
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _command_payload(command_json: str | None) -> dict[str, object] | None:
-    if command_json is None:
-        return None
-    try:
-        value: object = json.loads(command_json)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(value, dict):
-        return None
-    return cast(dict[str, object], value)
-
-
-def _positive_int_or_text(value: object) -> int | str:
-    if isinstance(value, bool):
-        raise TypeError
-    if isinstance(value, int):
-        if value <= 0:
-            raise ValueError
-        return value
-    if isinstance(value, str) and value:
-        return value
-    raise TypeError
-
-
-def _positive_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise TypeError
-    return value
-
-
-def _finite_float(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError
-    result = float(value)
-    if not 0 <= result <= 1:
-        raise ValueError
-    return result
 
 
 def _attempt_phase(

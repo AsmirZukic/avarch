@@ -1,4 +1,4 @@
 vulnerabilities:
   - id: CVE-2026-50219
-    expired_at: 2026-07-23T00:00:00Z
+    expired_at: 2026-08-23T00:00:00Z
     statement: Debian has not published an Expat 2.8.2-equivalent package for Trixie; see security/exceptions.yml.

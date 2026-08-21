@@ -251,7 +251,6 @@ def _normalize_attachment(stream: Mapping[str, Any]) -> Attachment:
         index=_required_stream_index(stream),
         codec=_clean_text(stream.get("codec_name")),
         filename=_clean_text(tags.get("filename")),
-        mimetype=_clean_text(tags.get("mimetype")),
     )
 
 
@@ -262,7 +261,6 @@ def _normalize_chapter(chapter: Mapping[str, Any]) -> Chapter:
     return Chapter(
         id=chapter_id,
         start_seconds=_parse_optional_float(chapter.get("start_time"), allow_negative=False),
-        end_seconds=_parse_optional_float(chapter.get("end_time"), allow_negative=False),
         title=_clean_text(_mapping_or_empty(chapter.get("tags")).get("title")),
     )
 

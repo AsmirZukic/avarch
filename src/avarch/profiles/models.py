@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, m
 
 from avarch.domain.encoder_args import (
     EncoderArgumentError,
-    normalize_svt_operational_args,
+    apply_svt_parallelism,
     parse_encoder_args,
 )
 
@@ -43,39 +43,32 @@ class ProfileAv1anSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     encoder: Literal["svt-av1"]
-    workers: StrictInt | Literal["auto"] = "auto"
+    workers: StrictInt | Literal["auto"] = 1
     video_args: str
-    svt_lp: StrictInt | Literal["native"] | None = None
+    svt_lp: StrictInt | Literal["native"] = "native"
 
     @field_validator("workers")
     @classmethod
     def validate_workers(cls, value: int | Literal["auto"]) -> int | Literal["auto"]:
-        if value == "auto":
-            return value
-        if value <= 0:
+        if value != "auto" and value <= 0:
             raise ValueError("workers must be positive or 'auto'")
         return value
 
     @field_validator("svt_lp")
     @classmethod
-    def validate_svt_lp(
-        cls,
-        value: int | Literal["native"] | None,
-    ) -> int | Literal["native"] | None:
-        if value is None or value == "native":
-            return value
-        if value <= 0:
+    def validate_svt_lp(cls, value: int | Literal["native"]) -> int | Literal["native"]:
+        if value != "native" and value <= 0:
             raise ValueError("svt_lp must be positive or 'native'")
         return value
 
     @model_validator(mode="after")
-    def validate_svt_operational_ownership(self) -> ProfileAv1anSettings:
+    def validate_parallelism_ownership(self) -> ProfileAv1anSettings:
         try:
-            normalize_svt_operational_args(
+            apply_svt_parallelism(
                 parse_encoder_args(self.video_args),
-                structured_svt_lp=self.svt_lp,
+                svt_lp=self.svt_lp,
             )
-        except (EncoderArgumentError, ValueError) as exc:
+        except EncoderArgumentError as exc:
             raise ValueError(str(exc)) from exc
         return self
 

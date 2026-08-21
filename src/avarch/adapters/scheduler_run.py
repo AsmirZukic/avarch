@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlmodel import Session
 
 from avarch.adapters.execution import pause_managed_processes, resume_managed_processes
-from avarch.adapters.job_preparation import encoded_output_exists, load_job_plan, require_id
+from avarch.adapters.job_preparation import encoded_output_exists, require_id
 from avarch.adapters.scheduler_workers import (
     execute_cleanup_job,
     execute_encode_job,
@@ -22,19 +22,13 @@ from avarch.adapters.sqlite import scheduler_sessions as scheduler_session_adapt
 from avarch.adapters.sqlite import scheduler_state as scheduler_state_adapter
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import interrupt_running_job
-from avarch.adapters.sqlite.models import Job
-from avarch.adapters.sqlite.performance import compatible_performance_observations
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.scheduler_state import (
     active_jobs_with_cancel_requested,
     get_or_create_scheduler_state,
     terminal_job_counts,
 )
-from avarch.application.environment_signature import build_execution_environment_signature
 from avarch.application.promotion import PromotionWorkflow
-from avarch.application.resource_decision import ResourceDecisionService
-from avarch.application.resource_demand import ResourceDemandEstimator
-from avarch.application.resources import ResourceSnapshot, effective_resource_snapshot
 from avarch.application.scheduler_run import (
     SchedulerAlreadyRunningError,
     SchedulerCapacityUsage,
@@ -44,17 +38,9 @@ from avarch.application.scheduler_run import (
     SchedulerRunStore,
     SchedulerTerminalCounts,
 )
-from avarch.application.workload_signature import build_workload_signature
 from avarch.config import AppConfig
-from avarch.domain.encoder_args import svt_lp_definitions
-from avarch.domain.jobs import JobStage, ResourceClass
-from avarch.domain.resource_policy import parse_resource_intent
-from avarch.domain.scheduler import (
-    ClaimableJob,
-    JobResourceReservation,
-    SchedulerMode,
-    resource_for_stage,
-)
+from avarch.domain.jobs import JobStage
+from avarch.domain.scheduler import ClaimableJob, SchedulerMode
 
 
 class SchedulerRuntimeAdapter:
@@ -177,16 +163,10 @@ class SqliteSchedulerRunStore:
 
     def claimable_jobs(self, *, active_job_ids: set[int]) -> list[ClaimableJob]:
         with Session(self._engine) as session:
-            snapshot = effective_resource_snapshot()
             return [
                 ClaimableJob(
                     job_id=require_id(job),
                     stage=job.stage,
-                    reservation=_claimable_reservation(
-                        session=session,
-                        job=job,
-                        snapshot=snapshot,
-                    ),
                 )
                 for job in claimable_jobs(session, active_job_ids=active_job_ids)
                 if self._claimable_stages is None or job.stage in self._claimable_stages
@@ -236,7 +216,6 @@ class SchedulerWorkerAdapter:
         job_id: int,
         runner_id: str,
         config: AppConfig,
-        reservation: JobResourceReservation | None = None,
     ) -> None:
         if stage == JobStage.PROMOTE:
             await execute_promotion_job(
@@ -257,7 +236,6 @@ class SchedulerWorkerAdapter:
                 job_id=job_id,
                 runner_id=runner_id,
                 config=config,
-                reservation=reservation,
             )
             return
         await worker(job_id=job_id, runner_id=runner_id, config=config)
@@ -280,70 +258,3 @@ def _capacity_usage(
         file_ops=capacity.file_ops,
         file_ops_active=capacity.file_ops_active,
     )
-
-
-def _claimable_reservation(
-    *,
-    session: Session,
-    job: Job,
-    snapshot: ResourceSnapshot,
-) -> JobResourceReservation | None:
-    stage = JobStage(job.stage)
-    if resource_for_stage(stage) is ResourceClass.HEAVY_AV1AN:
-        return _heavy_job_reservation(session=session, job=job, snapshot=snapshot)
-    return None
-
-
-def _heavy_job_reservation(
-    *,
-    session: Session,
-    job: Job,
-    snapshot: ResourceSnapshot,
-) -> JobResourceReservation:
-    try:
-        plan = load_job_plan(job)
-        decision = ResourceDecisionService().resolve(
-            intent=parse_resource_intent(
-                workers=plan.av1an.workers,
-                svt_lp=_svt_lp_from_encoder_args(plan.av1an.encoder_args),
-            ),
-            snapshot=snapshot,
-        )
-        tool_versions = {
-            "av1an_version_family": plan.execution_identity.av1an_version_family,
-            "vapoursynth_version": plan.vapoursynth.vapoursynth_version,
-        }
-        environment_signature = build_execution_environment_signature(
-            snapshot=snapshot,
-            tool_versions=tool_versions,
-        )
-        workload_signature = build_workload_signature(plan)
-        observations = compatible_performance_observations(
-            session,
-            environment_signature_hash=environment_signature.signature_hash,
-            workload_signature_hash=workload_signature.signature_hash,
-            semantic_hash=plan.semantic_hash,
-            limit=10,
-        )
-        demand = ResourceDemandEstimator().estimate(
-            decision=decision,
-            observations=observations,
-        )
-    except Exception:
-        return JobResourceReservation(exclusive=True)
-    if demand.requires_exclusive_heavy_job:
-        return JobResourceReservation(exclusive=True)
-    if demand.cpu.maximum is None or demand.memory_bytes.maximum is None:
-        return JobResourceReservation(exclusive=True)
-    return JobResourceReservation(
-        cpu=float(demand.cpu.maximum),
-        memory_bytes=int(demand.memory_bytes.maximum),
-        exclusive=False,
-    )
-
-
-def _svt_lp_from_encoder_args(arguments: list[str]) -> int | None:
-    definitions = svt_lp_definitions(arguments)
-    if len(definitions) != 1:
-        return None
-    return definitions[0].value

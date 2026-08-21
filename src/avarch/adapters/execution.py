@@ -121,13 +121,6 @@ class ProcessOutputRecord:
     text: str
 
 
-@dataclass(frozen=True, slots=True)
-class EncodingToolchainVersions:
-    av1an: str
-    svt_av1: str
-    vapoursynth: str
-
-
 ProcessOutputCallback = Callable[[ProcessOutputRecord], None]
 
 
@@ -143,25 +136,7 @@ def serialize_encoder_arguments(arguments: Sequence[str]) -> str:
     return shlex.join(arguments)
 
 
-def should_resume_av1an(spec: Av1anCommandSpec) -> bool:
-    if spec.resume_policy == "never":
-        return False
-    if not spec.temp_dir.exists():
-        return False
-    if not spec.temp_dir.is_dir():
-        raise WorkDirectoryConflictError(f"Av1an temp path is not a directory: {spec.temp_dir}")
-    try:
-        return all((spec.temp_dir / name).is_file() for name in ("chunks.json", "done.json"))
-    except PermissionError as exc:
-        raise WorkDirectoryConflictError(
-            f"Unable to inspect Av1an temp directory: {spec.temp_dir}"
-        ) from exc
-
-
-def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -> list[str]:
-    if resume is None:
-        resume = should_resume_av1an(spec)
-
+def build_av1an_command(spec: Av1anCommandSpec) -> list[str]:
     command = [
         spec.executable,
         "-i",
@@ -174,29 +149,24 @@ def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -
         spec.encoder,
         "--video-params",
         serialize_encoder_arguments(spec.encoder_args),
-        "--workers",
-        _render_av1an_workers(spec.workers),
-        "--pix-format",
-        spec.pixel_format,
-        "--concat",
-        spec.concat_method,
-        "--max-tries",
-        str(spec.max_tries),
-        "--audio-params",
-        "-an",
-        "--no-defaults",
-        "--keep",
-        "-n",
     ]
-    if resume:
-        command.append("--resume")
+    if spec.workers != "auto":
+        command.extend(["--workers", str(spec.workers)])
+    command.extend(
+        [
+            "--pix-format",
+            spec.pixel_format,
+            "--concat",
+            spec.concat_method,
+            "--max-tries",
+            str(spec.max_tries),
+            "--audio-params",
+            "-an",
+            "--no-defaults",
+            "-n",
+        ]
+    )
     return command
-
-
-def _render_av1an_workers(workers: int | Literal["auto"]) -> str:
-    if workers == "auto":
-        return "0"
-    return str(workers)
 
 
 def build_ffmpeg_mux_command(spec: FfmpegMuxSpec, temporary_output: Path) -> list[str]:
@@ -296,6 +266,7 @@ def execute_plan(
                 f"{plan.av1an.video_output_path}"
             )
         plan.av1an.working_directory.mkdir(parents=True, exist_ok=True)
+        _reset_av1an_temp_dir(plan.av1an.temp_dir)
         command = build_av1an_command(plan.av1an)
         _publish_execution_phase(progress_sink, ProgressPhase.SCENE_DETECTION)
         av1an_progress = _make_av1an_progress_collector(plan, progress_sink)
@@ -367,6 +338,14 @@ def execute_plan(
         final_output_size=final_output_size,
     )
     return "completed"
+
+
+def _reset_av1an_temp_dir(temp_dir: Path) -> None:
+    if not temp_dir.exists():
+        return
+    if not temp_dir.is_dir():
+        raise WorkDirectoryConflictError(f"Av1an temp path is not a directory: {temp_dir}")
+    shutil.rmtree(temp_dir)
 
 
 def _publish_execution_phase(
@@ -614,50 +593,11 @@ def _tool_version_output(
     return output
 
 
-def capture_encoding_toolchain_versions(
-    *,
-    av1an_executable: str = "av1an",
-    svt_av1_executable: str = "SvtAv1EncApp",
-    vspipe_executable: str = "vspipe",
-) -> EncodingToolchainVersions:
-    return EncodingToolchainVersions(
-        av1an=parse_av1an_version(_tool_version_output(av1an_executable)),
-        svt_av1=parse_svt_av1_version(_tool_version_output(svt_av1_executable)),
-        vapoursynth=parse_vapoursynth_version(
-            _tool_version_output(vspipe_executable, version_args=("--version",))
-        ),
-    )
-
-
 def parse_av1an_version(output: str) -> str:
     match = re.search(r"\bav1an\D+(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b", output, re.IGNORECASE)
     if match is None:
         raise UnsupportedToolVersionError("Unable to detect Av1an version.")
     return match.group(1)
-
-
-def parse_svt_av1_version(output: str) -> str:
-    patterns = (
-        r"\bSVT[- ]AV1(?: Encoder)?(?: Lib)?\s+v?(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b",
-        r"\bSvtAv1EncApp(?: Encoder)?\s+v?(\d+\.\d+\.\d+(?:[-+][\w.\-]+)?)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match is not None:
-            return match.group(1)
-    raise UnsupportedToolVersionError("Unable to detect SVT-AV1 version.")
-
-
-def parse_vapoursynth_version(output: str) -> str:
-    patterns = (
-        r"\bVapourSynth(?: Video Processing Library)?\s+R?(\d+(?:\.\d+){0,2})\b",
-        r"\bVapourSynth\s+API\s+(\d+)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match is not None:
-            return match.group(1)
-    raise UnsupportedToolVersionError("Unable to detect VapourSynth version.")
 
 
 def _run_process(
@@ -704,9 +644,7 @@ def _run_process(
             cancellation_token=cancellation_token,
             stderr_tty=stderr_tty,
             process_observer=(
-                process_observer
-                if process_observer is not None
-                else _default_process_observer()
+                process_observer if process_observer is not None else _default_process_observer()
             ),
         )
     finally:
@@ -1223,7 +1161,6 @@ def _write_av1an_marker(
         av1an_spec_hash=av1an_spec_hash,
         video_output_path=plan.av1an.video_output_path,
         video_output_size=video_output_size,
-        completed_at=_utc_now(),
     )
     _write_json_atomically(plan.runtime.av1an_stage_marker, marker)
 
@@ -1244,7 +1181,6 @@ def _write_encode_receipt(
         video_output_size=video_output_size,
         final_output_path=plan.output_path,
         final_output_size=final_output_size,
-        completed_at=_utc_now(),
     )
     _write_json_atomically(plan.runtime.encode_result, receipt)
 

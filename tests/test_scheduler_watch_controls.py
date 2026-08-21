@@ -30,18 +30,6 @@ def test_one_active_job_is_selected_automatically() -> None:
     assert state.selected_job_id == 42
 
 
-def test_multiple_active_jobs_require_explicit_selection() -> None:
-    state = SchedulerWatchControlState()
-    snapshot = _snapshot(active_jobs=(_active_job(42), _active_job(43)))
-
-    state.refresh(snapshot)
-    assert state.selected_job_id is None
-    selection = state.select_job(job_id=43, snapshot=snapshot)
-
-    assert selection.action == "selected"
-    assert state.selected_job_id == 43
-
-
 def test_cancel_key_opens_confirmation_without_cancelling_immediately() -> None:
     state = SchedulerWatchControlState()
     controller = _Controller()
@@ -54,16 +42,13 @@ def test_cancel_key_opens_confirmation_without_cancelling_immediately() -> None:
     assert controller.cancelled == []
 
 
-def test_confirmation_expires_or_can_be_dismissed() -> None:
+def test_confirmation_expires() -> None:
     state = SchedulerWatchControlState(confirmation_ttl_seconds=5)
     state.handle_key("c", snapshot=_snapshot(active_jobs=(_active_job(42),)), now=_NOW)
 
     expired = state.confirm_cancel(controller=_Controller(), now=_NOW + timedelta(seconds=6))
-    state.handle_key("c", snapshot=_snapshot(active_jobs=(_active_job(42),)), now=_NOW)
-    dismissed = state.dismiss_confirmation()
 
     assert expired.action == "confirmation_expired"
-    assert dismissed.action == "dismissed"
     assert state.cancel_confirmation is None
 
 
@@ -77,10 +62,9 @@ def test_cancel_completed_job_reports_harmless_conflict() -> None:
     )
 
     assert action.action == "cancel_conflict"
-    assert action.attached is True
 
 
-def test_watcher_remains_attached_after_cancellation_request() -> None:
+def test_confirmation_requests_cancellation() -> None:
     state = SchedulerWatchControlState()
     controller = _Controller()
     state.handle_key("c", snapshot=_snapshot(active_jobs=(_active_job(42),)), now=_NOW)
@@ -88,7 +72,6 @@ def test_watcher_remains_attached_after_cancellation_request() -> None:
     action = state.confirm_cancel(controller=controller, now=_NOW)
 
     assert action.action == "cancel_requested"
-    assert action.attached is True
     assert controller.cancelled == [(42, "watch")]
 
 
@@ -164,8 +147,7 @@ class _Controller:
         self._stderr_log = stderr_log
         self.cancelled: list[tuple[int, str | None]] = []
 
-    def pause(self, *, reason: str | None = None) -> WatchControlResult:
-        del reason
+    def pause(self) -> WatchControlResult:
         return WatchControlResult(action="pause", message="paused")
 
     def resume(self) -> WatchControlResult:
@@ -188,8 +170,7 @@ class _Controller:
     def detach(self) -> WatchControlResult:
         return WatchControlResult(action="detach", message="detached")
 
-    def stop(self, *, reason: str | None = None) -> WatchControlResult:
-        del reason
+    def stop(self) -> WatchControlResult:
         return WatchControlResult(action="stop", message="stopped")
 
 
@@ -210,7 +191,6 @@ def _snapshot(*, active_jobs: tuple[ActiveJobSummary, ...]) -> SchedulerSnapshot
         recent_events=(),
         alerts=(),
         resources=None,
-        forecast=None,
     )
 
 

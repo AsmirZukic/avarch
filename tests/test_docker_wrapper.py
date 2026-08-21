@@ -27,24 +27,6 @@ def test_wrapper_runs_version_without_workspace(tmp_path: Path) -> None:
     assert "avarch:test version" in command
 
 
-def test_wrapper_uses_installed_default_image_when_env_image_is_not_set(tmp_path: Path) -> None:
-    log = tmp_path / "docker.log"
-    fake_bin = _fake_docker(tmp_path)
-
-    result = subprocess.run(
-        [str(WRAPPER), "version"],
-        cwd=tmp_path,
-        env=_wrapper_env(fake_bin, log, image=None, default_image="docker.io/example/avarch:test"),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    command = log.read_text(encoding="utf-8")
-    assert result.returncode == 0
-    assert "docker.io/example/avarch:test version" in command
-
-
 def test_wrapper_mounts_current_directory_for_init_without_workspace(tmp_path: Path) -> None:
     log = tmp_path / "docker.log"
     fake_bin = _fake_docker(tmp_path)
@@ -307,7 +289,7 @@ def test_wrapper_allocates_interactive_tty_for_live_scheduler_watch(tmp_path: Pa
     assert args.index("-t") < args.index("avarch:test")
 
 
-def test_wrapper_runs_encoder_detached_with_interactive_owner_dashboard(tmp_path: Path) -> None:
+def test_wrapper_runs_foreground_scheduler_in_one_container(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     log = tmp_path / "docker.log"
     arg_log = tmp_path / "docker.args"
@@ -326,12 +308,11 @@ def test_wrapper_runs_encoder_detached_with_interactive_owner_dashboard(tmp_path
     assert result.returncode == 0
     assert "-i" in args
     assert "-t" in args
-    assert len(commands) == 2
-    assert " -d " in f" {commands[0]} "
+    assert len(commands) == 1
+    assert " -d " not in f" {commands[0]} "
     assert "--name avarch-encoder" in commands[0]
-    assert "avarch:test scheduler run --mode detached" in commands[0]
-    assert " -i -t " in f" {commands[1]} "
-    assert "avarch:test scheduler watch --owner" in commands[1]
+    assert " -i -t " in f" {commands[0]} "
+    assert "avarch:test scheduler run" in commands[0]
 
 
 def test_wrapper_keeps_redirected_workflow_run_non_tty(tmp_path: Path) -> None:
@@ -498,10 +479,7 @@ def test_wrapper_preserves_foreign_scheduler_container(tmp_path: Path) -> None:
 def _workspace(root: Path) -> Path:
     workspace = root / "workspace"
     (workspace / ".avarch").mkdir(parents=True)
-    (workspace / ".avarch" / "workspace.toml").write_text(
-        'schema_version = 1\nid = "test"\n',
-        encoding="utf-8",
-    )
+    (workspace / ".avarch" / "config.toml").touch()
     return workspace
 
 
@@ -584,7 +562,6 @@ def _wrapper_env(
     log: Path,
     *,
     image: str | None = "avarch:test",
-    default_image: str | None = None,
     docker_exit_code: str = "0",
     docker_ps_id: str = "",
     docker_inspect_result: str = "false\t\t",
@@ -610,8 +587,6 @@ def _wrapper_env(
         env["AVARCH_IMAGE"] = image
     else:
         env.pop("AVARCH_IMAGE", None)
-    if default_image is not None:
-        env["AVARCH_DEFAULT_IMAGE"] = default_image
     if security_opt is not None:
         env["AVARCH_DOCKER_SECURITY_OPT"] = security_opt
     if volume_options is not None:

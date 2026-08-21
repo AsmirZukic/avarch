@@ -28,7 +28,6 @@ from avarch.application.scheduler_watch_keys import (
     KEY_DETAILS,
     KEY_LOGS,
     PosixKeySource,
-    UnsupportedKeySource,
 )
 from avarch.domain.jobs import AttemptStatus, JobStage, JobStatus
 
@@ -49,21 +48,6 @@ def test_ctrl_c_detaches_scheduler_watch() -> None:
     asyncio.run(_run_with_key(KEY_CTRL_C, controller=controller))
 
     assert controller.calls == ["detach"]
-
-
-def test_ctrl_c_stops_scheduler_from_owner_dashboard() -> None:
-    controller = _Controller()
-
-    asyncio.run(
-        _run_with_key_source(
-            _KeySource([KEY_CTRL_C]),
-            controller=controller,
-            sink=_FakeSink(),
-            ctrl_c_stops_scheduler=True,
-        )
-    )
-
-    assert controller.calls == ["stop:owner dashboard"]
 
 
 def test_d_detaches_scheduler_watch() -> None:
@@ -116,7 +100,7 @@ def test_p_pauses_when_scheduler_is_running() -> None:
 
     asyncio.run(_run_with_key("p", controller=controller, state=SchedulerRuntimeState.RUNNING))
 
-    assert controller.calls == ["pause:watch"]
+    assert controller.calls == ["pause"]
 
 
 def test_p_resumes_when_scheduler_is_paused() -> None:
@@ -191,16 +175,6 @@ def test_second_c_confirms_selected_job_cancel() -> None:
     assert controller.calls == ["cancel:42:watch"]
 
 
-def test_unsupported_key_source_disables_shortcuts_cleanly() -> None:
-    controller = _Controller()
-    sink = _FakeSink()
-
-    asyncio.run(_run_with_key_source(UnsupportedKeySource(), controller=controller, sink=sink))
-
-    assert controller.calls == []
-    assert sink.texts == ["running"]
-
-
 async def _run_with_key(
     key: str,
     *,
@@ -227,7 +201,6 @@ async def _run_with_key_source(
     snapshots: Sequence[SchedulerSnapshot] | None = None,
     renderer: Callable[[SchedulerSnapshot, int], RenderableType] | None = None,
     stop_after_iterations: int = 1,
-    ctrl_c_stops_scheduler: bool = False,
 ) -> None:
     renderer = renderer or (lambda snapshot, _width: Text(snapshot.scheduler.state.value))
     loop = SchedulerWatchLoop(
@@ -240,7 +213,6 @@ async def _run_with_key_source(
         stop_after_iterations=stop_after_iterations,
         key_source=key_source,  # type: ignore[arg-type]
         watch_controller=controller,
-        ctrl_c_stops_scheduler=ctrl_c_stops_scheduler,
     )
     await loop.run()
 
@@ -268,8 +240,8 @@ class _Controller:
         self._details = details
         self._stderr_log = stderr_log
 
-    def pause(self, *, reason: str | None = None) -> WatchControlResult:
-        self.calls.append(f"pause:{reason}")
+    def pause(self) -> WatchControlResult:
+        self.calls.append("pause")
         return WatchControlResult(action="pause", message="paused")
 
     def resume(self) -> WatchControlResult:
@@ -292,8 +264,8 @@ class _Controller:
         self.calls.append("detach")
         return WatchControlResult(action="detach", message="detached")
 
-    def stop(self, *, reason: str | None = None) -> WatchControlResult:
-        self.calls.append(f"stop:{reason}")
+    def stop(self) -> WatchControlResult:
+        self.calls.append("stop")
         return WatchControlResult(action="stop", message="stopped")
 
 
@@ -331,7 +303,6 @@ def _snapshot(
         recent_events=(),
         alerts=(),
         resources=None,
-        forecast=None,
     )
 
 

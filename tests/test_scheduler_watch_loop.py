@@ -204,12 +204,12 @@ def test_scheduler_watch_loop_merges_resource_telemetry_before_rendering() -> No
                 sampled_at=captured_at,
                 metrics=(
                     ResourceMetric(name="cpu", value=95.0, unit="percent"),
-                        ResourceMetric(
-                            name="memory",
-                            value=7 * 1024**3,
-                            total=10 * 1024**3,
-                            unit="bytes",
-                        ),
+                    ResourceMetric(
+                        name="memory",
+                        value=7 * 1024**3,
+                        total=10 * 1024**3,
+                        unit="bytes",
+                    ),
                     ResourceMetric(
                         name="output write rate",
                         value=84 * 1024**2,
@@ -358,5 +358,4 @@ def _snapshot(second: int) -> SchedulerSnapshot:
         recent_events=(),
         alerts=(),
         resources=None,
-        forecast=None,
     )

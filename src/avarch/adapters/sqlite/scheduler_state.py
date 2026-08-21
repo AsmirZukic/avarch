@@ -72,7 +72,6 @@ def acquire_scheduler_lease(
             state,
             mode=SchedulerMode.RUNNING,
             now=now,
-            reason=None,
             increment=True,
         )
     elif state.mode == SchedulerMode.PAUSED:
@@ -83,9 +82,6 @@ def acquire_scheduler_lease(
         now=now,
     ):
         state.mode = SchedulerMode.RUNNING
-        state.control_requested_at = None
-        state.control_acknowledged_at = None
-        state.control_reason = None
 
     state.runner_id = runner_id
     state.heartbeat_at = now
@@ -141,9 +137,6 @@ def release_scheduler_lease(
         state.capacity_observed_at = now
     if state.mode in {SchedulerMode.DRAINING, SchedulerMode.STOPPING}:
         state.mode = SchedulerMode.RUNNING
-        state.control_requested_at = None
-        state.control_acknowledged_at = None
-        state.control_reason = None
     state.updated_at = now
     session.add(state)
 
@@ -173,17 +166,16 @@ def acknowledge_scheduler_control(
     if state.runner_id != runner_id:
         return
     state.acknowledged_generation = state.control_generation
-    state.control_acknowledged_at = now
     session.add(state)
 
 
-def pause_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
+def pause_scheduler(session: Session, *, now: datetime) -> None:
     state = get_or_create_scheduler_state(session, now=now)
     if state.mode == SchedulerMode.PAUSED:
         return
     if state.mode != SchedulerMode.RUNNING:
         raise SchedulerControlError(f"Cannot pause while scheduler is {state.mode}.")
-    request_scheduler_mode(state, mode=SchedulerMode.PAUSED, now=now, reason=reason)
+    request_scheduler_mode(state, mode=SchedulerMode.PAUSED, now=now)
     session.add(state)
 
 
@@ -193,27 +185,27 @@ def resume_scheduler(session: Session, *, now: datetime) -> None:
         return
     if state.mode != SchedulerMode.PAUSED:
         raise SchedulerControlError(f"Cannot resume while scheduler is {state.mode}.")
-    request_scheduler_mode(state, mode=SchedulerMode.RUNNING, now=now, reason=None)
+    request_scheduler_mode(state, mode=SchedulerMode.RUNNING, now=now)
     session.add(state)
 
 
-def drain_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
+def drain_scheduler(session: Session, *, now: datetime) -> None:
     state = get_or_create_scheduler_state(session, now=now)
     if not lease_active(state, now=now):
         raise SchedulerControlError("No active scheduler lease is running.")
     if state.mode != SchedulerMode.RUNNING:
         raise SchedulerControlError(f"Cannot drain while scheduler is {state.mode}.")
-    request_scheduler_mode(state, mode=SchedulerMode.DRAINING, now=now, reason=reason)
+    request_scheduler_mode(state, mode=SchedulerMode.DRAINING, now=now)
     session.add(state)
 
 
-def stop_scheduler(session: Session, *, now: datetime, reason: str | None = None) -> None:
+def stop_scheduler(session: Session, *, now: datetime) -> None:
     state = get_or_create_scheduler_state(session, now=now)
     if not lease_active(state, now=now):
         raise SchedulerControlError("No active scheduler lease is running.")
     if state.mode not in {SchedulerMode.RUNNING, SchedulerMode.PAUSED}:
         raise SchedulerControlError(f"Cannot stop while scheduler is {state.mode}.")
-    request_scheduler_mode(state, mode=SchedulerMode.STOPPING, now=now, reason=reason)
+    request_scheduler_mode(state, mode=SchedulerMode.STOPPING, now=now)
     session.add(state)
 
 
@@ -222,15 +214,11 @@ def request_scheduler_mode(
     *,
     mode: SchedulerMode,
     now: datetime,
-    reason: str | None,
     increment: bool = True,
 ) -> None:
     state.mode = mode
     if increment:
         state.control_generation += 1
-    state.control_requested_at = now
-    state.control_acknowledged_at = None
-    state.control_reason = reason
     state.updated_at = now
 
 

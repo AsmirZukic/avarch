@@ -372,7 +372,6 @@ def _retry_job(
         probe = store_probe_result(
             session,
             media_file=media_file,
-            raw_probe=raw_probe,
             normalized_probe=normalize_probe(raw_probe),
             created_at=now,
         )
@@ -470,8 +469,6 @@ def _store_media_file(session: Session, path: Path, now: datetime) -> MediaFile:
         device_id=snapshot.device_id,
         inode=snapshot.inode,
         fs_fingerprint=snapshot.fs_fingerprint,
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)
@@ -554,7 +551,6 @@ def _store_completed_promotion(session: Session, *, job_id: int, now: datetime) 
             validated_output_fingerprint="output-fs",
             validated_output_digest=None,
             staging_digest=None,
-            final_fingerprint=None,
             final_digest=None,
             journal_path="/work/runtime/promotion-journal.json",
             cleanup_completed=True,
@@ -604,6 +600,6 @@ def _config(tmp_path: Path) -> AppConfig:
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine

@@ -12,13 +12,11 @@ from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.probe import normalize_probe
 from avarch.adapters.scheduler_workers import execute_plan_job
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
-from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.models import Job, MediaFile, MediaFileStatus
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.vapoursynth import generate_vapoursynth_script
 from avarch.adapters.vpy_env import planning_runtime_identity_for_data_dir
-from avarch.application.enqueue import enqueue_inventory
 from avarch.application.planning import build_plan
 from avarch.application.vapoursynth_identity import resolve_vapoursynth_template
 from avarch.config import AppConfig
@@ -32,7 +30,7 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.adapters.sqlite.db'}"
+    database_url = f"sqlite:///{tmp_path / '.avarch' / 'avarch.db'}"
     config = _config(database_url)
     (tmp_path / ".avarch").mkdir()
     engine = create_db_engine(database_url)
@@ -61,12 +59,21 @@ def test_plan_worker_reuses_existing_relative_artifact_bundle(
             plan=plan,
             vapoursynth_script=generate_vapoursynth_script(plan, template=template),
         )
-        enqueue_inventory(
-            SqliteEnqueueStore(session),
-            config=config,
-            profile_name="av1_1080p_sdr",
-            priority=0,
-            now=now,
+        session.add(
+            Job(
+                media_file_id=media_file.id or 0,
+                profile_name=plan.profile_name,
+                profile_hash=plan.profile_hash,
+                source_fs_fingerprint=media_file.fs_fingerprint,
+                queue_key=plan.plan_hash,
+                probe_result_id=context.probe_result.id,
+                probe_hash=plan.probe_hash,
+                status=JobStatus.QUEUED,
+                stage=JobStage.PLAN,
+                priority=0,
+                created_at=now,
+                updated_at=now,
+            )
         )
         session.commit()
         job = session.exec(select(Job)).one()
@@ -91,8 +98,6 @@ def _add_media_file(session: Session, path: Path, now: datetime) -> MediaFile:
         device_id=snapshot.device_id,
         inode=snapshot.inode,
         fs_fingerprint=snapshot.fs_fingerprint,
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)
@@ -107,7 +112,6 @@ def _add_probe(session: Session, media_file: MediaFile, now: datetime) -> None:
     store_probe_result(
         session,
         media_file=media_file,
-        raw_probe=raw_probe,
         normalized_probe=normalized,
         created_at=now,
     )

@@ -58,21 +58,6 @@ def end_scheduler_session(
     session.add(scheduler_session)
 
 
-def current_scheduler_session(
-    session: Session,
-    *,
-    workspace_id: str,
-) -> SchedulerSession | None:
-    return session.exec(
-        select(SchedulerSession)
-        .where(
-            SchedulerSession.workspace_id == workspace_id,
-            col(SchedulerSession.ended_at).is_(None),
-        )
-        .order_by(col(SchedulerSession.started_at).desc(), col(SchedulerSession.id).desc())
-    ).first()
-
-
 def _mark_interrupted_open_sessions(
     session: Session,
     *,

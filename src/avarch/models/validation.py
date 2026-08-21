@@ -12,8 +12,6 @@ from avarch.contracts import (
 )
 from avarch.domain.validation import (
     ValidationCheckStatus,
-    ValidationResult,
-    failure_reasons_for_checks,
 )
 from avarch.domain.validation import (
     checks_pass as domain_checks_pass,
@@ -112,10 +110,6 @@ class ValidationReport(BaseModel):
     source_path: Path
     output_path: Path
 
-    source_fs_fingerprint_before: str | None
-    source_fs_fingerprint_after: str | None
-
-    output_fs_fingerprint_before: str | None
     output_fs_fingerprint_after: str | None
 
     passed: bool
@@ -127,14 +121,6 @@ class ValidationReport(BaseModel):
 
     started_at: datetime
     finished_at: datetime
-
-    @property
-    def result(self) -> ValidationResult:
-        return ValidationResult.PASS if checks_pass(self.checks) else ValidationResult.FAIL
-
-    @property
-    def failure_reasons(self) -> list[str]:
-        return failure_reasons_for_checks(self.checks)
 
 
 def checks_pass(checks: list[ValidationCheck]) -> bool:

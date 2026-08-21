@@ -66,7 +66,6 @@ def test_jobs_list_prints_table_without_internal_info_logs(tmp_path: Path) -> No
     assert result.exit_code == 0
     assert result.output.startswith("ID  STATUS")
     assert "config_loaded" not in result.output
-    assert "alembic.runtime.migration" not in result.output
 
 
 def test_jobs_list_shows_current_progress(tmp_path: Path) -> None:
@@ -130,27 +129,6 @@ def test_jobs_watch_exits_nonzero_for_failed_terminal_job(tmp_path: Path) -> Non
     assert "movie-watch-failed.mkv failed 40.0%" in result.output
 
 
-def test_legacy_job_without_progress_displays_cleanly(tmp_path: Path) -> None:
-    config_path = _init_config(tmp_path)
-    job_id = _insert_job(
-        config_path,
-        tmp_path / "movie-legacy.mkv",
-        status=JobStatus.PROMOTED,
-        stage=JobStage.PROMOTE,
-    )
-
-    list_result = runner.invoke(app, ["jobs", "list"])
-    show_result = runner.invoke(app, ["jobs", "show", str(job_id)])
-    watch_result = runner.invoke(app, ["jobs", "watch", str(job_id), "--poll-interval", "0.01"])
-
-    assert list_result.exit_code == 0
-    assert "movie-legacy.mkv" in list_result.output
-    assert show_result.exit_code == 0
-    assert "Progress:" in show_result.output
-    assert watch_result.exit_code == 0
-    assert "movie-legacy.mkv — — eta=unknown" in watch_result.output
-
-
 def test_pause_command_sets_persistent_state(tmp_path: Path) -> None:
     _init_config(tmp_path)
 
@@ -208,8 +186,6 @@ def test_run_command_prints_failed_job_error_details(
             inode=3,
             fs_fingerprint="fingerprint",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media_file)
         session.flush()
@@ -339,14 +315,11 @@ def _insert_current_plan(config_path: Path, media_path: Path) -> None:
             inode=stat_result.st_ino,
             fs_fingerprint="fingerprint",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media_file)
         session.flush()
         probe_result = ProbeResult(
             media_file_id=media_file.id or 0,
-            ffprobe_json="{}",
             normalized_json="{}",
             probe_hash="probe",
             source_fs_fingerprint=media_file.fs_fingerprint,
@@ -396,8 +369,6 @@ def _insert_job(
             inode=stat_result.st_ino,
             fs_fingerprint=f"fingerprint:{media_path.name}",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media_file)
         session.flush()
@@ -442,8 +413,6 @@ def _insert_job_with_progress(
             inode=stat_result.st_ino,
             fs_fingerprint=f"fingerprint:{media_path.name}",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media_file)
         session.flush()
@@ -468,9 +437,7 @@ def _insert_job_with_progress(
             stage=JobStage.ENCODE,
             resource_class=ResourceClass.HEAVY_AV1AN,
             status=(
-                AttemptStatus.COMPLETED
-                if status != JobStatus.ENCODING
-                else AttemptStatus.RUNNING
+                AttemptStatus.COMPLETED if status != JobStatus.ENCODING else AttemptStatus.RUNNING
             ),
             runner_id="runner",
             started_at=now,

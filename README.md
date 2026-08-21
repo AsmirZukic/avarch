@@ -17,8 +17,7 @@ Highlights:
 	and promotion policy.
 - Custom VapourSynth `.vpy` templates and custom Python filter scripts are
 	supported extension points.
-- Reusable encoding profiles, including the built-in `av1_1080p_sdr` profile
-	and the built-in `default` alias.
+- Reusable encoding profiles, including the built-in `av1_1080p_sdr` profile.
 - Inspectable generated VapourSynth scripts and persisted plan artifacts.
 - Av1an-based video encoding with SVT-AV1.
 - FFmpeg muxing, metadata copying, chapter copying, audio transcoding, and
@@ -182,9 +181,9 @@ avarch enqueue
 avarch scheduler run
 ```
 
-`avarch scheduler run` opens the interactive owner dashboard. Press `d` or `q`
-to detach while the scheduler keeps encoding; run `avarch scheduler watch` to
-reattach later. Native execution can also use `avarch scheduler run -d`.
+`avarch scheduler run` stays attached to the encoding process. Exiting it stops
+the active encode. Use `avarch scheduler run -d` only when background execution
+is explicitly wanted, and `avarch scheduler watch` to observe that detached run.
 
 In another terminal in the same workspace, confirm that work is running:
 
@@ -266,8 +265,11 @@ implemented fields:
 - `video.hdr_to_sdr`: opt into generated HDR-to-SDR handling.
 - `video.source`: currently `vapoursynth`.
 - `av1an.encoder`: currently `svt-av1`.
-- `av1an.workers`: Av1an worker count for the job. Use an integer, or `"auto"`
-  for a conservative SVT-AV1 worker count capped by CPU and memory.
+- `av1an.workers`: optional Av1an worker override. The default is `1`, so one
+  SVT-AV1 process owns native encoder parallelism. Set `"auto"` explicitly to
+  opt into Av1an's automatic worker selection.
+- `av1an.svt_lp`: optional SVT-AV1 logical-processor override. The default,
+  `"native"`, leaves parallelism to SVT-AV1.
 - `av1an.video_args`: encoder argument string.
 - `audio.codec`, `audio.bitrate`, `audio.channels`, `audio.languages`.
 - `subtitles.languages` and `subtitles.keep_forced`.
@@ -281,7 +283,6 @@ implemented fields:
 Built-in profiles in this alpha:
 
 - `av1_1080p_sdr`: general-purpose 1080p SDR AV1 archival profile.
-- `default`: built-in alias with the same settings as `av1_1080p_sdr`.
 
 List profiles:
 
@@ -311,10 +312,6 @@ search_paths = ["profiles"]
 
 Relative profile search paths are resolved from `.avarch/`, so the default is
 `.avarch/profiles`.
-
-Built-in name reservation is enforced. User profiles cannot use `default`,
-`anime`, or `web_archive`. User profiles with other names can override visible
-built-ins of the same name, but reserved names remain protected.
 
 Profile validation happens when profiles are loaded and when related commands run.
 Unknown profiles fail with messages such as `Unknown profile: missing`. Invalid
@@ -470,7 +467,6 @@ to customize.
 
 ```text
 .avarch/
-	workspace.toml
 	config.toml
 	profiles/
 	scripts/
@@ -479,10 +475,6 @@ to customize.
 		environments/
 	data/
 		avarch.db
-	logs/
-	work/
-	tmp/
-	run/
 ```
 
 During normal operation Avarch also creates managed data under `.avarch/data`,
@@ -517,9 +509,9 @@ There is no separate ignore-rule file yet. Scan exclusions are configured with
 
 ### Workspace Lifecycle
 
-`avarch init` creates `.avarch`, writes `workspace.toml`, writes
-`config.toml`, creates `vpy/requirements.toml`, creates the default directory
-tree, and upgrades the SQLite database to the current migration revision.
+`avarch init` creates `.avarch`, writes `config.toml`, creates
+`vpy/requirements.toml`, creates the default directory tree, and initializes
+the SQLite database.
 
 If `.avarch` already exists, `avarch init` refuses to overwrite it. Use
 `avarch init --force` only when you intentionally want to delete and recreate
@@ -527,8 +519,8 @@ the workspace state, including custom profiles and scripts stored inside
 `.avarch`.
 
 Workspace lookup searches upward from the current directory for
-`.avarch/workspace.toml`, so Avarch commands can be run from nested folders
-inside a workspace.
+`.avarch/config.toml`, so Avarch commands can be run from nested folders inside
+a workspace.
 
 Backups are currently manual. Back up your media and the `.avarch` directory if
 you want to preserve plans, probe cache, queue state, custom profiles, custom
@@ -540,7 +532,7 @@ Version control recommendations:
 	`.avarch/scripts/`, and `.avarch/vpy/requirements.toml` if the workspace is
 	project-like and the files do not contain local-only paths.
 - Usually ignore `.avarch/data/`, `.avarch/logs/`, `.avarch/run/`,
-	`.avarch/tmp/`, `.avarch/work/`, and `.avarch/vpy/environments/`.
+	and `.avarch/vpy/environments/`.
 
 Media scanned inside the workspace is stored with paths relative to the workspace
 root, so moving the whole media directory with `.avarch` preserves inventory
@@ -666,7 +658,7 @@ avarch scheduler status
 avarch scheduler watch
 avarch scheduler watch --once
 avarch scheduler watch --json
-avarch scheduler pause --reason "maintenance"
+avarch scheduler pause
 avarch scheduler resume
 avarch scheduler drain --wait
 avarch scheduler stop --wait
@@ -674,10 +666,9 @@ avarch scheduler stop --force
 avarch scheduler restart
 ```
 
-`scheduler run -d` is implemented for native host execution. The Docker wrapper
-starts interactive `scheduler run` work in its named encoder container and opens
-the owner dashboard as a separate control surface, so detaching leaves the
-encoder container running.
+`scheduler run -d` explicitly starts background execution. A normal
+`scheduler run` remains in one foreground process and one foreground container,
+so leaving the command stops its active encode.
 
 `scheduler run` owns scheduler execution. It claims jobs, starts workers,
 persists heartbeats, and responds to control requests. `scheduler watch` is an
@@ -688,13 +679,13 @@ normal CLI commands.
 
 Interactive `avarch scheduler watch` requires a TTY. In a terminal it shows the
 scheduler dashboard with pipeline counts, active jobs, upcoming work, capacity,
-recent lifecycle events, resource telemetry, and honest queue forecasts when
-enough comparable encode history exists. Keyboard shortcuts are Linux/POSIX
+recent lifecycle events, resource telemetry, and the current queue state.
+Keyboard shortcuts are Linux/POSIX
 first: `p` pauses or resumes, `c` opens a bounded cancellation confirmation for
 the selected active job, `l` toggles a bounded log tail, Enter toggles details,
-and `d` or `q` detaches. Ctrl+C detaches from watch mode; it does not stop the
-scheduler. In the owner dashboard opened by `scheduler run`, Ctrl+C requests a
-scheduler stop.
+and `d` or `q` detaches. Ctrl+C detaches from watch mode; it does not stop an
+explicitly detached scheduler. Ctrl+C in foreground `scheduler run` stops the
+scheduler and its active encoder.
 
 For scripts and non-interactive shells, use:
 
@@ -789,10 +780,8 @@ SQLite and renders a live Rich display on an interactive terminal; redirected
 output is plain complete lines with no cursor-control sequences. `NO_COLOR=1`
 disables color.
 
-Interactive `scheduler run` starts the scheduler independently and opens the
-same live progress view in owner mode. Its footer exposes pause/resume,
-confirmed cancellation, logs, details, detach, and stop controls. Detached
-scheduler runs do not render live progress; use `scheduler watch` or
+Interactive `scheduler run` renders live progress in the scheduler process.
+Detached scheduler runs do not render live progress; use `scheduler watch` or
 `jobs watch JOB_ID` from another shell.
 
 Progress percentages are phase-specific, not whole-workflow percentages. Unknown
@@ -803,11 +792,10 @@ a recent heartbeat while not advancing, and stale heartbeat reporting does not
 mark the job failed by itself.
 
 Numeric Av1an progress is enabled for the supported 0.5.x TTY progress format.
-Unsupported versions, unparsable output, legacy jobs without progress rows, or
-jobs without a numeric total fall back to phase/heartbeat visibility while the
-raw stdout/stderr logs remain complete. Ctrl+C while running `jobs watch` stops
-only the watcher; use `jobs cancel` to request job cancellation through the
-scheduler control path.
+Unsupported versions, unparsable output, or jobs without a numeric total fall
+back to phase/heartbeat visibility while the raw stdout/stderr logs remain
+complete. Ctrl+C while running `jobs watch` stops only the watcher; use `jobs
+cancel` to request job cancellation through the scheduler control path.
 
 Cancellation requests for active non-promotion jobs cancel the scheduler task.
 `scheduler stop` sends SIGTERM to the scheduler process group and escalates to
@@ -1020,15 +1008,6 @@ Show resolved config paths.
 
 ```sh
 avarch config show
-```
-
-`avarch db current` and `avarch db upgrade`
-
-Show or apply the database migration revision.
-
-```sh
-avarch db current
-avarch db upgrade
 ```
 
 ### Discovery and Probing
@@ -1325,7 +1304,7 @@ avarch --version
 What you see: `No Avarch workspace found. Run 'avarch init' from the workspace root.`
 
 Likely cause: the command was run outside a directory containing
-`.avarch/workspace.toml` in its parent chain.
+`.avarch/config.toml` in its parent chain.
 
 Recovery:
 
@@ -1441,9 +1420,9 @@ Likely cause: the OS or container killed SVT-AV1 under memory pressure. Each
 Av1an worker can run a separate SVT-AV1 encoder process, and SVT-AV1 also uses
 internal parallelism.
 
-Recovery: reduce Av1an workers and run from a newly planned artifact. The
-built-in `"auto"` worker mode is conservative, but existing queued or failed
-jobs keep the worker count recorded in their plan artifact.
+Recovery: reduce Av1an workers or SVT-AV1 logical processors and run from a
+newly planned artifact. The built-in profile leaves both values native; existing
+queued or failed jobs keep the values recorded in their plan artifact.
 
 ```sh
 # After updating the same profile or Avarch version, retrying can reset the job
@@ -1452,7 +1431,7 @@ avarch jobs retry JOB_ID
 
 # Or create a separate lower-memory profile and enqueue a new job for it.
 avarch profiles copy av1_1080p_sdr --name low_mem
-# edit .avarch/profiles/low_mem.toml and set: workers = 2
+# edit .avarch/profiles/low_mem.toml and set workers = 2 and/or svt_lp = 4
 avarch plan --profile low_mem --file movie.mkv --force
 avarch enqueue --file movie.mkv
 ```
@@ -1603,16 +1582,13 @@ Container/runtime status:
 - VapourSynth is provided by the Python environment; `avarch doctor` and
 	`avarch vpy env show` report the detected runtime version.
 
-Schema and compatibility:
+Schema versions:
 
-- Workspace schema version: `1`.
 - Profile schema version: `1`.
 - Transcode plan schema version: `5`.
 - Validation policy schema version: `2`.
 - Validation report schema version: `1`.
 - Promotion policy schema version: `1`.
-- Database migrations exist, but pre-release development schema compatibility is
-	not guaranteed.
 
 Practical alpha limitations:
 
@@ -1630,12 +1606,8 @@ Practical alpha limitations:
 	workspace environment sync.
 - Built-in generated VapourSynth handling supports selected source formats and
 	HDR-to-SDR policy, but does not deinterlace.
-- Root-level `avarch.toml`, root-level `profiles/`, and `.avarch/avarch.db` are
-	not supported workspace state.
-
 Existing encoded files are separate media files. Source media is unaffected by
-workspace format changes, but an alpha `.avarch` workspace may need to be backed
-up, migrated manually, or recreated after incompatible development changes.
+workspace format changes.
 
 ## Contributing and Development
 
@@ -1692,16 +1664,13 @@ Docker and wrapper development commands:
 
 ```sh
 make docker-build
-make wrapper-init
-make wrapper-doctor
+make docker-test
 ```
 
 Cleanup commands:
 
 ```sh
-make clean-preview
 make clean-cache
-make clean
 make clean-env
 ```
 
@@ -1762,11 +1731,11 @@ docker run -d --rm \
 Wrapper environment variables:
 
 - `AVARCH_IMAGE`: image reference, default `avarch:latest`.
-- `AVARCH_DEFAULT_IMAGE`: fallback image reference used by installed wrappers
-	when `AVARCH_IMAGE` is not set.
 - `AVARCH_DOCKER_SECURITY_OPT`: override Docker `--security-opt`; on SELinux
 	hosts the wrapper defaults to `label=disable` when needed.
 - `AVARCH_DOCKER_VOLUME_OPTIONS`: mount options appended to the workspace volume.
+- `AVARCH_DOCKER_CPUS`, `AVARCH_DOCKER_CPUSET_CPUS`, and
+	`AVARCH_DOCKER_MEMORY`: optional Docker CPU and memory limits.
 
 GPU options are not implemented or documented by the wrapper.
 
@@ -1811,7 +1780,7 @@ Native requirements:
 - FFmpeg and FFprobe.
 - Av1an `0.5.x`.
 - VapourSynth and `vspipe`.
-- BestSource support or another script-compatible source path.
+- BestSource support or another source path usable from VapourSynth.
 - SVT-AV1 encoder available as expected by Av1an.
 - Any plugins required by your custom `.vpy` templates or filter scripts.
 
@@ -1829,7 +1798,7 @@ any differences caused by locally installed media-tool versions and plugins.
 
 ## Architecture
 
-The adopted architectural contract for new code and the planned structural refactor lives in
+The adopted architectural contract for new code lives in
 [docs/architecture.md](docs/architecture.md).
 
 ```text
@@ -1860,10 +1829,7 @@ Validation
 Promotion
 ```
 
-Deep internals should live under `docs/` as the project grows.
-
 ## License
 
-No `LICENSE` file is currently present in this repository. Add a license file
-before publishing or redistributing Avarch outside its current development
-context.
+Avarch is licensed under the GNU General Public License v3.0. See
+[LICENSE](LICENSE).

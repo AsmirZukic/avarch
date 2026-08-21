@@ -61,10 +61,6 @@ class PromotionPreflightResult(BaseModel):
     source_stat: FileStatSnapshot
 
     validated_output_fingerprint: str
-    validated_output_size: int
-
-    destination_free_bytes: int
-    required_free_bytes: int
 
     warnings: list[str]
 

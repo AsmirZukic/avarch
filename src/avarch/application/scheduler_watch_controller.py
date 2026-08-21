@@ -11,7 +11,6 @@ from avarch.application.scheduler_control import (
     SchedulerControlStore,
     pause_scheduler,
     resume_scheduler,
-    stop_scheduler,
 )
 
 
@@ -28,7 +27,7 @@ class WatchLogPaths:
 
 
 class WatchController(Protocol):
-    def pause(self, *, reason: str | None = None) -> WatchControlResult: ...
+    def pause(self) -> WatchControlResult: ...
 
     def resume(self) -> WatchControlResult: ...
 
@@ -39,8 +38,6 @@ class WatchController(Protocol):
     def log_paths(self, *, job_id: int, attempt_number: int | None = None) -> WatchLogPaths: ...
 
     def detach(self) -> WatchControlResult: ...
-
-    def stop(self, *, reason: str | None = None) -> WatchControlResult: ...
 
 
 class SchedulerWatchController:
@@ -59,8 +56,8 @@ class SchedulerWatchController:
         self._actor = actor
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def pause(self, *, reason: str | None = None) -> WatchControlResult:
-        pause_scheduler(self._scheduler_store, now=self._clock(), reason=reason)
+    def pause(self) -> WatchControlResult:
+        pause_scheduler(self._scheduler_store, now=self._clock())
         return WatchControlResult(action="pause", message="Scheduler pause requested.")
 
     def resume(self) -> WatchControlResult:
@@ -93,7 +90,3 @@ class SchedulerWatchController:
 
     def detach(self) -> WatchControlResult:
         return WatchControlResult(action="detach", message="Detached from scheduler watch.")
-
-    def stop(self, *, reason: str | None = None) -> WatchControlResult:
-        stop_scheduler(self._scheduler_store, now=self._clock(), reason=reason)
-        return WatchControlResult(action="stop", message="Scheduler stop requested.")

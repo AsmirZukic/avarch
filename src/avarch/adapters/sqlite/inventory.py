@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from sqlmodel import Session, select
@@ -37,7 +36,6 @@ def update_inventory(
     *,
     root: Path,
     snapshots: Sequence[FileSnapshot],
-    scanned_at: datetime,
     workspace_root: Path | None = None,
 ) -> ScanResult:
     root = root.resolve()
@@ -65,8 +63,6 @@ def update_inventory(
                     device_id=snapshot.device_id,
                     inode=snapshot.inode,
                     fs_fingerprint=snapshot.fs_fingerprint,
-                    discovered_at=scanned_at,
-                    last_seen_at=scanned_at,
                     status=MediaFileStatus.ADDED,
                 )
             )
@@ -74,7 +70,6 @@ def update_inventory(
             continue
 
         if _metadata_matches(media_file, snapshot):
-            media_file.last_seen_at = scanned_at
             media_file.status = MediaFileStatus.PRESENT
             unchanged += 1
         else:
@@ -83,7 +78,6 @@ def update_inventory(
             media_file.device_id = snapshot.device_id
             media_file.inode = snapshot.inode
             media_file.fs_fingerprint = snapshot.fs_fingerprint
-            media_file.last_seen_at = scanned_at
             media_file.status = MediaFileStatus.CHANGED
             changed += 1
 

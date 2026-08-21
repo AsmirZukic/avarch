@@ -19,7 +19,7 @@ from avarch.domain.progress import ProgressPhase, ProgressSource, ProgressUnit
 
 
 def test_attempt_progress_round_trips_nullable_snapshot_fields(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -66,7 +66,7 @@ def test_attempt_progress_round_trips_nullable_snapshot_fields(tmp_path: Path) -
 
 
 def test_attempt_progress_round_trips_structured_metrics(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -95,7 +95,7 @@ def test_attempt_progress_round_trips_structured_metrics(tmp_path: Path) -> None
 
 
 def test_attempt_progress_requires_existing_attempt(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -107,7 +107,7 @@ def test_attempt_progress_requires_existing_attempt(tmp_path: Path) -> None:
 
 
 def test_attempt_progress_has_one_row_per_attempt(tmp_path: Path) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -124,7 +124,7 @@ def test_attempt_progress_has_one_row_per_attempt(tmp_path: Path) -> None:
 def test_attempt_progress_prevents_deleting_attempt_while_present(
     tmp_path: Path,
 ) -> None:
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     now = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -148,8 +148,6 @@ def _insert_attempt(session: Session, *, now: datetime) -> int:
         device_id=789,
         inode=101112,
         fs_fingerprint=f"key:{now.timestamp()}",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)
@@ -160,7 +158,6 @@ def _insert_attempt(session: Session, *, now: datetime) -> int:
 
     probe = ProbeResult(
         media_file_id=media_id,
-        ffprobe_json="{}",
         normalized_json="{}",
         probe_hash=f"probe:{media_id}",
         source_fs_fingerprint=media_file.fs_fingerprint,

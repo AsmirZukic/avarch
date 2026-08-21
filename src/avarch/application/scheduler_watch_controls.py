@@ -26,7 +26,6 @@ class CancelConfirmation:
 class WatchControlAction:
     action: str
     message: str
-    attached: bool = True
 
 
 @dataclass(slots=True)
@@ -53,19 +52,6 @@ class SchedulerWatchControlState:
         self.cancel_confirmation = None
         self.details = None
         self.log_tail = None
-
-    def select_job(self, *, job_id: int, snapshot: SchedulerSnapshot) -> WatchControlAction:
-        active_ids = {job.job_id for job in snapshot.active_jobs}
-        if job_id not in active_ids:
-            self.selected_job_id = None
-            self.cancel_confirmation = None
-            return WatchControlAction(
-                action="selection_missing",
-                message=f"Job {job_id} is not active.",
-            )
-        self.selected_job_id = job_id
-        self.cancel_confirmation = None
-        return WatchControlAction(action="selected", message=f"Selected job {job_id}.")
 
     def handle_key(
         self,
@@ -156,16 +142,11 @@ class SchedulerWatchControlState:
         try:
             controller.cancel(job_id=confirmation.job_id, reason="watch")
         except JobControlWorkflowError as exc:
-            return WatchControlAction(action="cancel_conflict", message=str(exc), attached=True)
+            return WatchControlAction(action="cancel_conflict", message=str(exc))
         return WatchControlAction(
             action="cancel_requested",
             message=f"Job {confirmation.job_id} cancellation requested.",
-            attached=True,
         )
-
-    def dismiss_confirmation(self) -> WatchControlAction:
-        self.cancel_confirmation = None
-        return WatchControlAction(action="dismissed", message="Cancellation dismissed.")
 
 
 def read_bounded_log_tail(

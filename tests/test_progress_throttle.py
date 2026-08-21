@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 from avarch.application.progress import (
     DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS,
     ProgressPersistenceThrottle,
-    RecordingProgressSink,
 )
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
+from tests.progress_support import RecordingProgressSink
 
 
 def test_throttle_persists_first_snapshot_immediately() -> None:
@@ -62,36 +62,6 @@ def test_throttle_coalesces_ordinary_updates_inside_interval() -> None:
     assert [snapshot.current for snapshot in sink.snapshots] == [1]
 
 
-def test_throttle_flushes_latest_ordinary_update_after_interval() -> None:
-    clock = _FakeClock()
-    sink = RecordingProgressSink()
-    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
-
-    throttle.publish(_snapshot(current=1))
-    throttle.publish(_snapshot(current=2))
-    throttle.publish(_snapshot(current=3))
-    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
-
-    assert throttle.flush_due() is True
-    assert [snapshot.current for snapshot in sink.snapshots] == [1, 3]
-
-
-def test_throttle_merges_heartbeat_into_pending_numeric_snapshot() -> None:
-    clock = _FakeClock()
-    sink = RecordingProgressSink()
-    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
-
-    throttle.publish(_snapshot(current=1))
-    throttle.publish(_snapshot(current=25))
-    throttle.publish(_snapshot(current=None, unit=None, observed_offset_seconds=30))
-    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
-
-    assert throttle.flush_due() is True
-    assert [snapshot.current for snapshot in sink.snapshots] == [1, 25]
-    assert sink.snapshots[-1].advanced_at == datetime(2026, 7, 1, 12, 0, 25, tzinfo=UTC)
-    assert sink.snapshots[-1].heartbeat_at == datetime(2026, 7, 1, 12, 0, 30, tzinfo=UTC)
-
-
 def test_throttle_does_not_publish_heartbeat_over_pending_numeric_when_due() -> None:
     clock = _FakeClock()
     sink = RecordingProgressSink()
@@ -104,21 +74,6 @@ def test_throttle_does_not_publish_heartbeat_over_pending_numeric_when_due() -> 
 
     assert [snapshot.current for snapshot in sink.snapshots] == [1, 25]
     assert sink.snapshots[-1].heartbeat_at == datetime(2026, 7, 1, 12, 0, 30, tzinfo=UTC)
-
-
-def test_throttle_bounds_write_count_under_heavy_samples() -> None:
-    clock = _FakeClock()
-    sink = RecordingProgressSink()
-    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
-
-    throttle.publish(_snapshot(current=0))
-    for value in range(1, 10_000):
-        throttle.publish(_snapshot(current=value))
-
-    assert len(sink.snapshots) == 1
-    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
-    throttle.flush_due()
-    assert [snapshot.current for snapshot in sink.snapshots] == [0, 9_999]
 
 
 def test_throttle_serializes_concurrent_parser_and_heartbeat_publications() -> None:
@@ -135,9 +90,7 @@ def test_throttle_serializes_concurrent_parser_and_heartbeat_publications() -> N
     def publish_heartbeats() -> None:
         barrier.wait()
         for offset in range(1, 101):
-            throttle.publish(
-                _snapshot(current=None, unit=None, observed_offset_seconds=offset)
-            )
+            throttle.publish(_snapshot(current=None, unit=None, observed_offset_seconds=offset))
 
     numeric_thread = threading.Thread(target=publish_numeric)
     heartbeat_thread = threading.Thread(target=publish_heartbeats)
@@ -150,30 +103,6 @@ def test_throttle_serializes_concurrent_parser_and_heartbeat_publications() -> N
     throttle.close()
 
     assert sink.snapshots[-1].current == 101
-
-
-def test_throttle_preserves_transitions_and_latest_snapshot_in_high_frequency_stream() -> None:
-    clock = _FakeClock()
-    sink = RecordingProgressSink()
-    throttle = ProgressPersistenceThrottle(sink, clock=clock.monotonic)
-
-    throttle.publish(_snapshot(phase=ProgressPhase.PREPARING, current=None, unit=None))
-    for value in range(1, 5_000):
-        throttle.publish(_snapshot(current=value))
-    clock.advance(DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS)
-    assert throttle.flush_due() is True
-    throttle.publish(_snapshot(phase=ProgressPhase.MUXING, current=None, unit=None))
-    throttle.publish(_snapshot(phase=ProgressPhase.COMPLETED, current=5_000))
-
-    assert [snapshot.phase for snapshot in sink.snapshots] == [
-        ProgressPhase.PREPARING,
-        ProgressPhase.ENCODING,
-        ProgressPhase.ENCODING,
-        ProgressPhase.MUXING,
-        ProgressPhase.COMPLETED,
-    ]
-    assert sink.snapshots[2].current == 4_999
-    assert len(sink.snapshots) == 5
 
 
 def test_throttle_shutdown_flushes_pending_snapshot() -> None:

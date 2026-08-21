@@ -41,7 +41,7 @@ def test_installer_embeds_default_image_and_installed_command_uses_it(tmp_path: 
     installed = install_dir / "avarch"
     assert result.returncode == 0, result.stderr
     assert installed.is_file()
-    assert "AVARCH_DEFAULT_IMAGE='example.test/avarch:ci'" in installed.read_text(encoding="utf-8")
+    assert "AVARCH_IMAGE='example.test/avarch:ci'" in installed.read_text(encoding="utf-8")
 
     command_result = subprocess.run(
         [str(installed), "version"],
@@ -90,7 +90,7 @@ def test_installer_supports_version_tag_without_full_image_override(tmp_path: Pa
             "AVARCH_INSTALL_DIR": str(install_dir),
             "AVARCH_SKIP_PULL": "0",
             "AVARCH_VERSION": "0.2.0",
-            "AVARCH_WRAPPER_FILE": str(WRAPPER),
+            "AVARCH_WRAPPER_URL": WRAPPER.as_uri(),
         }
     )
 
@@ -116,7 +116,7 @@ def test_installer_defaults_to_alpha_channel(tmp_path: Path) -> None:
         {
             "AVARCH_INSTALL_DIR": str(install_dir),
             "AVARCH_SKIP_PULL": "0",
-            "AVARCH_WRAPPER_FILE": str(WRAPPER),
+            "AVARCH_WRAPPER_URL": WRAPPER.as_uri(),
         }
     )
 
@@ -172,7 +172,7 @@ def _install_env(
             "AVARCH_IMAGE": image,
             "AVARCH_INSTALL_DIR": str(install_dir),
             "AVARCH_SKIP_PULL": "1" if skip_pull else "0",
-            "AVARCH_WRAPPER_FILE": str(WRAPPER),
+            "AVARCH_WRAPPER_URL": WRAPPER.as_uri(),
         }
     )
     return env

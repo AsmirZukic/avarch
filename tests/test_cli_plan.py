@@ -210,7 +210,6 @@ def test_plan_command_accepts_builtin_hdr_source_with_hdr_to_sdr(tmp_path: Path)
         config_path,
         media_file,
         normalize_probe(representative_probe_payload()),
-        raw_probe=representative_probe_payload(),
     )
 
     result = runner.invoke(
@@ -296,7 +295,6 @@ def _init_config(tmp_path: Path) -> Path:
 def _tracked_file(config_path: Path, path: Path) -> Path:
     path.write_bytes(b"media")
     stat_result = path.stat()
-    now = datetime(2026, 6, 14, tzinfo=UTC)
     engine = _engine(config_path)
     with Session(engine) as session:
         session.add(
@@ -307,8 +305,6 @@ def _tracked_file(config_path: Path, path: Path) -> Path:
                 device_id=stat_result.st_dev,
                 inode=stat_result.st_ino,
                 fs_fingerprint="key",
-                discovered_at=now,
-                last_seen_at=now,
                 status=MediaFileStatus.PRESENT,
             )
         )
@@ -322,7 +318,6 @@ def _store_probe(config_path: Path, media_file: Path) -> None:
         config_path,
         media_file,
         normalize_probe(payload),
-        raw_probe=payload,
     )
 
 
@@ -341,7 +336,6 @@ def _store_normalized_probe(
         store_probe_result(
             session,
             media_file=stored_media_file,
-            raw_probe=raw_probe or {"format": {}},
             normalized_probe=normalized_probe,
             created_at=datetime(2026, 6, 14, tzinfo=UTC),
         )

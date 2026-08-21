@@ -4,7 +4,6 @@ import os
 import select
 import sys
 import termios
-from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol, TextIO, cast
 
@@ -21,15 +20,6 @@ class KeySource(Protocol):
     supported: bool
 
     def poll_key(self) -> str | None: ...
-
-
-@dataclass(slots=True)
-class UnsupportedKeySource:
-    reason: str = "unsupported"
-    supported: bool = False
-
-    def poll_key(self) -> str | None:
-        return None
 
 
 class PosixKeySource:

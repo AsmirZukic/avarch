@@ -11,38 +11,11 @@ from typing import Protocol
 
 from avarch.domain.progress import TERMINAL_PROGRESS_PHASES, ProgressPhase, ProgressSnapshot
 
-__all__ = [
-    "CoalescingProgressBridge",
-    "DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS",
-    "NoopProgressSink",
-    "ProgressPersistenceThrottle",
-    "ProgressSink",
-    "RecordingProgressSink",
-    "publish_progress_safely",
-]
-
 DEFAULT_PROGRESS_PERSISTENCE_INTERVAL_SECONDS = 1.5
 
 
 class ProgressSink(Protocol):
     def publish(self, snapshot: ProgressSnapshot) -> None: ...
-
-
-class NoopProgressSink:
-    def publish(self, snapshot: ProgressSnapshot) -> None:
-        del snapshot
-
-
-class RecordingProgressSink:
-    def __init__(self) -> None:
-        self._snapshots: list[ProgressSnapshot] = []
-
-    @property
-    def snapshots(self) -> tuple[ProgressSnapshot, ...]:
-        return tuple(self._snapshots)
-
-    def publish(self, snapshot: ProgressSnapshot) -> None:
-        self._snapshots.append(snapshot)
 
 
 ProgressConsumer = Callable[[ProgressSnapshot], Awaitable[None]]
@@ -170,16 +143,6 @@ class ProgressPersistenceThrottle:
                 self._pending_ordinary,
                 snapshot,
             )
-
-    def flush_due(self) -> bool:
-        with self._lock:
-            if self._pending_ordinary is None or self._last_published_at is None:
-                return False
-            if self._clock() - self._last_published_at < self._interval_seconds:
-                return False
-            snapshot = self._pending_ordinary
-            self._pending_ordinary = None
-            return self._publish_now(snapshot)
 
     def close(self) -> bool:
         with self._lock:

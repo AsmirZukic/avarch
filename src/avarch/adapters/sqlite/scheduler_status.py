@@ -32,9 +32,7 @@ class SqliteSchedulerStatusStore:
         lease_state = "inactive"
         if state.runner_id is not None:
             lease_state = (
-                "active"
-                if scheduler_state_adapter.lease_active(state, now=now)
-                else "stale"
+                "active" if scheduler_state_adapter.lease_active(state, now=now) else "stale"
             )
         return SchedulerStatusView(
             mode=SchedulerMode(state.mode),

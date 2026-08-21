@@ -62,15 +62,8 @@ trap cleanup EXIT HUP INT TERM
 wrapper_tmp="$tmpdir/avarch-wrapper"
 installed_tmp="$tmpdir/avarch"
 
-if [ -n "${AVARCH_WRAPPER_FILE:-}" ]; then
-  cp "$AVARCH_WRAPPER_FILE" "$wrapper_tmp"
-elif command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$WRAPPER_URL" -o "$wrapper_tmp"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$wrapper_tmp" "$WRAPPER_URL"
-else
-  die "curl or wget is required to download the Avarch wrapper"
-fi
+command -v curl >/dev/null 2>&1 || die "curl is required to download the Avarch wrapper"
+curl -fsSL "$WRAPPER_URL" -o "$wrapper_tmp"
 
 if [ "$SKIP_PULL" != "1" ]; then
   docker pull "$IMAGE"
@@ -79,7 +72,9 @@ fi
 awk -v image="$IMAGE" '
   NR == 1 {
     print
-    print "AVARCH_DEFAULT_IMAGE='\''" image "'\''"
+    print "if [ -z \"${AVARCH_IMAGE:-}\" ]; then"
+    print "  AVARCH_IMAGE='\''" image "'\''"
+    print "fi"
     next
   }
   { print }

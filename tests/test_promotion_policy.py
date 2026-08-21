@@ -12,13 +12,6 @@ def test_policy_allows_three_promotion_modes() -> None:
     )
 
 
-def test_promotion_suffixes_are_deterministic() -> None:
-    policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
-
-    assert policy.keep_original_name_suffix == ".av1"
-    assert policy.backup_name_suffix == ".avarch-original"
-
-
 def test_policy_hash_is_deterministic_and_excludes_itself() -> None:
     policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
     changed_self = policy.model_copy(update={"policy_hash": "different"})

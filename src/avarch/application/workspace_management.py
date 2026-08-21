@@ -30,7 +30,6 @@ class WorkspaceInfo:
     database_path: Path
     profiles_dir: Path
     scripts_dir: Path
-    work_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +83,6 @@ def discover_workspace_info(
         database_path=workspace.database_path,
         profiles_dir=workspace.profiles_dir,
         scripts_dir=workspace.scripts_dir,
-        work_dir=workspace.work_dir,
     )
 
 

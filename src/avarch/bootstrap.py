@@ -35,14 +35,18 @@ from avarch.adapters.probe import (
 from avarch.adapters.promotion import PromotionWorkflowAdapter
 from avarch.adapters.scheduler_process import SchedulerProcessAdapter
 from avarch.adapters.scheduler_run import SchedulerRuntimeAdapter, SchedulerWorkerAdapter
-from avarch.adapters.sqlite.admin import SqliteDatabaseAdmin
-from avarch.adapters.sqlite.db import UnsupportedDatabaseSchemaError, create_db_engine
+from avarch.adapters.sqlite.database_schema import initialize_database_schema
+from avarch.adapters.sqlite.db import (
+    create_db_engine,
+)
+from avarch.adapters.sqlite.db import (
+    database_table_names as database_table_names,
+)
 from avarch.adapters.sqlite.enqueue import SqliteEnqueueStore
 from avarch.adapters.sqlite.file_views import SqliteFileViewStore
 from avarch.adapters.sqlite.job_control_store import SqliteJobControlStore
 from avarch.adapters.sqlite.job_views import SqliteJobViewStore
 from avarch.adapters.sqlite.manual_validation import SqliteManualValidationPreparationStore
-from avarch.adapters.sqlite.migrations import upgrade_database
 from avarch.adapters.sqlite.models import JobAttempt
 from avarch.adapters.sqlite.plan_views import SqlitePlanViewStore
 from avarch.adapters.sqlite.planning import SqlitePlanningUnitOfWork
@@ -127,51 +131,6 @@ from avarch.application.resource_telemetry import (
 from avarch.config import AppConfig
 from avarch.domain.jobs import AttemptStatus, JobStage
 
-__all__ = [
-    "DatabaseSchemaUpgradeError",
-    "PlanArtifactConflictError",
-    "VapourSynthGenerationError",
-    "VapourSynthEnvironmentAdapters",
-    "VpyRequirements",
-    "VspipeError",
-    "VapourSynthPlanningRuntime",
-    "WorkspaceContext",
-    "WorkspaceError",
-    "create_workspace",
-    "database_admin",
-    "database_admin_errors",
-    "db_session",
-    "db_transaction",
-    "enqueue_store",
-    "file_view_store",
-    "ffprobe_collector",
-    "inventory_scan_workflow",
-    "job_control_store",
-    "job_view_store",
-    "manual_validation_preparation_store",
-    "manual_validation_worker",
-    "plan_view_store",
-    "planning_unit_of_work",
-    "probe_store",
-    "promotion_workflow",
-    "queue_control_store",
-    "queue_retry_store",
-    "scheduler_control_store",
-    "scheduler_process_controller",
-    "scheduler_resource_sampler",
-    "scheduler_snapshot_query",
-    "scheduler_runner",
-    "scheduler_status_store",
-    "upgrade_database_schema",
-    "vapoursynth_environment_adapters",
-    "vapoursynth_planning_runtime",
-    "workspace_database_url",
-]
-
-
-class DatabaseSchemaUpgradeError(RuntimeError):
-    pass
-
 
 @dataclass(frozen=True, slots=True)
 class VapourSynthPlanningRuntime:
@@ -203,15 +162,8 @@ def workspace_database_url(config: AppConfig, config_path: Path) -> str:
     return resolve_database_url(config, config_path)
 
 
-def upgrade_database_schema(database_url: str) -> None:
-    try:
-        upgrade_database(database_url)
-    except UnsupportedDatabaseSchemaError as exc:
-        raise DatabaseSchemaUpgradeError(str(exc)) from exc
-
-
-def database_admin_errors() -> tuple[type[Exception], ...]:
-    return (UnsupportedDatabaseSchemaError,)
+def initialize_database(database_url: str) -> None:
+    initialize_database_schema(database_url)
 
 
 @contextmanager
@@ -226,10 +178,6 @@ def db_transaction(database_url: str) -> Generator[Session]:
     engine = create_db_engine(database_url)
     with Session(engine) as session, session.begin():
         yield session
-
-
-def database_admin(database_url: str) -> SqliteDatabaseAdmin:
-    return SqliteDatabaseAdmin(database_url)
 
 
 def enqueue_store(session: Session) -> SqliteEnqueueStore:

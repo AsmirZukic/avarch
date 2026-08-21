@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-SVT_AV1_AUTO_CPUS_PER_WORKER = 3
-SVT_AV1_AUTO_MAX_WORKERS = 4
-SVT_AV1_AUTO_BYTES_PER_WORKER = 3 * 1024 * 1024 * 1024
-
 
 class ResourceConfidence(StrEnum):
     HIGH = "high"
@@ -122,27 +118,6 @@ def _memory_resource_values(*, sys_fs_cgroup: Path) -> list[ResourceValue]:
     if not values:
         values.append(ResourceValue("unknown", None, ResourceConfidence.DEGRADED, "unavailable"))
     return values
-
-
-def auto_av1an_worker_count(
-    *,
-    cpu_count: int | None = None,
-    memory_bytes: int | None = None,
-    reserved_cpus: int = 1,
-    cpus_per_worker: int = SVT_AV1_AUTO_CPUS_PER_WORKER,
-    max_workers: int = SVT_AV1_AUTO_MAX_WORKERS,
-    bytes_per_worker: int = SVT_AV1_AUTO_BYTES_PER_WORKER,
-) -> int:
-    available = available_cpu_count() if cpu_count is None else cpu_count
-    memory = available_memory_bytes() if memory_bytes is None else memory_bytes
-
-    cpu_budget = max(1, available - reserved_cpus)
-    cpu_bound = max(1, math.floor(cpu_budget / cpus_per_worker))
-    worker_count = min(max_workers, cpu_bound)
-    if memory is not None:
-        memory_bound = max(1, math.floor(memory / bytes_per_worker))
-        worker_count = min(worker_count, memory_bound)
-    return max(1, worker_count)
 
 
 def _cpu_affinity_count() -> int | None:

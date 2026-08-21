@@ -209,7 +209,6 @@ def persist_promotion_claim(
         validated_output_fingerprint=claim.validated_output_fingerprint,
         validated_output_digest=None,
         staging_digest=None,
-        final_fingerprint=None,
         final_digest=None,
         journal_path=str(claim.journal_path),
         owner_token=claim.owner_token,
@@ -306,12 +305,10 @@ def update_promotion_verified(
     *,
     promotion_id: int,
     final_digest: str,
-    final_fingerprint: str,
     now: datetime,
 ) -> None:
     record = _require_promotion_record(session, promotion_id)
     record.final_digest = final_digest
-    record.final_fingerprint = final_fingerprint
     record.phase = PromotionPhase.VERIFIED
     record.updated_at = now
     session.add(record)
@@ -482,7 +479,6 @@ def commit_verified_promotion(
     *,
     record: PromotionRecord,
     installed_path: Path,
-    final_fingerprint: str,
     media_snapshot: PromotedMediaFileSnapshot | None,
     now: datetime,
 ) -> None:
@@ -490,7 +486,6 @@ def commit_verified_promotion(
     attempt = _require_attempt(session, record.attempt_id)
     record.status = PromotionStatus.COMPLETED
     record.phase = PromotionPhase.COMMITTED
-    record.final_fingerprint = final_fingerprint
     record.finished_at = now
     record.updated_at = now
     record.owner_token = None
@@ -520,7 +515,6 @@ def commit_verified_promotion(
         media_file.device_id = media_snapshot.device_id
         media_file.inode = media_snapshot.inode
         media_file.fs_fingerprint = media_snapshot.fs_fingerprint
-        media_file.last_seen_at = now
         media_file.status = MediaFileStatus.PRESENT
         media_file.latest_probe_id = None
         session.add(media_file)

@@ -12,9 +12,9 @@ class SqliteSchedulerControlStore:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def pause(self, *, now: datetime, reason: str | None) -> None:
+    def pause(self, *, now: datetime) -> None:
         try:
-            scheduler_state.pause_scheduler(self._session, now=now, reason=reason)
+            scheduler_state.pause_scheduler(self._session, now=now)
         except scheduler_state.SchedulerControlError as exc:
             raise SchedulerControlWorkflowError(str(exc)) from exc
 
@@ -24,14 +24,14 @@ class SqliteSchedulerControlStore:
         except scheduler_state.SchedulerControlError as exc:
             raise SchedulerControlWorkflowError(str(exc)) from exc
 
-    def drain(self, *, now: datetime, reason: str | None) -> None:
+    def drain(self, *, now: datetime) -> None:
         try:
-            scheduler_state.drain_scheduler(self._session, now=now, reason=reason)
+            scheduler_state.drain_scheduler(self._session, now=now)
         except scheduler_state.SchedulerControlError as exc:
             raise SchedulerControlWorkflowError(str(exc)) from exc
 
-    def stop(self, *, now: datetime, reason: str | None) -> None:
+    def stop(self, *, now: datetime) -> None:
         try:
-            scheduler_state.stop_scheduler(self._session, now=now, reason=reason)
+            scheduler_state.stop_scheduler(self._session, now=now)
         except scheduler_state.SchedulerControlError as exc:
             raise SchedulerControlWorkflowError(str(exc)) from exc

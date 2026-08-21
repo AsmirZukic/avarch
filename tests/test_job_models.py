@@ -286,7 +286,6 @@ def test_insert_prepared_promotion_record(tmp_path: Path) -> None:
                 validated_output_fingerprint="output-fs",
                 validated_output_digest=None,
                 staging_digest=None,
-                final_fingerprint=None,
                 final_digest=None,
                 journal_path="/work/runtime/promotion-journal.json",
                 created_at=now,
@@ -303,7 +302,7 @@ def test_insert_prepared_promotion_record(tmp_path: Path) -> None:
 
 
 def _engine(tmp_path: Path):
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 
@@ -316,8 +315,6 @@ def _media_file(now: datetime) -> MediaFile:
         device_id=3,
         inode=4,
         fs_fingerprint="fingerprint",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
 

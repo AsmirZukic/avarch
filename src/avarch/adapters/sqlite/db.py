@@ -3,24 +3,9 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from sqlalchemy import Engine, event, inspect, text
-from sqlalchemy.engine import make_url
+from sqlalchemy import event, inspect
+from sqlalchemy.engine import Engine, make_url
 from sqlmodel import SQLModel, create_engine
-
-from avarch.contracts import ALEMBIC_HEAD_REVISION, ALEMBIC_SUPPORTED_REVISIONS
-
-RESET_DATABASE_MESSAGE = """This database cannot be used by this avarch build.
-
-Move or remove the configured avarch data directory, then initialize
-fresh local state:
-
-    uv run avarch init
-    uv run avarch db upgrade
-    uv run avarch scan ."""
-
-
-class UnsupportedDatabaseSchemaError(RuntimeError):
-    pass
 
 
 def create_db_engine(database_url: str) -> Engine:
@@ -32,6 +17,12 @@ def create_db_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite"):
         _configure_sqlite(engine, database_url)
     return engine
+
+
+def database_table_names(database_url: str) -> set[str]:
+    engine = create_db_engine(database_url)
+    with engine.connect():
+        return set(inspect(engine).get_table_names())
 
 
 def _configure_sqlite(engine: Engine, database_url: str) -> None:
@@ -74,29 +65,3 @@ def _is_file_backed_sqlite(database_url: str) -> bool:
 def create_db_schema(engine: Engine) -> None:
     import_module("avarch.adapters.sqlite.models")
     SQLModel.metadata.create_all(engine)
-
-
-def verify_database_revision(
-    engine: Engine,
-    *,
-    expected_revision: str = ALEMBIC_HEAD_REVISION,
-) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "alembic_version" not in tables:
-        if tables:
-            raise UnsupportedDatabaseSchemaError(RESET_DATABASE_MESSAGE)
-        return
-
-    with engine.connect() as connection:
-        revisions = [
-            row[0]
-            for row in connection.execute(text("SELECT version_num FROM alembic_version")).all()
-        ]
-
-    if revisions == [expected_revision] or (
-        len(revisions) == 1 and revisions[0] in ALEMBIC_SUPPORTED_REVISIONS
-    ):
-        return
-
-    raise UnsupportedDatabaseSchemaError(RESET_DATABASE_MESSAGE)

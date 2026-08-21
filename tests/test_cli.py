@@ -42,11 +42,6 @@ def test_cli_version_command_exits_successfully() -> None:
         ["workflow", "run"],
         ["system"],
         ["system", "resources"],
-        ["performance"],
-        ["performance", "calibration-policy"],
-        ["db"],
-        ["db", "current"],
-        ["db", "upgrade"],
     ],
 )
 def test_user_can_check_help_for_each_command(command: list[str]) -> None:
@@ -63,15 +58,3 @@ def test_system_resources_reports_detected_envelope() -> None:
     assert "Resources" in result.output
     assert "effective CPUs" in result.output
     assert "effective memory" in result.output
-
-
-def test_performance_calibration_policy_reports_budget() -> None:
-    result = runner.invoke(
-        app,
-        ["performance", "calibration-policy", "--predicted-seconds", "10000"],
-    )
-
-    assert result.exit_code == 0
-    assert "Calibration policy" in result.output
-    assert "decision: run" in result.output
-    assert "budget:   100s" in result.output

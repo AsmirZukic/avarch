@@ -210,9 +210,8 @@ def persist_media_plan(session: Session, *, plan: TranscodePlan, now: datetime) 
     if existing is not None:
         existing.is_current = True
         existing.is_valid = True
-        existing.superseded_at = None
         session.add(existing)
-        _supersede_other_current_plans(session, plan=plan, keep_plan_id=existing.id, now=now)
+        _supersede_other_current_plans(session, plan=plan, keep_plan_id=existing.id)
         return existing
 
     probe_result = session.exec(
@@ -241,7 +240,7 @@ def persist_media_plan(session: Session, *, plan: TranscodePlan, now: datetime) 
     )
     session.add(media_plan)
     session.flush()
-    _supersede_other_current_plans(session, plan=plan, keep_plan_id=media_plan.id, now=now)
+    _supersede_other_current_plans(session, plan=plan, keep_plan_id=media_plan.id)
     return media_plan
 
 
@@ -320,7 +319,6 @@ def _supersede_other_current_plans(
     *,
     plan: TranscodePlan,
     keep_plan_id: int | None,
-    now: datetime,
 ) -> None:
     plans = list(
         session.exec(
@@ -335,5 +333,4 @@ def _supersede_other_current_plans(
         if media_plan.id == keep_plan_id:
             continue
         media_plan.is_current = False
-        media_plan.superseded_at = now
         session.add(media_plan)

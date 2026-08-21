@@ -30,7 +30,7 @@ def scaffold_template_script(*, scripts_dir: Path, name: str) -> ScriptScaffoldR
 
 
 def filter_scaffold_text() -> str:
-    return '''from __future__ import annotations
+    return """from __future__ import annotations
 
 import vapoursynth as vs
 
@@ -40,17 +40,17 @@ from avarch.vpy_api import FilterContext
 def apply(video: vs.VideoNode, context: FilterContext) -> vs.VideoNode:
     del context
     return video
-'''
+"""
 
 
 def template_scaffold_text() -> str:
-    return '''from __future__ import annotations
+    return """from __future__ import annotations
 
 from avarch.vpy_api import bestsource_clip
 
 clip = bestsource_clip()
 clip.set_output(index=0)
-'''
+"""
 
 
 def _write_script(*, scripts_dir: Path, filename: str, text: str) -> ScriptScaffoldResult:

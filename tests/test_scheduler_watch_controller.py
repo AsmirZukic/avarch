@@ -18,14 +18,14 @@ def test_watch_controller_pauses_and_resumes_scheduler() -> None:
     scheduler = _SchedulerStore()
     controller = _controller(scheduler_store=scheduler)
 
-    pause = controller.pause(reason="operator")
+    pause = controller.pause()
     resume = controller.resume()
 
     assert pause.action == "pause"
     assert resume.action == "resume"
     assert scheduler.calls == [
-        ("pause", _NOW, "operator"),
-        ("resume", _NOW, None),
+        ("pause", _NOW),
+        ("resume", _NOW),
     ]
 
 
@@ -90,16 +90,6 @@ def test_watch_controller_detach_has_no_scheduler_side_call() -> None:
     assert job_store.cancelled == []
 
 
-def test_watch_controller_stops_scheduler_in_owner_mode() -> None:
-    scheduler = _SchedulerStore()
-    controller = _controller(scheduler_store=scheduler)
-
-    result = controller.stop(reason="owner dashboard")
-
-    assert result.action == "stop"
-    assert scheduler.calls == [("stop", _NOW, "owner dashboard")]
-
-
 _NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 
@@ -120,19 +110,19 @@ def _controller(
 
 class _SchedulerStore:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, datetime, str | None]] = []
+        self.calls: list[tuple[str, datetime]] = []
 
-    def pause(self, *, now: datetime, reason: str | None) -> None:
-        self.calls.append(("pause", now, reason))
+    def pause(self, *, now: datetime) -> None:
+        self.calls.append(("pause", now))
 
     def resume(self, *, now: datetime) -> None:
-        self.calls.append(("resume", now, None))
+        self.calls.append(("resume", now))
 
-    def drain(self, *, now: datetime, reason: str | None) -> None:
-        self.calls.append(("drain", now, reason))
+    def drain(self, *, now: datetime) -> None:
+        self.calls.append(("drain", now))
 
-    def stop(self, *, now: datetime, reason: str | None) -> None:
-        self.calls.append(("stop", now, reason))
+    def stop(self, *, now: datetime) -> None:
+        self.calls.append(("stop", now))
 
 
 class _JobStore:

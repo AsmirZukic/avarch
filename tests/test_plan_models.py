@@ -38,17 +38,6 @@ def test_plan_round_trips_through_json() -> None:
     assert restored == plan
 
 
-def test_legacy_plan_without_split_hashes_loads_with_compatibility_defaults() -> None:
-    data = sample_plan().model_dump(mode="json")
-    data.pop("semantic_hash", None)
-    data.pop("resource_policy_hash", None)
-
-    restored = TranscodePlan.model_validate(data)
-
-    assert restored.semantic_hash is None
-    assert restored.resource_policy_hash is None
-
-
 def test_plan_requires_promotion_policy() -> None:
     data = sample_plan().model_dump()
     data.pop("promotion")
@@ -82,7 +71,7 @@ def test_video_plan_contains_source_pixel_and_color_metadata() -> None:
     assert plan.video.source_color_space == "bt709"
 
 
-def test_av1an_spec_defaults_to_auto_resume_policy() -> None:
+def test_av1an_spec_defaults_to_one_worker() -> None:
     spec = Av1anCommandSpec(
         input_path=Path("/media/movie.mkv"),
         video_output_path=Path("/output/video-only.mkv"),
@@ -90,10 +79,9 @@ def test_av1an_spec_defaults_to_auto_resume_policy() -> None:
         working_directory=Path("/work"),
         encoder="svt-av1",
         encoder_args=["--crf", "28"],
-        workers=6,
     )
 
-    assert spec.resume_policy == "auto"
+    assert spec.workers == 1
 
 
 def test_plan_requires_valid_stream_indexes() -> None:
@@ -128,6 +116,7 @@ def sample_plan() -> TranscodePlan:
     script_path = Path("/work/movie.vpy")
     return TranscodePlan(
         plan_hash="plan-hash",
+        semantic_hash="semantic-hash",
         input_path=input_path,
         output_path=output_path,
         temp_dir=work_dir,
@@ -158,9 +147,6 @@ def sample_plan() -> TranscodePlan:
             source_stream_index=1,
             source_codec="aac",
             source_language="eng",
-            source_channels=6,
-            source_title="Main",
-            source_commentary=False,
             target_codec="libopus",
             target_bitrate="128k",
             target_channels=2,
@@ -177,10 +163,9 @@ def sample_plan() -> TranscodePlan:
             ]
         ),
         execution_identity=ExecutionIdentity(
-            av1an_contract_version=2,
+            av1an_contract_version=4,
             ffmpeg_mux_contract_version=1,
             av1an_version_family="0.5.x",
-            video_container="mkv",
             final_container="mkv",
             identity_hash="identity-hash",
         ),

@@ -56,9 +56,6 @@ runner = CliRunner()
         [],
         ["init"],
         ["doctor"],
-        ["db"],
-        ["db", "current"],
-        ["db", "upgrade"],
         ["scan"],
         ["files", "list"],
         ["probe"],
@@ -370,8 +367,6 @@ def test_validation_report_workflow_for_missing_output_fails_required_checks(
         device_id=source.stat().st_dev,
         inode=source.stat().st_ino,
         fs_fingerprint=create_file_snapshot(source).fs_fingerprint,
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     plan = _localized_plan(tmp_path=tmp_path, media_file=media_file)
@@ -487,8 +482,6 @@ def _store_media_file(session: Session, path: Path, now: datetime) -> MediaFile:
         device_id=snapshot.device_id,
         inode=snapshot.inode,
         fs_fingerprint=snapshot.fs_fingerprint,
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)
@@ -497,7 +490,6 @@ def _store_media_file(session: Session, path: Path, now: datetime) -> MediaFile:
     store_probe_result(
         session,
         media_file=media_file,
-        raw_probe=raw_probe,
         normalized_probe=normalize_probe(raw_probe),
         created_at=now,
     )
@@ -671,9 +663,6 @@ def _passing_report(
         policy_hash=plan.validation.policy_hash,
         source_path=Path(media_file.path),
         output_path=plan.output_path,
-        source_fs_fingerprint_before=media_file.fs_fingerprint,
-        source_fs_fingerprint_after=media_file.fs_fingerprint,
-        output_fs_fingerprint_before=create_file_snapshot(plan.output_path).fs_fingerprint,
         output_fs_fingerprint_after=create_file_snapshot(plan.output_path).fs_fingerprint,
         passed=True,
         checks=[

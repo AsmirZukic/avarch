@@ -123,8 +123,6 @@ def _seed_running_job(engine: Engine, *, now: datetime) -> tuple[int, int]:
             inode=1,
             fs_fingerprint="fingerprint",
             status=MediaFileStatus.PRESENT,
-            discovered_at=now,
-            last_seen_at=now,
         )
         session.add(media)
         session.flush()

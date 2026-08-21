@@ -12,8 +12,6 @@ from pydantic import ValidationError
 from avarch.config import AppConfig
 from avarch.profiles.models import EncodingProfile, ProfileDocument
 
-RESERVED_BUILTIN_PROFILE_NAMES = frozenset({"default", "anime", "web_archive"})
-
 
 class ProfileOrigin(StrEnum):
     BUILTIN = "builtin"
@@ -28,14 +26,6 @@ class DuplicateProfileNameError(ProfileRegistryError):
     pass
 
 
-class ReservedProfileNameError(ProfileRegistryError):
-    pass
-
-
-class NoProfilesFoundError(ProfileRegistryError):
-    pass
-
-
 class UnknownProfileError(ProfileRegistryError):
     pass
 
@@ -47,22 +37,6 @@ class ResolvedProfile:
     profile: EncodingProfile
     origin: ProfileOrigin
     source: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProfileValidationIssue:
-    source: str
-    error: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProfileValidationSummary:
-    valid: tuple[ResolvedProfile, ...]
-    invalid: tuple[ProfileValidationIssue, ...]
-
-    @property
-    def ok(self) -> bool:
-        return not self.invalid
 
 
 class ProfileRegistry:
@@ -83,28 +57,8 @@ class ProfileRegistry:
         builtins = _load_packaged_profiles()
         user_profiles = _load_user_profile_search_paths(config.profile_registry.search_paths)
         user_names = {profile.name for profile in user_profiles}
-        for profile in user_profiles:
-            if profile.name in RESERVED_BUILTIN_PROFILE_NAMES:
-                raise ReservedProfileNameError(
-                    f"User profile uses reserved built-in name: {profile.name} ({profile.source})"
-                )
-        visible_builtins = tuple(
-            profile
-            for profile in builtins
-            if profile.name not in user_names or profile.name in RESERVED_BUILTIN_PROFILE_NAMES
-        )
+        visible_builtins = tuple(profile for profile in builtins if profile.name not in user_names)
         return cls((*visible_builtins, *user_profiles))
-
-    @classmethod
-    def load(cls, *, search_paths: list[Path]) -> ProfileRegistry:
-        profiles = _load_user_profile_search_paths(search_paths)
-        if not profiles:
-            locations = ", ".join(str(path) for path in search_paths) or "(none configured)"
-            raise NoProfilesFoundError(
-                "No profiles found in configured search paths.\n"
-                f"Check: {locations}"
-            )
-        return cls(tuple(profiles))
 
     def list_profiles(self) -> tuple[ResolvedProfile, ...]:
         return self._profiles
@@ -114,41 +68,6 @@ class ProfileRegistry:
         if profile is None:
             raise UnknownProfileError(f"Unknown profile: {name}")
         return profile
-
-    def validate_all(self) -> ProfileValidationSummary:
-        return ProfileValidationSummary(valid=self._profiles, invalid=())
-
-
-PROFILE_DIRECTORY_README = """Avarch profile documents live in this directory.
-
-Inspect the .toml files here to see which profiles are available.
-Edit a copied profile or add a new .toml file to create your own profile.
-Update [profile_registry].search_paths in .avarch/config.toml if you want profiles in a
-different location.
-"""
-
-
-def seed_packaged_profiles(search_path: Path, *, overwrite: bool = False) -> tuple[Path, ...]:
-    search_path.mkdir(parents=True, exist_ok=True)
-    seeded: list[Path] = []
-    for resource in _packaged_profile_resources():
-        if resource.name == "default.toml":
-            continue
-        destination = search_path / resource.name
-        if destination.exists() and not overwrite:
-            continue
-        destination.write_text(resource.read_text(encoding="utf-8"), encoding="utf-8")
-        seeded.append(destination)
-
-    readme_path = search_path / "README.md"
-    if overwrite or not readme_path.exists():
-        readme_path.write_text(PROFILE_DIRECTORY_README, encoding="utf-8")
-
-    return tuple(seeded)
-
-
-def packaged_profile_names() -> tuple[str, ...]:
-    return tuple(Path(resource.name).stem for resource in _packaged_profile_resources())
 
 
 def _load_user_profile_search_paths(search_paths: list[Path]) -> list[ResolvedProfile]:
@@ -172,7 +91,6 @@ def _load_user_profiles(search_path: Path) -> list[ResolvedProfile]:
                 data,
                 origin=ProfileOrigin.USER,
                 source=str(path),
-                base_dir=path.parent,
                 scripts_dir=_scripts_dir_for_profile(path),
             )
         )
@@ -188,7 +106,6 @@ def _load_packaged_profiles() -> tuple[ResolvedProfile, ...]:
                 data,
                 origin=ProfileOrigin.BUILTIN,
                 source=f"packaged:{resource.name}",
-                base_dir=None,
                 scripts_dir=None,
             )
         )
@@ -210,7 +127,6 @@ def _resolved_profile(
     *,
     origin: ProfileOrigin,
     source: str,
-    base_dir: Path | None,
     scripts_dir: Path | None,
 ) -> ResolvedProfile:
     try:

@@ -1,47 +1,26 @@
 from __future__ import annotations
 
-TRANSCODE_PLAN_SCHEMA_VERSION = 5
+TRANSCODE_PLAN_SCHEMA_VERSION = 7
 NORMALIZED_PROBE_SCHEMA_VERSION = 1
 VALIDATION_POLICY_SCHEMA_VERSION = 2
 VALIDATION_REPORT_SCHEMA_VERSION = 1
 VAPOURSYNTH_PLAN_SCHEMA_VERSION = 1
-AV1AN_COMMAND_SCHEMA_VERSION = 2
+AV1AN_COMMAND_SCHEMA_VERSION = 4
 FFMPEG_MUX_SCHEMA_VERSION = 1
 EXECUTION_IDENTITY_SCHEMA_VERSION = 1
 AV1AN_STAGE_MARKER_SCHEMA_VERSION = 1
 ENCODE_RESULT_RECEIPT_SCHEMA_VERSION = 1
 
 QUEUE_CONTRACT = "queue-job-v1"
-WORK_KEY_CONTRACT = "work-v5"
+WORK_KEY_CONTRACT = "work-v7"
 VAPOURSYNTH_TEMPLATE_HASH_CONTRACT = "vpy-template-v1"
 VAPOURSYNTH_SCRIPT_HASH_CONTRACT = "vpy-script-v1"
 VAPOURSYNTH_IDENTITY_HASH_CONTRACT = "vpy-identity-v1"
 EXECUTION_IDENTITY_HASH_CONTRACT = "execution-identity-v1"
-PLAN_HASH_CONTRACT = "plan-v2"
+PLAN_HASH_CONTRACT = "plan-v4"
 PLAN_SEMANTIC_HASH_CONTRACT = "plan-semantic-v1"
-RESOURCE_POLICY_HASH_CONTRACT = "resource-policy-v1"
-EXECUTION_ENVIRONMENT_HASH_CONTRACT = "execution-environment-v1"
-WORKLOAD_SIGNATURE_HASH_CONTRACT = "workload-signature-v1"
-PROFILE_HASH_CONTRACT = "profile-v3"
+PROFILE_HASH_CONTRACT = "profile-v5"
 AV1AN_SPEC_HASH_CONTRACT = "av1an-spec-v1"
 FFMPEG_MUX_SPEC_HASH_CONTRACT = "ffmpeg-mux-spec-v1"
 VALIDATION_POLICY_HASH_CONTRACT = "validation-policy-v2"
 PROMOTION_POLICY_HASH_CONTRACT = "promotion-policy-v1"
-
-ALEMBIC_BASELINE_REVISION = "0001_initial"
-ALEMBIC_HEAD_REVISION = "0014_calibration_observations"
-ALEMBIC_SUPPORTED_REVISIONS = frozenset(
-    {
-        ALEMBIC_BASELINE_REVISION,
-        "0005_job_state_version",
-        "0006_job_attempt_progress",
-        "0007_structured_attempt_progress",
-        "0008_scheduler_sessions_and_lifecycle_events",
-        "0009_scheduler_runtime_capacity",
-        "0010_performance_observations",
-        "0011_performance_environment_signature",
-        "0012_performance_workload_signature",
-        "0013_resource_reservations",
-        ALEMBIC_HEAD_REVISION,
-    }
-)

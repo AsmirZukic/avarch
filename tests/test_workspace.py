@@ -27,13 +27,11 @@ def test_workspace_derives_all_paths(tmp_path: Path) -> None:
     workspace = WorkspaceContext(tmp_path)
 
     assert workspace.avarch_dir == tmp_path / ".avarch"
-    assert workspace.workspace_toml == tmp_path / ".avarch" / "workspace.toml"
     assert workspace.config_toml == tmp_path / ".avarch" / "config.toml"
     assert workspace.profiles_dir == tmp_path / ".avarch" / "profiles"
     assert workspace.scripts_dir == tmp_path / ".avarch" / "scripts"
     assert workspace.vpy_requirements_toml == tmp_path / ".avarch" / "vpy" / "requirements.toml"
-    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db"
-    assert workspace.work_dir == tmp_path / ".avarch" / "work"
+    assert workspace.database_path == tmp_path / ".avarch" / "data" / "avarch.db"
 
 
 def test_workspace_path_cannot_escape_root(tmp_path: Path) -> None:
@@ -87,17 +85,12 @@ def test_init_creates_complete_workspace_layout(
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 0
-    assert (tmp_path / ".avarch" / "workspace.toml").is_file()
     assert (tmp_path / ".avarch" / "config.toml").is_file()
     assert (tmp_path / ".avarch" / "profiles").is_dir()
     assert (tmp_path / ".avarch" / "scripts").is_dir()
     assert (tmp_path / ".avarch" / "vpy" / "requirements.toml").is_file()
     assert (tmp_path / ".avarch" / "vpy" / "environments").is_dir()
-    assert (tmp_path / ".avarch" / "data" / "avarch.adapters.sqlite.db").is_file()
-    assert (tmp_path / ".avarch" / "logs").is_dir()
-    assert (tmp_path / ".avarch" / "work").is_dir()
-    assert (tmp_path / ".avarch" / "tmp").is_dir()
-    assert (tmp_path / ".avarch" / "run").is_dir()
+    assert (tmp_path / ".avarch" / "data" / "avarch.db").is_file()
 
 
 def test_workspace_scan_persists_relative_media_paths(

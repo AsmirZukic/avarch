@@ -418,7 +418,6 @@ src/avarch/
 |   `-- recovery.py
 |
 |-- application/
-|   |-- database_admin.py
 |   |-- enqueue.py
 |   |-- file_views.py
 |   |-- inventory_scan.py
@@ -454,7 +453,7 @@ src/avarch/
 |   |   |-- queue_control.py
 |   |   |-- scheduler_*.py
 |   |   |-- validations.py
-|   |   `-- migrations.py
+|   |   `-- database_schema.py
 |   |-- execution.py
 |   |-- inventory_scan.py
 |   |-- job_preparation.py
@@ -914,7 +913,6 @@ The following are prohibited unless justified by a concrete current need:
 - speculative extension points;
 - deep inheritance;
 - reflection-based dispatch;
-- broad compatibility layers kept indefinitely;
 - duplicate domain, DTO, persistence, and API models without behavioral value.
 
 Prefer:
@@ -926,14 +924,14 @@ Prefer:
 - ordinary modules;
 - enums and tagged outcomes;
 - straightforward control flow;
-- deletion of obsolete code.
+- deletion of unused code.
 
 A new abstraction should make current code easier to understand or test. "We might need it later"
 is not sufficient.
 
 ## 18. Architecture Rules for Contributors and Agents
 
-Any contributor or coding agent performing the refactor must follow these rules:
+Any contributor or coding agent changing the architecture must follow these rules:
 
 1. Preserve observable behavior unless a requirement explicitly changes it.
 2. Add characterization tests before moving poorly understood behavior.
@@ -941,15 +939,14 @@ Any contributor or coding agent performing the refactor must follow these rules:
 4. Keep the test suite green after every slice.
 5. Commit after every green slice.
 6. Do not combine unrelated behavior changes with structural moves.
-7. Do not introduce compatibility shims unless they are required and have a removal point.
-8. Delete superseded modules after callers have migrated.
-9. Do not leave two architectural paths for the same behavior.
-10. Do not rename domain concepts casually.
-11. Keep public CLI behavior stable unless the change is explicitly part of the task.
-12. Do not bypass the state machine for convenience.
-13. Do not allow adapter types to leak through application boundaries.
-14. Do not introduce a framework to solve a local module-organization problem.
-15. Record any deliberate deviation from this document as an architecture decision.
+7. Delete superseded modules after callers have migrated.
+8. Do not leave two architectural paths for the same behavior.
+9. Do not rename domain concepts casually.
+10. Keep public CLI behavior stable unless the change is explicitly part of the task.
+11. Do not bypass the state machine for convenience.
+12. Do not allow adapter types to leak through application boundaries.
+13. Do not introduce a framework to solve a local module-organization problem.
+14. Record any deliberate deviation from this document as an architecture decision.
 
 ### 18.1 Port-and-Delete Rule
 
@@ -960,15 +957,10 @@ When moving behavior into a new domain, application, adapter, or workflow module
 
 - migrate callers to the new owner;
 - run the focused tests that prove the new path preserves behavior;
-- delete the old function, module, re-export, compatibility facade, or duplicate workflow once it
+- delete the old function, module, re-export, or duplicate workflow once it
     has no callers;
 - search for imports and call sites of the old path before finishing;
 - add or keep a boundary test when it prevents the old dependency direction from returning.
-
-Temporary compatibility shims are allowed only when a slice cannot safely migrate all callers at
-once. They must be small, explicitly transitional, covered by tests, and removed in the next slice
-that migrates the remaining callers. A port is not complete while both old and new architectural
-paths remain reachable for the same behavior.
 
 When current behavior is ambiguous:
 
@@ -977,117 +969,7 @@ When current behavior is ambiguous:
 - add a characterization test;
 - document the assumption in the commit or implementation notes.
 
-## 19. Recommended Refactoring Sequence
-
-The architectural overhaul should be incremental.
-
-### Phase 1: Characterize Current Behavior
-
-- Identify public CLI workflows.
-- Map scheduler stages and status mutations.
-- Locate all filesystem mutations.
-- Locate all subprocess ownership.
-- Locate all direct database access.
-- Add tests around destructive and recovery-sensitive behavior.
-- Establish a green baseline.
-
-No major movement should happen before critical behavior is protected.
-
-### Phase 2: Establish Package Boundaries
-
-- Create the target top-level packages.
-- Add `bootstrap.py` as the composition root.
-- Move modules without changing behavior where possible.
-- Update imports.
-- Keep commits mechanical and reviewable.
-- Add import-boundary checks if practical.
-
-### Phase 3: Extract Pure Domain Policy
-
-Extract and test:
-
-- planning decisions;
-- file eligibility;
-- validation policy;
-- output-size decisions;
-- retry and skip decisions;
-- recovery decisions;
-- execution identity;
-- state transitions.
-
-Remove I/O from those functions.
-
-### Phase 4: Centralize Job Transitions
-
-- Define legal states and events.
-- Route all status changes through transition logic.
-- Make persisted updates atomic.
-- Add stale-write protection.
-- Add exhaustive transition tests.
-- Remove direct status assignment outside the state persistence implementation.
-
-### Phase 5: Separate Workflows from Adapters
-
-- Define narrow ports.
-- Move SQLite implementation under `adapters/sqlite`.
-- Move external command integration into dedicated adapters.
-- Make application workflows depend on ports.
-- Remove SQLModel and subprocess knowledge from domain and application policy.
-
-### Phase 6: Split Scheduler Stages
-
-- Make encode, validate, promote, and cleanup independently claimable stages.
-- Introduce explicit resource classes and limits.
-- Preserve ownership and recovery rules.
-- Verify validation and promotion can proceed while encoding continues.
-- Verify stop and cancellation behavior.
-
-### Phase 7: Remove Obsolete Structure
-
-- Delete replaced modules.
-- Remove temporary re-exports.
-- Remove compatibility shims.
-- Remove duplicate workflows.
-- Update tests and documentation.
-- Confirm the old flat architecture is no longer reachable.
-
-Each phase should be split into small TDD slices with a green commit after each slice.
-
-## 20. Definition of Done for the Architectural Overhaul
-
-The overhaul is complete only when all of the following are true.
-
-### Architecture
-
-- The dependency direction in this document is enforced.
-- Domain modules contain no filesystem, database, subprocess, CLI, or scheduler I/O.
-- Application workflows depend on ports rather than concrete adapters.
-- Concrete implementations are assembled in the composition root.
-- Job state changes pass through the central transition model.
-- Encoding, validation, promotion, and cleanup are separate workflow stages.
-- No obsolete parallel architecture remains.
-
-### Behavior
-
-- Existing supported CLI workflows still behave as specified.
-- Original media files remain safe through failure, cancellation, restart, and validation rejection.
-- A candidate that is not smaller is discarded and the original is preserved.
-- Validation and promotion may run while another encoding is active.
-- Stop and cancellation reflect the real external process state.
-- Interrupted work can be recovered deterministically.
-- Durable stages are idempotent.
-
-### Quality
-
-- Tests cover domain policy, state transitions, destructive operations, concurrency claims, and
-  recovery.
-- The full test suite passes.
-- Ruff passes.
-- Pyright passes at the project's configured strictness.
-- Migration and database tests pass.
-- No circular imports remain.
-
-## 21. Scheduler Watch and Studio Integration Notes
+## 19. Scheduler Watch and Studio Integration Notes
 
 `scheduler watch` is intentionally a presentation and control boundary, not a
 second scheduler runtime. The watch loop reads snapshots, samples host/container
@@ -1101,18 +983,8 @@ keyboard input, terminal rendering, and Rich-specific layout code replaceable.
 Logs stay as bounded tails and are never parsed into lifecycle events by the
 dashboard. Resource telemetry remains Linux-first and informational: active
 output growth is not a claim about physical disk throughput.
-- No unused compatibility layers remain.
-- No broad `utils`, `helpers`, or `manager` modules contain domain behavior.
-- Documentation reflects the final package structure and lifecycle.
 
-### Reviewability
-
-- The refactor was delivered in small, green commits.
-- Structural changes and behavior changes are separated.
-- Each commit has a clear purpose.
-- Removed code is actually deleted rather than left behind as an alternate path.
-
-## 21. Architectural Decision Checklist
+## 20. Architectural Decision Checklist
 
 Before adding or changing code, ask:
 
@@ -1129,10 +1001,9 @@ Before adding or changing code, ask:
 11. Does this change preserve the original file under every failure path?
 12. Can the behavior be tested without launching real media tools?
 13. Is there now more than one way to perform the same operation?
-14. Can any obsolete code be deleted after this change?
-15. If a compatibility shim remains, what exact follow-up slice removes it?
+14. Can any unused code be deleted after this change?
 
-## 22. Final Guiding Principles
+## 21. Final Guiding Principles
 
 The Avarch architecture should be judged by these principles:
 

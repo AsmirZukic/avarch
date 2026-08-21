@@ -14,7 +14,7 @@ from tests.probe_fixtures import sdr_probe_payload
 runner = CliRunner()
 
 
-def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
+def test_first_time_setup_workflow_checks_help_init_config_and_doctor(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / ".avarch" / "config.toml"
@@ -23,32 +23,22 @@ def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
     help_result = runner.invoke(app, ["--help"])
     init_result = runner.invoke(app, ["init"])
     doctor_result = runner.invoke(app, ["doctor"])
-    db_current_result = runner.invoke(app, ["db", "current"])
-    db_upgrade_result = runner.invoke(app, ["db", "upgrade"])
 
     assert help_result.exit_code == 0
     assert init_result.exit_code == 0
     assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
     assert profiles_path.is_dir()
     assert f"Profiles dir: {profiles_path}" in init_result.output
-    assert "Profiles: av1_1080p_sdr, default" in init_result.output
+    assert "Profiles: av1_1080p_sdr" in init_result.output
     resolved_profile = ProfileRegistry.from_config(load_config(config_path)).get("av1_1080p_sdr")
     assert resolved_profile.origin == ProfileOrigin.BUILTIN
     assert doctor_result.exit_code == 0
     assert "PASS config_exists" in doctor_result.output
-    assert db_current_result.exit_code == 0
-    assert db_current_result.output.strip()
-    assert db_upgrade_result.exit_code == 0
-    assert "Database upgraded" in db_upgrade_result.output
 
 
 def test_first_time_setup_workflow_reports_broken_config(tmp_path: Path) -> None:
     config_path = tmp_path / ".avarch" / "config.toml"
     (tmp_path / ".avarch").mkdir()
-    (tmp_path / ".avarch" / "workspace.toml").write_text(
-        'schema_version = 1\nid = "test"\n',
-        encoding="utf-8",
-    )
     config_path.write_text("[broken\n", encoding="utf-8")
 
     result = runner.invoke(app, ["doctor"])

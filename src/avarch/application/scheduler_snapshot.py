@@ -6,9 +6,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth, ResourceSample
-from avarch.application.scheduler_blockers import JobEligibilityReason
 from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
 from avarch.domain.progress import ProgressPhase
 from avarch.domain.scheduler import SchedulerMode
@@ -28,6 +26,13 @@ class SchedulerRuntimeState(StrEnum):
     STALE = "stale"
 
 
+class JobEligibilityReason(StrEnum):
+    JOB_HELD = "job_held"
+    CANCEL_REQUESTED = "cancel_requested"
+    SOURCE_MISSING = "source_missing"
+    PLAN_MISSING = "plan_missing"
+
+
 class WorkflowStepState(StrEnum):
     PENDING = "pending"
     ACTIVE = "active"
@@ -35,12 +40,6 @@ class WorkflowStepState(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     SKIPPED = "skipped"
-
-
-class SchedulerAlertSeverity(StrEnum):
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
 
 
 class WorkspaceSummary(SnapshotModel):
@@ -77,11 +76,6 @@ class SessionSummary(SnapshotModel):
 class PipelineSummary(SnapshotModel):
     queued: int = Field(ge=0, strict=True)
     active: int = Field(ge=0, strict=True)
-    encoded: int = Field(default=0, ge=0, strict=True)
-    validating: int = Field(default=0, ge=0, strict=True)
-    ready_to_promote: int = Field(default=0, ge=0, strict=True)
-    promoting: int = Field(default=0, ge=0, strict=True)
-    cleaning: int = Field(default=0, ge=0, strict=True)
     completed: int = Field(ge=0, strict=True)
     failed: int = Field(ge=0, strict=True)
     validation_failed: int = Field(default=0, ge=0, strict=True)
@@ -93,17 +87,6 @@ class PipelineSummary(SnapshotModel):
 class WorkflowStepSummary(SnapshotModel):
     stage: JobStage
     state: WorkflowStepState
-
-
-class EncodeResourceDecisionSummary(SnapshotModel):
-    mode: str
-    effective_workers: int | str
-    effective_svt_lp: int | str
-    reason: str
-    confidence: float = Field(ge=0, le=1)
-    algorithm_version: int = Field(ge=1, strict=True)
-    fallback: bool
-    evidence_count: int | None = Field(default=None, ge=0, strict=True)
 
 
 class AttemptProgressSummary(SnapshotModel):
@@ -127,7 +110,6 @@ class AttemptProgressSummary(SnapshotModel):
     written_output_bytes: int | None = Field(default=None, ge=0, strict=True)
     stale: bool = False
     last_update_age_seconds: int | None = Field(default=None, ge=0, strict=True)
-    resource_decision: EncodeResourceDecisionSummary | None = None
 
 
 class ActiveJobSummary(SnapshotModel):
@@ -137,8 +119,6 @@ class ActiveJobSummary(SnapshotModel):
     status: JobStatus
     stage: JobStage
     priority: int = Field(strict=True)
-    queued_at: datetime | None = None
-    started_at: datetime | None = None
     attempt: AttemptProgressSummary | None = None
     workflow_steps: tuple[WorkflowStepSummary, ...]
 
@@ -150,7 +130,6 @@ class CapacitySummary(SnapshotModel):
     av1an_active: int = Field(default=0, ge=0, strict=True)
     file_ops: int = Field(ge=0, strict=True)
     file_ops_active: int = Field(default=0, ge=0, strict=True)
-    av1an_workers_configured: int | None = Field(default=None, ge=0, strict=True)
     observed_at: datetime | None = None
     stale: bool = False
 
@@ -162,18 +141,13 @@ class UpcomingJobSummary(SnapshotModel):
     stage: JobStage
     status: JobStatus
     priority: int = Field(strict=True)
-    queued_at: datetime | None = None
     selection_position: int | None = Field(default=None, ge=1, strict=True)
     selection_confidence: str | None = None
-    estimated_start_lower_seconds: int | None = Field(default=None, ge=0, strict=True)
-    estimated_start_upper_seconds: int | None = Field(default=None, ge=0, strict=True)
 
 
 class SchedulerAlert(SnapshotModel):
-    severity: SchedulerAlertSeverity
     code: str
     message: str
-    observed_at: datetime | None = None
 
 
 class BlockedJobSummary(SnapshotModel):
@@ -187,7 +161,6 @@ class BlockedJobSummary(SnapshotModel):
 
 
 class LifecycleEventSummary(SnapshotModel):
-    event_id: int = Field(ge=0, strict=True)
     job_id: int = Field(ge=0, strict=True)
     attempt_id: int | None = Field(default=None, ge=0, strict=True)
     scheduler_session_id: int | None = Field(default=None, ge=0, strict=True)
@@ -240,15 +213,6 @@ class WatchLogTailSummary(SnapshotModel):
     truncated: bool = False
 
 
-class QueueForecastSummary(SnapshotModel):
-    available: bool
-    reason: str | None = None
-    confidence: ForecastConfidence = ForecastConfidence.UNAVAILABLE
-    sample_count: int = Field(default=0, ge=0, strict=True)
-    lower_seconds: int | None = Field(default=None, ge=0, strict=True)
-    upper_seconds: int | None = Field(default=None, ge=0, strict=True)
-
-
 class SchedulerSnapshot(SnapshotModel):
     captured_at: datetime
     workspace: WorkspaceSummary
@@ -267,15 +231,13 @@ class SchedulerSnapshot(SnapshotModel):
     watch_message: str | None = None
     watch_confirmation_required: bool = False
     alerts: tuple[SchedulerAlert, ...] = ()
-    forecast: QueueForecastSummary | None = None
 
     def to_canonical_json(self) -> str:
         return canonical_json(self)
 
 
 class SchedulerSnapshotQuery(Protocol):
-    def snapshot(self) -> SchedulerSnapshot:
-        ...
+    def snapshot(self) -> SchedulerSnapshot: ...
 
 
 def resource_telemetry_summary(

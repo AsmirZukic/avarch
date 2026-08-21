@@ -29,12 +29,12 @@ from avarch.domain.jobs import JobStage, JobStatus
 from avarch.domain.scheduler import SchedulerMode
 
 
-def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> None:
+def test_pause_from_running_persists_mode_and_generation(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        pause_scheduler(session, now=now, reason="maintenance")
+        pause_scheduler(session, now=now)
 
     with Session(engine) as session:
         state = session.get(SchedulerState, 1)
@@ -42,8 +42,6 @@ def test_pause_from_running_persists_reason_and_generation(tmp_path: Path) -> No
     assert state is not None
     assert state.mode == SchedulerMode.PAUSED
     assert state.control_generation == 1
-    assert state.control_requested_at == now.replace(tzinfo=None)
-    assert state.control_reason == "maintenance"
 
 
 def test_pause_is_idempotent_when_already_paused(tmp_path: Path) -> None:
@@ -51,9 +49,9 @@ def test_pause_is_idempotent_when_already_paused(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        pause_scheduler(session, now=now, reason="first")
+        pause_scheduler(session, now=now)
     with Session(engine) as session, session.begin():
-        pause_scheduler(session, now=now + timedelta(seconds=1), reason="second")
+        pause_scheduler(session, now=now + timedelta(seconds=1))
 
     with Session(engine) as session:
         state = session.get(SchedulerState, 1)
@@ -61,7 +59,6 @@ def test_pause_is_idempotent_when_already_paused(tmp_path: Path) -> None:
     assert state is not None
     assert state.mode == SchedulerMode.PAUSED
     assert state.control_generation == 1
-    assert state.control_reason == "first"
 
 
 def test_resume_from_paused_returns_to_running(tmp_path: Path) -> None:
@@ -69,7 +66,7 @@ def test_resume_from_paused_returns_to_running(tmp_path: Path) -> None:
     now = datetime.now(UTC)
 
     with Session(engine) as session, session.begin():
-        pause_scheduler(session, now=now, reason="maintenance")
+        pause_scheduler(session, now=now)
     with Session(engine) as session, session.begin():
         resume_scheduler(session, now=now + timedelta(seconds=1))
 
@@ -79,7 +76,6 @@ def test_resume_from_paused_returns_to_running(tmp_path: Path) -> None:
     assert state is not None
     assert state.mode == SchedulerMode.RUNNING
     assert state.control_generation == 2
-    assert state.control_reason is None
 
 
 def test_resume_is_idempotent_when_already_running(tmp_path: Path) -> None:
@@ -109,7 +105,7 @@ def test_drain_requires_active_running_scheduler(tmp_path: Path) -> None:
 
     with Session(engine) as session, session.begin():
         acquire_scheduler_lease(session, runner_id="runner", now=now)
-        drain_scheduler(session, now=now, reason="reboot")
+        drain_scheduler(session, now=now)
 
     with Session(engine) as session:
         state = session.get(SchedulerState, 1)
@@ -117,7 +113,6 @@ def test_drain_requires_active_running_scheduler(tmp_path: Path) -> None:
     assert state is not None
     assert state.mode == SchedulerMode.DRAINING
     assert state.control_generation == 1
-    assert state.control_reason == "reboot"
 
 
 def test_drain_rejects_paused_draining_and_stopping(tmp_path: Path) -> None:
@@ -162,14 +157,13 @@ def test_stop_requires_active_scheduler_and_allows_paused(tmp_path: Path) -> Non
             )
         )
     with Session(engine) as session, session.begin():
-        stop_scheduler(session, now=now, reason="shutdown")
+        stop_scheduler(session, now=now)
 
     with Session(engine) as session:
         state = session.get(SchedulerState, 1)
 
     assert state is not None
     assert state.mode == SchedulerMode.STOPPING
-    assert state.control_reason == "shutdown"
 
 
 def test_stop_rejects_draining_and_stopping(tmp_path: Path) -> None:
@@ -252,8 +246,6 @@ def test_stale_one_shot_mode_resets_on_acquire(tmp_path: Path) -> None:
                 runner_id="old",
                 lease_expires_at=now - timedelta(seconds=1),
                 control_generation=3,
-                control_requested_at=now - timedelta(minutes=1),
-                control_reason="old stop",
                 updated_at=now,
             )
         )
@@ -267,8 +259,6 @@ def test_stale_one_shot_mode_resets_on_acquire(tmp_path: Path) -> None:
     assert state.mode == SchedulerMode.RUNNING
     assert state.runner_id == "new"
     assert state.control_generation == 3
-    assert state.control_requested_at is None
-    assert state.control_reason is None
 
 
 def test_release_one_shot_mode_resets_to_running(tmp_path: Path) -> None:
@@ -458,7 +448,7 @@ def test_stale_capacity_usage_remains_persisted_for_watchers(tmp_path: Path) -> 
 
 def _engine(tmp_path: Path) -> Engine:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.adapters.sqlite.db'}")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'avarch.db'}")
     create_db_schema(engine)
     return engine
 
@@ -491,8 +481,6 @@ def _store_job(
         device_id=3,
         inode=4,
         fs_fingerprint=f"{profile_name}-fingerprint",
-        discovered_at=now,
-        last_seen_at=now,
         status=MediaFileStatus.PRESENT,
     )
     session.add(media_file)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar
 
@@ -20,11 +20,6 @@ from avarch.domain.scheduler import SchedulerMode
 from avarch.models.promotion import PromotionMode, PromotionPhase, PromotionStatus
 
 _JOB_STATE_VERSION_COLUMN = Column("state_version", Integer, nullable=False)
-
-
-class AppMeta(SQLModel, table=True):
-    key: str = Field(primary_key=True)
-    value: str
 
 
 class MediaFileStatus(StrEnum):
@@ -48,8 +43,6 @@ class MediaFile(SQLModel, table=True):
             "and inode. It is not a content hash."
         ),
     )
-    discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: MediaFileStatus = Field(sa_column=Column(String(), nullable=False))
     latest_probe_id: int | None = Field(
         default=None,
@@ -61,7 +54,6 @@ class MediaFile(SQLModel, table=True):
 class ProbeResult(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     media_file_id: int = Field(foreign_key="mediafile.id", index=True)
-    ffprobe_json: str
     normalized_json: str
     probe_hash: str = Field(index=True)
     source_fs_fingerprint: str
@@ -88,7 +80,6 @@ class MediaPlan(SQLModel, table=True):
     is_valid: bool = Field(default=True, index=True)
 
     created_at: datetime
-    superseded_at: datetime | None = None
 
 
 class Job(SQLModel, table=True):
@@ -259,101 +250,6 @@ class JobAttemptProgress(SQLModel, table=True):
     updated_at: datetime
 
 
-class PerformanceObservation(SQLModel, table=True):
-    __tablename__: ClassVar[str] = "performance_observation"  # pyright: ignore[reportIncompatibleVariableOverride]
-
-    id: int | None = Field(default=None, primary_key=True)
-
-    schema_version: int
-
-    job_id: int = Field(foreign_key="job.id", index=True)
-    attempt_id: int = Field(foreign_key="jobattempt.id", unique=True, index=True)
-
-    plan_hash: str | None = Field(default=None, index=True)
-    semantic_hash: str | None = Field(default=None, index=True)
-    resource_policy_hash: str | None = Field(default=None, index=True)
-
-    resource_decision_json: str | None = None
-    tool_versions_json: str | None = None
-    environment_signature_hash: str | None = Field(default=None, index=True)
-    environment_signature_json: str | None = None
-    workload_signature_hash: str | None = Field(default=None, index=True)
-    workload_signature_json: str | None = None
-
-    total_frames: int | None = None
-    observation_duration_seconds: float | None = Field(default=None, sa_column=Column(Float()))
-    aggregate_fps: float | None = Field(default=None, sa_column=Column(Float()))
-    peak_rss_bytes: int | None = None
-    peak_cgroup_memory_bytes: int | None = None
-    average_cpu_utilization_percent: float | None = Field(default=None, sa_column=Column(Float()))
-    swap_current_bytes_delta: int | None = None
-    cpu_throttled_events_delta: int | None = None
-    cpu_throttled_usec_delta: int | None = None
-    memory_oom_events_delta: int | None = None
-    memory_oom_kill_events_delta: int | None = None
-    resource_attribution_available: bool = False
-    incomplete: bool = Field(default=False, index=True)
-
-    progress_samples_observed: int
-    resource_samples_observed: int
-    warmup_seconds: float = Field(sa_column=Column(Float(), nullable=False))
-
-    created_at: datetime
-
-
-class ResourceReservation(SQLModel, table=True):
-    __tablename__: ClassVar[str] = "resource_reservation"  # pyright: ignore[reportIncompatibleVariableOverride]
-
-    id: int | None = Field(default=None, primary_key=True)
-
-    job_id: int = Field(foreign_key="job.id", index=True)
-    attempt_id: int = Field(foreign_key="jobattempt.id", unique=True, index=True)
-    scheduler_session_id: int | None = Field(
-        default=None,
-        foreign_key="scheduler_session.id",
-        index=True,
-    )
-
-    resource_class: ResourceClass = Field(sa_column=Column(String(), nullable=False, index=True))
-    cpu_reserved: float | None = Field(default=None, sa_column=Column(Float(), nullable=True))
-    memory_bytes_reserved: int | None = None
-    exclusive: bool = False
-
-    status: str = Field(default="active", index=True)
-    release_reason: str | None = None
-
-    created_at: datetime
-    released_at: datetime | None = Field(default=None, index=True)
-
-
-class CalibrationObservation(SQLModel, table=True):
-    __tablename__: ClassVar[str] = "calibration_observation"  # pyright: ignore[reportIncompatibleVariableOverride]
-
-    id: int | None = Field(default=None, primary_key=True)
-
-    schema_version: int
-    calibration_key: str = Field(unique=True, index=True)
-
-    semantic_hash: str | None = Field(default=None, index=True)
-    resource_policy_hash: str | None = Field(default=None, index=True)
-    environment_signature_hash: str = Field(index=True)
-    environment_signature_json: str | None = None
-    workload_signature_hash: str = Field(index=True)
-    workload_signature_json: str | None = None
-
-    sample_json: str
-    candidates_json: str
-    measurements_json: str
-    winner_json: str | None = None
-
-    status: str = Field(index=True)
-    confidence: float = Field(sa_column=Column(Float(), nullable=False))
-    measurement_cost_seconds: float = Field(sa_column=Column(Float(), nullable=False))
-    incomplete: bool = Field(default=False, index=True)
-
-    created_at: datetime
-
-
 class ValidationResult(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 
@@ -407,7 +303,6 @@ class PromotionRecord(SQLModel, table=True):
 
     staging_digest: str | None
 
-    final_fingerprint: str | None
     final_digest: str | None
 
     journal_path: str
@@ -439,11 +334,6 @@ class SchedulerState(SQLModel, table=True):
 
     control_generation: int = 0
     acknowledged_generation: int = 0
-
-    control_requested_at: datetime | None = None
-    control_acknowledged_at: datetime | None = None
-
-    control_reason: str | None = None
 
     runner_id: str | None = Field(default=None, index=True)
 
