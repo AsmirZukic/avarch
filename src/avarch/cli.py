@@ -106,6 +106,11 @@ from avarch.application.resource_telemetry import (
     apply_resource_health,
     safe_sample_resources,
 )
+from avarch.application.resources import (
+    ResourceSnapshot,
+    ResourceStatus,
+    effective_resource_snapshot,
+)
 from avarch.application.scheduler_control import (
     SchedulerControlWorkflowError,
     drain_scheduler,
@@ -279,6 +284,7 @@ files_app = typer.Typer(help="Inventory file commands.")
 plans_app = typer.Typer(help="Plan commands.")
 workspace_app = typer.Typer(help="Workspace commands.")
 config_app = typer.Typer(help="Configuration commands.")
+system_app = typer.Typer(help="System diagnostics.")
 workflow_app = typer.Typer(help="Workflow commands.")
 profiles_app = typer.Typer(help="Profile commands.")
 vpy_app = typer.Typer(help="VapourSynth commands.")
@@ -3014,6 +3020,93 @@ def _echo_log_tail(label: str, log_path: str | None, *, tail_bytes: int) -> None
         typer.echo(text.rstrip())
 
 
+@system_app.command("resources")
+def system_resources() -> None:
+    """Show the CPU and memory envelope available to Avarch."""
+    _echo_system_resources(effective_resource_snapshot())
+
+
+def _echo_system_resources(snapshot: ResourceSnapshot) -> None:
+    cpuset = snapshot.cgroup_cpuset
+    quota = snapshot.cgroup_cpu_quota
+    memory = snapshot.cgroup_memory
+
+    typer.echo("Resources")
+    typer.echo("CPU")
+    typer.echo(f"  host logical:     {_display_optional_int(snapshot.host_logical_cpu_count)}")
+    typer.echo(f"  process affinity: {_display_optional_int(snapshot.affinity_cpu_count)}")
+    if cpuset.cpu_count is not None and cpuset.value is not None:
+        typer.echo(
+            f"  cgroup cpuset:    {cpuset.value} ({cpuset.cpu_count} CPUs; "
+            f"{_cgroup_location(cpuset.version, cpuset.path)})"
+        )
+    else:
+        typer.echo(
+            f"  cgroup cpuset:    {_resource_status(cpuset.status, cpuset.version, cpuset.path)}"
+        )
+    if quota.capacity is not None and quota.quota_us is not None and quota.period_us is not None:
+        typer.echo(
+            f"  cgroup quota:     {quota.quota_us} / {quota.period_us} us = "
+            f"{quota.capacity:.2f} CPUs ({_cgroup_location(quota.version, quota.path)})"
+        )
+    else:
+        typer.echo(
+            f"  cgroup quota:     {_resource_status(quota.status, quota.version, quota.path)}"
+        )
+    typer.echo(
+        f"  effective:        {snapshot.effective_cpu_count} "
+        f"({_display_sources(snapshot.effective_cpu_sources)})"
+    )
+    typer.echo("  quota rounding:   floor to whole CPUs; minimum 1")
+
+    typer.echo("Memory")
+    typer.echo(f"  host physical:    {_display_bytes(snapshot.host_memory_bytes)}")
+    if memory.limit_bytes is not None:
+        typer.echo(
+            f"  cgroup limit:     {_display_bytes(memory.limit_bytes)} "
+            f"({_cgroup_location(memory.version, memory.path)})"
+        )
+    elif memory.status == ResourceStatus.UNLIMITED:
+        typer.echo(
+            f"  cgroup limit:     unlimited ({_cgroup_location(memory.version, memory.path)})"
+        )
+    else:
+        typer.echo(
+            f"  cgroup limit:     {_resource_status(memory.status, memory.version, memory.path)}"
+        )
+    typer.echo(
+        f"  effective:        {_display_bytes(snapshot.effective_memory_bytes)}"
+        f"{_parenthesized_sources(snapshot.effective_memory_sources)}"
+    )
+
+
+def _display_optional_int(value: int | None) -> str:
+    return str(value) if value is not None else "unavailable"
+
+
+def _display_bytes(value: int | None) -> str:
+    return f"{format_size(value)} ({value} bytes)" if value is not None else "unavailable"
+
+
+def _display_sources(sources: tuple[str, ...]) -> str:
+    return ", ".join(sources) if sources else "source unavailable"
+
+
+def _parenthesized_sources(sources: tuple[str, ...]) -> str:
+    return f" ({_display_sources(sources)})" if sources else ""
+
+
+def _cgroup_location(version: str | None, path: str | None) -> str:
+    location = Path(path).name if path is not None else "path unavailable"
+    return f"cgroup {version} {location}" if version is not None else f"cgroup {location}"
+
+
+def _resource_status(status: ResourceStatus, version: str | None, path: str | None) -> str:
+    if path is None:
+        return status.value
+    return f"{status.value} ({_cgroup_location(version, path)})"
+
+
 app.add_typer(db_app, name="db")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(jobs_app, name="jobs")
@@ -3021,6 +3114,7 @@ app.add_typer(files_app, name="files")
 app.add_typer(plans_app, name="plans")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(config_app, name="config")
+app.add_typer(system_app, name="system")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(profiles_app, name="profiles")
 vpy_app.add_typer(vpy_scaffold_app, name="scaffold")

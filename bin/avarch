@@ -30,7 +30,7 @@ find_workspace() {
 
 workspace_required() {
   case "${1:-}" in
-    "" | "-h" | "--help" | "--version" | "version" | "init")
+    "" | "-h" | "--help" | "--version" | "version" | "init" | "system")
       return 1
       ;;
     *)
@@ -78,22 +78,74 @@ security_option() {
   fi
 }
 
+validate_resource_limit_options() {
+  if [ -n "${AVARCH_DOCKER_CPUS:-}" ] && ! awk -v value="$AVARCH_DOCKER_CPUS" '
+    BEGIN {
+      valid = value ~ /^[0-9]+([.][0-9]+)?$/ && (value + 0) > 0
+      exit valid ? 0 : 1
+    }
+  ' </dev/null; then
+    die "Invalid AVARCH_DOCKER_CPUS value: $AVARCH_DOCKER_CPUS"
+  fi
+
+  if [ -n "${AVARCH_DOCKER_CPUSET_CPUS:-}" ] && ! awk -v value="$AVARCH_DOCKER_CPUSET_CPUS" '
+    BEGIN {
+      count = split(value, entries, ",")
+      if (count == 0) exit 1
+      for (item = 1; item <= count; item++) {
+        entry = entries[item]
+        if (entry ~ /^[0-9]+$/) continue
+        bounds = split(entry, range, "-")
+        if (bounds != 2 || range[1] !~ /^[0-9]+$/ || range[2] !~ /^[0-9]+$/) exit 1
+        if ((range[1] + 0) > (range[2] + 0)) exit 1
+      }
+      exit 0
+    }
+  ' </dev/null; then
+    die "Invalid AVARCH_DOCKER_CPUSET_CPUS value: $AVARCH_DOCKER_CPUSET_CPUS"
+  fi
+
+  if [ -n "${AVARCH_DOCKER_MEMORY:-}" ] && ! awk -v value="$AVARCH_DOCKER_MEMORY" '
+    BEGIN {
+      valid = value ~ /^[0-9]+([.][0-9]+)?[bBkKmMgG]?$/ && (value + 0) > 0
+      exit valid ? 0 : 1
+    }
+  ' </dev/null; then
+    die "Invalid AVARCH_DOCKER_MEMORY value: $AVARCH_DOCKER_MEMORY"
+  fi
+}
+
 exec_docker_run() {
   security_opt=$(security_option)
   if [ -n "$security_opt" ]; then
-    exec docker run --rm --user "$uid:$gid" --security-opt "$security_opt" "$@"
+    set -- --security-opt "$security_opt" "$@"
   fi
-
+  if [ -n "${AVARCH_DOCKER_MEMORY:-}" ]; then
+    set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
+  fi
+  if [ -n "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
+    set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
+  fi
+  if [ -n "${AVARCH_DOCKER_CPUS:-}" ]; then
+    set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
+  fi
   exec docker run --rm --user "$uid:$gid" "$@"
 }
 
 docker_run() {
   security_opt=$(security_option)
   if [ -n "$security_opt" ]; then
-    docker run --rm --user "$uid:$gid" --security-opt "$security_opt" "$@"
-    return
+    set -- --security-opt "$security_opt" "$@"
   fi
-
+  if [ -n "${AVARCH_DOCKER_MEMORY:-}" ]; then
+    set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
+  fi
+  if [ -n "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
+    set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
+  fi
+  if [ -n "${AVARCH_DOCKER_CPUS:-}" ]; then
+    set -- --cpus "$AVARCH_DOCKER_CPUS" "$@"
+  fi
   docker run --rm --user "$uid:$gid" "$@"
 }
 
@@ -142,6 +194,7 @@ workspace_volume() {
 
 uid=$(id -u)
 gid=$(id -g)
+validate_resource_limit_options
 
 set -- "$@"
 workspace=""
