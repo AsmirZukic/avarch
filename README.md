@@ -1764,9 +1764,34 @@ Wrapper environment variables:
 - `AVARCH_IMAGE`: image reference, default `avarch:latest`.
 - `AVARCH_DEFAULT_IMAGE`: fallback image reference used by installed wrappers
 	when `AVARCH_IMAGE` is not set.
+- `AVARCH_DOCKER_CPUS`: positive Docker CPU quota, for example `2.5`; passed as
+	one `--cpus` argument.
+- `AVARCH_DOCKER_CPUSET_CPUS`: Docker CPU-set list or ranges, for example
+	`0-3,8`; passed as one `--cpuset-cpus` argument.
+- `AVARCH_DOCKER_MEMORY`: positive Docker memory limit with an optional `b`,
+	`k`, `m`, or `g` suffix, for example `6g`; passed as one `--memory` argument.
 - `AVARCH_DOCKER_SECURITY_OPT`: override Docker `--security-opt`; on SELinux
 	hosts the wrapper defaults to `label=disable` when needed.
 - `AVARCH_DOCKER_VOLUME_OPTIONS`: mount options appended to the workspace volume.
+
+The wrapper validates resource-limit values before invoking Docker and passes
+each value as a single argument. These options limit the container; they do not
+change Avarch scheduler capacity or encoder settings.
+
+Inspect the resource envelope visible to Avarch without creating a workspace:
+
+```sh
+avarch system resources
+```
+
+The report includes host logical CPUs, process affinity, cgroup cpuset, cgroup
+quota and period, host memory, cgroup memory, and the effective values. CPU quota
+capacity is rounded down to a whole CPU before comparison with the other CPU
+limits, with a minimum effective count of one. On Linux, Avarch reads the cgroup
+v2 files exposed at `/sys/fs/cgroup` by current Docker runtimes and the matching
+cgroup v1 controller-directory layout. Missing, unlimited, or malformed optional
+cgroup values are reported without making the command fail. Other operating
+systems safely fall back to host and affinity information.
 
 GPU options are not implemented or documented by the wrapper.
 
