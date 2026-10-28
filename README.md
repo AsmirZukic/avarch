@@ -2,8 +2,8 @@
 
 Avarch is a local-first media transcoding tool that creates smaller,
 reproducible viewing copies and preserves originals by default. It combines configurable
-profiles, first-class VapourSynth scripts, Av1an encoding, FFmpeg muxing,
-validation, and controlled output promotion.
+profiles, first-class VapourSynth scripts, Av1an/SVT-AV1 or FFmpeg/NVIDIA
+NVENC encoding, FFmpeg muxing, validation, and controlled output promotion.
 
 Avarch is designed for media collections you keep on your own machine. It stores
 project state next to the media in a local `.avarch` workspace and does not use a
@@ -17,10 +17,10 @@ Highlights:
 	and promotion policy.
 - Custom VapourSynth `.vpy` templates and custom Python filter scripts are
 	supported extension points.
-- Reusable encoding profiles, including the built-in `av1_1080p_sdr` profile
-	and the built-in `default` alias.
+- Reusable encoding profiles, including CPU `av1_1080p_sdr`, GPU
+	`av1_nvenc_1080p_sdr`, and the built-in `default` alias.
 - Inspectable generated VapourSynth scripts and persisted plan artifacts.
-- Av1an-based video encoding with SVT-AV1.
+- Av1an-based video encoding with SVT-AV1 and optional FFmpeg AV1 NVENC encoding.
 - FFmpeg muxing, metadata copying, chapter copying, audio transcoding, and
 	subtitle stream copying.
 - Scheduler-managed encoding with persistent workspace job state.
@@ -244,9 +244,9 @@ discover -> probe -> plan -> encode -> mux -> validate -> promote
 Discovery finds source media and records file identity in the workspace. Probing
 runs `ffprobe` and stores technical media information. Planning combines the
 probe data with a selected profile and writes reviewable artifacts, including the
-generated VapourSynth script. VapourSynth prepares video frames, Av1an manages
-video encoding, and FFmpeg muxes the encoded video with selected audio,
-subtitles, metadata, and chapters.
+generated VapourSynth script. VapourSynth prepares video frames, then the plan
+selects either Av1an/SVT-AV1 or a `vspipe` Y4M pipe into FFmpeg `av1_nvenc`.
+FFmpeg muxes the encoded video with selected audio, subtitles, metadata, and chapters.
 
 Validation checks the resulting file before promotion is allowed. Promotion then
 places accepted output in its final location according to the selected mode. The
@@ -263,7 +263,7 @@ frame-processing pipeline.
 Profiles are TOML documents with `schema_version = 1`. They control these
 implemented fields:
 
-- `backend`: currently `av1an`.
+- `backend`: `av1an` or `ffmpeg_nvenc`.
 - `container`: currently `mkv`.
 - `match.video_codec_not`: skip sources whose primary video codec matches.
 - `video.max_width`: even target width ceiling.
@@ -272,7 +272,10 @@ implemented fields:
 - `av1an.encoder`: currently `svt-av1`.
 - `av1an.workers`: Av1an worker count for the job. Use an integer, or `"auto"`
   for a conservative SVT-AV1 worker count capped by CPU and memory.
-- `av1an.video_args`: encoder argument string.
+- `av1an.video_args`: SVT-AV1 encoder argument string.
+- `nvenc.encoder`: currently `av1_nvenc`.
+- Validated NVENC fields: `preset`, `tune`, `cq`, `multipass`, `lookahead`,
+  spatial/temporal AQ, AQ strength, GPU index, and `p010le` pixel format.
 - `audio.codec`, `audio.bitrate`, `audio.channels`, `audio.languages`.
 - `subtitles.languages` and `subtitles.keep_forced`.
 - `vapoursynth.mode`: `generated`, `custom_filter`, or `custom_template`.
@@ -284,8 +287,12 @@ implemented fields:
 
 Built-in profiles in this alpha:
 
-- `av1_1080p_sdr`: general-purpose 1080p SDR AV1 archival profile.
+- `av1_1080p_sdr`: general-purpose CPU 1080p SDR AV1 archival profile.
+- `av1_nvenc_1080p_sdr`: conservative NVIDIA AV1 NVENC profile.
 - `default`: built-in alias with the same settings as `av1_1080p_sdr`.
+
+See [NVIDIA NVENC backend](docs/nvenc.md) for GPU prerequisites, Docker startup,
+capability checks, recovery behavior, and hardware smoke tests.
 
 List profiles:
 
@@ -613,7 +620,7 @@ A plan is the resolved intent for one source file and one profile. It contains:
 - Video target codec, dimensions, pixel format, and VapourSynth mode.
 - Audio and subtitle stream decisions.
 - Generated VapourSynth script path.
-- Av1an command specification.
+- Backend-specific Av1an or NVENC video command specification.
 - FFmpeg mux command specification.
 - Validation policy.
 - Promotion policy.
@@ -630,7 +637,7 @@ The same directory includes:
 
 ```text
 <source-stem>.vpy
-av1an.command.json
+av1an.command.json OR nvenc.command.json
 validation-policy.json
 vpy/environment-lock.toml
 vpy/snapshot.json
@@ -648,9 +655,10 @@ hash, or execution identity no longer matches the current workspace state. New
 plans supersede previous current plans for the same file/profile. Queued jobs use
 the plan artifact recorded on the job.
 
-Execution identity captures command-contract details such as Av1an contract
-version, FFmpeg mux contract version, expected Av1an version family, final
-container, no-overwrite behavior, and mux policy. Duplicate work is avoided by
+Execution identity captures backend-specific command contracts, FFmpeg mux
+contract version, supported tool expectations, final container, no-overwrite
+behavior, and mux policy. Version 5 plans remain Av1an plans; NVENC plans use
+schema version 6 and are never inferred from legacy data. Duplicate work is avoided by
 plan hashes and queue keys; attempting to enqueue the same current plan again is
 reported as already queued or already completed.
 
@@ -749,13 +757,14 @@ Job stages:
 | --- | --- |
 | `probe` | cheap |
 | `plan` | cheap |
-| `encode` | heavy_av1an |
+| `encode` | heavy_av1an or heavy_nvenc, selected by the plan backend |
 | `validate` | cheap |
 | `promote` | file_op |
 
 Preparation and validation stages may overlap up to `resources.cheap_workers`.
-Heavy encodes run up to `resources.av1an_jobs`; the default is one Av1an job.
-Promotion uses `resources.file_ops`. These independent limits allow per-job
+Av1an encodes run up to `resources.av1an_jobs`; NVENC encodes independently run
+up to `resources.nvenc_jobs`. Both default to one, so one CPU and one GPU encode
+may run concurrently. Promotion uses `resources.file_ops`. These independent limits allow per-job
 validation, cleanup, and promotion to continue while unrelated encodes run.
 
 Job commands:
@@ -994,6 +1003,7 @@ format = "console"
 [resources]
 cheap_workers = 4
 av1an_jobs = 1
+nvenc_jobs = 1
 file_ops = 1
 
 [scanner]
@@ -1011,6 +1021,7 @@ Common user-editable settings:
 - `logging.format`: `console` or `json`.
 - `resources.cheap_workers`: concurrent cheap stages.
 - `resources.av1an_jobs`: concurrent Av1an encode stages.
+- `resources.nvenc_jobs`: concurrent NVENC encode stages; default one.
 - `resources.file_ops`: configured file-operation capacity.
 - `scanner.roots`: roots used when `avarch scan` is run without arguments.
 - `scanner.extensions`: extensions Avarch discovers.
@@ -1630,7 +1641,8 @@ Container/runtime status:
 - Av1an is installed with requirement `>=0.5,<0.6`; the execution contract
 	expects Av1an `0.5.x`.
 - FFmpeg and FFprobe come from Debian packages and are not pinned to an exact
-	version in the Dockerfile.
+	version in the Dockerfile. Image build checks require the `av1_nvenc` frontend;
+	runtime encoding still requires host NVIDIA drivers and Container Toolkit access.
 - VapourSynth is provided by the Python environment; `avarch doctor` and
 	`avarch vpy env show` report the detected runtime version.
 
@@ -1638,7 +1650,7 @@ Schema and compatibility:
 
 - Workspace schema version: `1`.
 - Profile schema version: `1`.
-- Transcode plan schema version: `5`.
+- Transcode plan schema versions: legacy Av1an `5`, backend-aware NVENC `6`.
 - Validation policy schema version: `2`.
 - Validation report schema version: `1`.
 - Promotion policy schema version: `1`.
@@ -1801,6 +1813,8 @@ Wrapper environment variables:
 	`0-3,8`; passed as one `--cpuset-cpus` argument.
 - `AVARCH_DOCKER_MEMORY`: positive Docker memory limit with an optional `b`,
 	`k`, `m`, or `g` suffix, for example `6g`; passed as one `--memory` argument.
+- `AVARCH_DOCKER_GPUS`: Docker GPU request such as `all` or `device=0`; passed as
+	one `--gpus` argument. It requires NVIDIA Container Toolkit on the host.
 - `AVARCH_DOCKER_SECURITY_OPT`: override Docker `--security-opt`; on SELinux
 	hosts the wrapper defaults to `label=disable` when needed.
 - `AVARCH_DOCKER_VOLUME_OPTIONS`: mount options appended to the workspace volume.
@@ -1824,7 +1838,9 @@ cgroup v1 controller-directory layout. Missing, unlimited, or malformed optional
 cgroup values are reported without making the command fail. Other operating
 systems safely fall back to host and affinity information.
 
-GPU options are not implemented or documented by the wrapper.
+For NVENC, run `AVARCH_DOCKER_GPUS=all avarch doctor` and confirm the optional
+NVENC capability is available before queueing a GPU profile. CPU-only workflows
+need no GPU option. See [docs/nvenc.md](docs/nvenc.md).
 
 ## Advanced: Building Avarch
 

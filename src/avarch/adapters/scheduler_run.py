@@ -4,10 +4,12 @@ import os
 import socket
 from collections.abc import Callable, Iterable
 from datetime import datetime
+from pathlib import Path
 
 from sqlmodel import Session
 
 from avarch.adapters.execution import pause_managed_processes, resume_managed_processes
+from avarch.adapters.filesystem.plans import PlanArtifactLoadError, load_plan_artifact
 from avarch.adapters.job_preparation import encoded_output_exists, require_id
 from avarch.adapters.scheduler_workers import (
     execute_cleanup_job,
@@ -22,6 +24,7 @@ from avarch.adapters.sqlite import scheduler_sessions as scheduler_session_adapt
 from avarch.adapters.sqlite import scheduler_state as scheduler_state_adapter
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import interrupt_running_job
+from avarch.adapters.sqlite.models import Job
 from avarch.adapters.sqlite.queue import claimable_jobs
 from avarch.adapters.sqlite.scheduler_state import (
     active_jobs_with_cancel_requested,
@@ -39,8 +42,8 @@ from avarch.application.scheduler_run import (
     SchedulerTerminalCounts,
 )
 from avarch.config import AppConfig
-from avarch.domain.jobs import JobStage
-from avarch.domain.scheduler import ClaimableJob, SchedulerMode
+from avarch.domain.jobs import JobStage, ResourceClass
+from avarch.domain.scheduler import ClaimableJob, SchedulerMode, resource_for_stage
 
 
 class SchedulerRuntimeAdapter:
@@ -164,7 +167,11 @@ class SqliteSchedulerRunStore:
     def claimable_jobs(self, *, active_job_ids: set[int]) -> list[ClaimableJob]:
         with Session(self._engine) as session:
             return [
-                ClaimableJob(job_id=require_id(job), stage=job.stage)
+                ClaimableJob(
+                    job_id=require_id(job),
+                    stage=job.stage,
+                    resource_class=_job_resource_class(job),
+                )
                 for job in claimable_jobs(session, active_job_ids=active_job_ids)
                 if self._claimable_stages is None or job.stage in self._claimable_stages
             ]
@@ -239,6 +246,17 @@ class SchedulerWorkerAdapter:
         resume_managed_processes()
 
 
+def _job_resource_class(job: Job) -> ResourceClass:
+    stage = JobStage(job.stage)
+    if stage not in {JobStage.SCENE_DETECT, JobStage.ENCODE} or job.plan_path is None:
+        return resource_for_stage(stage)
+    try:
+        plan = load_plan_artifact(Path(job.plan_path))
+    except PlanArtifactLoadError:
+        return ResourceClass.HEAVY_AV1AN
+    return resource_for_stage(stage, backend=plan.encoding_backend)
+
+
 def _capacity_usage(
     capacity: SchedulerCapacityUsage,
 ) -> scheduler_state_adapter.SchedulerCapacityUsage:
@@ -247,6 +265,8 @@ def _capacity_usage(
         cheap_active=capacity.cheap_active,
         av1an_jobs=capacity.av1an_jobs,
         av1an_active=capacity.av1an_active,
+        nvenc_jobs=capacity.nvenc_jobs,
+        nvenc_active=capacity.nvenc_active,
         file_ops=capacity.file_ops,
         file_ops_active=capacity.file_ops_active,
     )

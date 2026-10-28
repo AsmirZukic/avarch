@@ -58,6 +58,7 @@ class JobStage(StrEnum):
 class ResourceClass(StrEnum):
     CHEAP = "cheap"
     HEAVY_AV1AN = "heavy_av1an"
+    HEAVY_NVENC = "heavy_nvenc"
     FILE_OP = "file_op"
 
 
@@ -327,7 +328,7 @@ _ALLOWED_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     ),
     JobStatus.CANCELLED: frozenset({JobStatus.CANCELLED, JobStatus.QUEUED}),
     JobStatus.HELD: frozenset({JobStatus.HELD, JobStatus.QUEUED, JobStatus.CANCELLED}),
-    }
+}
 
 
 def plan_completed_stage_transition(

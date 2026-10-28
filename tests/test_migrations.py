@@ -28,6 +28,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0008_scheduler_sessions_and_lifecycle_events.py",
         "0009_scheduler_runtime_capacity.py",
         "0010_promotion_safety.py",
+        "0011_nvenc_scheduler_capacity.py",
     ]
 
 
@@ -326,6 +327,8 @@ def test_scheduler_runtime_capacity_columns_are_nullable(tmp_path: Path) -> None
         "capacity_cheap_active",
         "capacity_av1an_jobs",
         "capacity_av1an_active",
+        "capacity_nvenc_jobs",
+        "capacity_nvenc_active",
         "capacity_file_ops",
         "capacity_file_ops_active",
         "capacity_observed_at",

@@ -35,6 +35,7 @@ class ResourceSettings(BaseModel):
 
     cheap_workers: int = Field(default=4, ge=1)
     av1an_jobs: int = Field(default=1, ge=1)
+    nvenc_jobs: int = Field(default=1, ge=1)
     file_ops: int = Field(default=1, ge=1)
 
 
@@ -123,6 +124,7 @@ format = "console"
 [resources]
 cheap_workers = 4
 av1an_jobs = 1
+nvenc_jobs = 1
 file_ops = 1
 
 [scanner]

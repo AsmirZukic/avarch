@@ -31,7 +31,7 @@ def test_first_time_setup_workflow_checks_help_init_config_doctor_and_db(
     assert "[profile_registry]" in config_path.read_text(encoding="utf-8")
     assert profiles_path.is_dir()
     assert f"Profiles dir: {profiles_path}" in init_result.output
-    assert "Profiles: av1_1080p_sdr, default" in init_result.output
+    assert "Profiles: av1_1080p_sdr, av1_nvenc_1080p_sdr, default" in init_result.output
     resolved_profile = ProfileRegistry.from_config(load_config(config_path)).get("av1_1080p_sdr")
     assert resolved_profile.origin == ProfileOrigin.BUILTIN
     assert doctor_result.exit_code == 0

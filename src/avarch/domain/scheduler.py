@@ -34,18 +34,21 @@ class ResourceCapacity:
     cheap_workers: int
     av1an_jobs: int
     file_ops: int
+    nvenc_jobs: int = 1
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveJob:
     job_id: int
     stage: JobStage
+    resource_class: ResourceClass | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ClaimableJob:
     job_id: int
     stage: JobStage
+    resource_class: ResourceClass | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,11 +61,15 @@ class RetryFacts:
     promotion_completed: bool
 
 
-def resource_for_stage(stage: JobStage) -> ResourceClass:
+def resource_for_stage(
+    stage: JobStage,
+    *,
+    backend: str = "av1an",
+) -> ResourceClass:
     if stage in {JobStage.PROBE, JobStage.PLAN, JobStage.VALIDATE}:
         return ResourceClass.CHEAP
     if stage in {JobStage.SCENE_DETECT, JobStage.ENCODE}:
-        return ResourceClass.HEAVY_AV1AN
+        return ResourceClass.HEAVY_NVENC if backend == "ffmpeg_nvenc" else ResourceClass.HEAVY_AV1AN
     if stage in {JobStage.PROMOTE, JobStage.CLEANUP}:
         return ResourceClass.FILE_OP
     raise ValueError(f"Unsupported job stage: {stage}")
@@ -73,8 +80,9 @@ def has_resource_capacity(
     active_stages: Iterable[JobStage],
     *,
     capacity: ResourceCapacity,
+    backend: str = "av1an",
 ) -> bool:
-    resource_class = resource_for_stage(stage)
+    resource_class = resource_for_stage(stage, backend=backend)
     active_count = sum(
         1 for active_stage in active_stages if resource_for_stage(active_stage) == resource_class
     )
@@ -82,6 +90,8 @@ def has_resource_capacity(
         return active_count < capacity.cheap_workers
     if resource_class == ResourceClass.HEAVY_AV1AN:
         return active_count < capacity.av1an_jobs
+    if resource_class == ResourceClass.HEAVY_NVENC:
+        return active_count < capacity.nvenc_jobs
     if resource_class == ResourceClass.FILE_OP:
         return active_count < capacity.file_ops
     return False
@@ -109,12 +119,19 @@ def select_launchable_jobs(
     capacity: ResourceCapacity,
 ) -> tuple[ClaimableJob, ...]:
     selected: list[ClaimableJob] = []
-    planned_stages = [job.stage for job in active_jobs]
+    planned_resources = [job.resource_class or resource_for_stage(job.stage) for job in active_jobs]
+    limits = {
+        ResourceClass.CHEAP: capacity.cheap_workers,
+        ResourceClass.HEAVY_AV1AN: capacity.av1an_jobs,
+        ResourceClass.HEAVY_NVENC: capacity.nvenc_jobs,
+        ResourceClass.FILE_OP: capacity.file_ops,
+    }
     for job in claimable_jobs:
-        if not has_resource_capacity(job.stage, planned_stages, capacity=capacity):
+        resource_class = job.resource_class or resource_for_stage(job.stage)
+        if planned_resources.count(resource_class) >= limits[resource_class]:
             continue
         selected.append(job)
-        planned_stages.append(job.stage)
+        planned_resources.append(resource_class)
     return tuple(selected)
 
 

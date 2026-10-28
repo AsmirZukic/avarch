@@ -150,6 +150,14 @@ class Av1anStageError(ExecutionError):
     pass
 
 
+class NvencCapabilityError(PreflightError):
+    pass
+
+
+class NvencStageError(ExecutionError):
+    pass
+
+
 class MuxStageError(ExecutionError):
     pass
 

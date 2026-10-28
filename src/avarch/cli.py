@@ -198,6 +198,7 @@ from avarch.bootstrap import (
     job_view_store,
     manual_validation_preparation_store,
     manual_validation_worker,
+    nvenc_capability,
     plan_view_store,
     planning_unit_of_work,
     probe_store,
@@ -459,6 +460,11 @@ def doctor(
     typer.echo(f"Architecture: {runtime_identity.platform}")
     typer.echo(f"Python: {runtime_identity.python_version}")
     typer.echo(f"VapourSynth: {runtime_identity.vapoursynth_version}")
+    nvenc = nvenc_capability()
+    if nvenc.available:
+        typer.echo(f"OPTIONAL nvenc available: {', '.join(nvenc.gpu_names)}")
+    else:
+        typer.echo(f"OPTIONAL nvenc unavailable: {nvenc.reason or 'unknown reason'}")
 
 
 @app.command()
@@ -736,6 +742,7 @@ def run_queue(
     typer.echo("Resources:")
     typer.echo(f"  cheap workers: {runtime_config.resources.cheap_workers}")
     typer.echo(f"  Av1an jobs:    {runtime_config.resources.av1an_jobs}")
+    typer.echo(f"  NVENC jobs:    {runtime_config.resources.nvenc_jobs}")
     typer.echo(f"  file ops:      {runtime_config.resources.file_ops}")
     typer.echo("")
     _echo_queue_counts(database_url)
@@ -2421,7 +2428,14 @@ def _echo_plan_summary(
     typer.echo(f"Subtitles: {subtitles}")
     typer.echo("")
     typer.echo("Av1an:")
-    typer.echo(f"  workers:   {typed_plan.av1an.workers}")
+    typer.echo(f"  backend:   {typed_plan.encoding_backend}")
+    if typed_plan.encoding_backend == "av1an":
+        typer.echo(f"  workers:   {typed_plan.av1an.workers}")
+    else:
+        typer.echo(f"  encoder:   {typed_plan.nvenc.encoder}")
+        typer.echo(f"  gpu:       {typed_plan.nvenc.gpu}")
+        typer.echo(f"  preset:    {typed_plan.nvenc.preset}")
+        typer.echo(f"  cq:        {typed_plan.nvenc.cq}")
     typer.echo("")
     typer.echo("VapourSynth:")
     typer.echo(f"  mode:       {typed_plan.vapoursynth.mode}")

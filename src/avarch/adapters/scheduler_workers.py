@@ -11,7 +11,13 @@ from typing import Any
 from sqlalchemy import Engine
 from sqlmodel import Session
 
-from avarch.adapters.execution import build_av1an_command, execute_plan, should_resume_av1an
+from avarch.adapters.execution import (
+    build_av1an_command,
+    build_nvenc_ffmpeg_command,
+    build_vspipe_command,
+    execute_plan,
+    should_resume_av1an,
+)
 from avarch.adapters.filesystem.plans import PlanArtifactConflictError, write_plan_artifacts
 from avarch.adapters.filesystem.scanner import create_file_snapshot
 from avarch.adapters.job_preparation import (
@@ -91,6 +97,7 @@ from avarch.domain.jobs import (
     job_has_passed_validation,
 )
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
+from avarch.domain.scheduler import resource_for_stage
 from avarch.domain.size import SizeDecision, SizePolicy, evaluate_size_policy
 from avarch.models.execution import (
     ExecutionError,
@@ -444,9 +451,16 @@ async def execute_encode_job(
         try:
             verify_media_snapshot(media_file, expected_fingerprint=job.source_fs_fingerprint)
             plan = load_job_plan(job)
+            attempt.resource_class = resource_for_stage(
+                initial_stage,
+                backend=plan.encoding_backend,
+            )
+            session.add(attempt)
             if plan.plan_hash != job.plan_hash:
                 raise JobPreparationError("Stored plan hash does not match the queued job.")
-            effective_resume = should_resume_av1an(plan.av1an)
+            effective_resume = (
+                should_resume_av1an(plan.av1an) if plan.encoding_backend == "av1an" else False
+            )
         except Exception as exc:
             fail_job_stage(
                 session,
@@ -457,20 +471,35 @@ async def execute_encode_job(
                 now=_utc_now(),
             )
             return
-        attempt.command_json = canonical_json(
-            {
-                "effective_resume": effective_resume,
-                "av1an_argv": build_av1an_command(plan.av1an, resume=effective_resume),
-                "mux_spec": {
-                    "video_input_path": str(plan.mux.video_input_path),
-                    "source_input_path": str(plan.mux.source_input_path),
-                    "output_path": str(plan.mux.output_path),
-                },
-            }
-        )
-        attempt.stdout_log = str(plan.runtime.av1an_stdout_log)
-        attempt.stderr_log = str(plan.runtime.av1an_stderr_log)
-        attempt.temp_dir = str(plan.av1an.temp_dir)
+        command_details: dict[str, object] = {
+            "backend": plan.encoding_backend,
+            "mux_spec": {
+                "video_input_path": str(plan.mux.video_input_path),
+                "source_input_path": str(plan.mux.source_input_path),
+                "output_path": str(plan.mux.output_path),
+            },
+        }
+        if plan.encoding_backend == "av1an":
+            command_details.update(
+                {
+                    "effective_resume": effective_resume,
+                    "av1an_argv": build_av1an_command(plan.av1an, resume=effective_resume),
+                }
+            )
+            attempt.stdout_log = str(plan.runtime.av1an_stdout_log)
+            attempt.stderr_log = str(plan.runtime.av1an_stderr_log)
+            attempt.temp_dir = str(plan.av1an.temp_dir)
+        else:
+            command_details.update(
+                {
+                    "vspipe_argv": build_vspipe_command(plan.nvenc),
+                    "ffmpeg_nvenc_argv": build_nvenc_ffmpeg_command(plan.nvenc),
+                }
+            )
+            attempt.stdout_log = str(plan.runtime.nvenc_stdout_log)
+            attempt.stderr_log = str(plan.runtime.nvenc_stderr_log)
+            attempt.temp_dir = str(plan.nvenc.working_directory)
+        attempt.command_json = canonical_json(command_details)
         attempt.output_path = str(plan.output_path)
 
     preparing = _phase_snapshot(ProgressPhase.PREPARING, now=now)
@@ -576,7 +605,12 @@ async def execute_encode_job(
             {
                 "mux_stdout_log": str(plan.runtime.mux_stdout_log),
                 "mux_stderr_log": str(plan.runtime.mux_stderr_log),
-                "stage_marker_path": str(plan.runtime.av1an_stage_marker),
+                "backend": plan.encoding_backend,
+                "stage_marker_path": str(
+                    plan.runtime.av1an_stage_marker
+                    if plan.encoding_backend == "av1an"
+                    else plan.runtime.nvenc_stage_marker
+                ),
                 "encode_receipt_path": str(plan.runtime.encode_result),
                 "final_execution_status": status,
             }

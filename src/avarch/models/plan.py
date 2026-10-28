@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from avarch.contracts import (
     AV1AN_COMMAND_SCHEMA_VERSION,
@@ -12,14 +18,24 @@ from avarch.contracts import (
     ENCODE_RESULT_RECEIPT_SCHEMA_VERSION,
     EXECUTION_IDENTITY_SCHEMA_VERSION,
     FFMPEG_MUX_SCHEMA_VERSION,
-    TRANSCODE_PLAN_SCHEMA_VERSION,
+    NVENC_COMMAND_SCHEMA_VERSION,
+    NVENC_STAGE_MARKER_SCHEMA_VERSION,
     VAPOURSYNTH_PLAN_SCHEMA_VERSION,
 )
 from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import ValidationPolicy
 
 AV1AN_COMMAND_CONTRACT_VERSION = 2
+NVENC_COMMAND_CONTRACT_VERSION = 1
 FFMPEG_MUX_CONTRACT_VERSION = 1
+
+
+def _serialized_without_none(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    typed_payload = cast(dict[str, Any], payload)
+    return {key: value for key, value in typed_payload.items() if value is not None}
+
 
 type VapourSynthMode = Literal[
     "generated",
@@ -46,8 +62,25 @@ class PlanArtifactPaths(BaseModel):
     artifact_dir: Path
     plan_json: Path
     vapoursynth_script: Path
-    av1an_command_json: Path
+    av1an_command_json: Path = cast(Path, None)
+    nvenc_command_json: Path = cast(Path, None)
     validation_policy_json: Path
+
+    @model_serializer
+    def serialize_model(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "artifact_dir": self.artifact_dir,
+            "plan_json": self.plan_json,
+            "vapoursynth_script": self.vapoursynth_script,
+            "validation_policy_json": self.validation_policy_json,
+        }
+        av1an_path = cast(Path | None, self.__dict__.get("av1an_command_json"))
+        nvenc_path = cast(Path | None, self.__dict__.get("nvenc_command_json"))
+        if av1an_path is not None:
+            payload["av1an_command_json"] = av1an_path
+        if nvenc_path is not None:
+            payload["nvenc_command_json"] = nvenc_path
+        return payload
 
 
 class VideoPlan(BaseModel):
@@ -100,15 +133,21 @@ class SubtitlePlan(BaseModel):
 class ExecutionIdentity(BaseModel):
     schema_version: Literal[1] = EXECUTION_IDENTITY_SCHEMA_VERSION
 
-    av1an_contract_version: int
+    av1an_contract_version: int | None = None
+    nvenc_contract_version: int | None = None
     ffmpeg_mux_contract_version: int
 
-    av1an_version_family: str
+    av1an_version_family: str | None = None
+    backend: Literal["av1an", "ffmpeg_nvenc"] | None = None
 
     video_container: Literal["mkv"]
     final_container: Literal["mkv"]
 
     identity_hash: str
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> object:
+        return _serialized_without_none(handler(self))
 
 
 class Av1anCommandSpec(BaseModel):
@@ -139,6 +178,37 @@ class Av1anCommandSpec(BaseModel):
     resume_policy: Av1anResumePolicy = "auto"
 
 
+class NvencCommandSpec(BaseModel):
+    schema_version: Literal[1] = NVENC_COMMAND_SCHEMA_VERSION
+    command_contract_version: int = NVENC_COMMAND_CONTRACT_VERSION
+
+    ffmpeg_executable: str = "ffmpeg"
+    vspipe_executable: str = "vspipe"
+
+    input_path: Path
+    video_output_path: Path
+    working_directory: Path
+
+    encoder: Literal["av1_nvenc"] = "av1_nvenc"
+    preset: Literal["p1", "p2", "p3", "p4", "p5", "p6", "p7"] = "p5"
+    tune: Literal["hq", "uhq"] = "hq"
+    cq: float = Field(default=28, ge=1, le=63)
+    multipass: Literal["disabled", "qres", "fullres"] = "qres"
+    lookahead: int = Field(default=16, ge=0, le=32)
+    spatial_aq: bool = True
+    temporal_aq: bool = True
+    aq_strength: int = Field(default=8, ge=1, le=15)
+    gpu: int = Field(default=0, ge=0)
+
+    pixel_format: Literal["p010le"] = "p010le"
+    color_primaries: Literal["bt709"] = "bt709"
+    color_transfer: Literal["bt709"] = "bt709"
+    color_space: Literal["bt709"] = "bt709"
+    color_range: Literal["tv"] = "tv"
+
+    never_overwrite: Literal[True] = True
+
+
 class FfmpegMuxSpec(BaseModel):
     schema_version: Literal[1] = FFMPEG_MUX_SCHEMA_VERSION
     command_contract_version: int = FFMPEG_MUX_CONTRACT_VERSION
@@ -166,13 +236,17 @@ class FfmpegMuxSpec(BaseModel):
 class ExecutionRuntimePaths(BaseModel):
     runtime_dir: Path
 
-    av1an_stdout_log: Path
-    av1an_stderr_log: Path
+    av1an_stdout_log: Path = cast(Path, None)
+    av1an_stderr_log: Path = cast(Path, None)
+    vspipe_stderr_log: Path = cast(Path, None)
+    nvenc_stdout_log: Path = cast(Path, None)
+    nvenc_stderr_log: Path = cast(Path, None)
 
     mux_stdout_log: Path
     mux_stderr_log: Path
 
-    av1an_stage_marker: Path
+    av1an_stage_marker: Path = cast(Path, None)
+    nvenc_stage_marker: Path = cast(Path, None)
     encode_result: Path
 
     validation_report: Path
@@ -180,10 +254,36 @@ class ExecutionRuntimePaths(BaseModel):
     validation_decode_stdout_log: Path
     validation_decode_stderr_log: Path
 
+    @model_serializer
+    def serialize_model(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "runtime_dir": self.runtime_dir,
+            "mux_stdout_log": self.mux_stdout_log,
+            "mux_stderr_log": self.mux_stderr_log,
+            "encode_result": self.encode_result,
+            "validation_report": self.validation_report,
+            "validation_decode_stdout_log": self.validation_decode_stdout_log,
+            "validation_decode_stderr_log": self.validation_decode_stderr_log,
+        }
+        for field_name in (
+            "av1an_stdout_log",
+            "av1an_stderr_log",
+            "vspipe_stderr_log",
+            "nvenc_stdout_log",
+            "nvenc_stderr_log",
+            "av1an_stage_marker",
+            "nvenc_stage_marker",
+        ):
+            path = cast(Path | None, self.__dict__.get(field_name))
+            if path is not None:
+                payload[field_name] = path
+        return payload
+
 
 class Av1anStageMarker(BaseModel):
-    schema_version: Literal[1] = AV1AN_STAGE_MARKER_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = AV1AN_STAGE_MARKER_SCHEMA_VERSION
 
+    backend: Literal["av1an"] | None = None
     plan_hash: str
     av1an_spec_hash: str
 
@@ -192,12 +292,31 @@ class Av1anStageMarker(BaseModel):
 
     completed_at: datetime
 
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> object:
+        return _serialized_without_none(handler(self))
+
+
+class NvencStageMarker(BaseModel):
+    schema_version: Literal[1] = NVENC_STAGE_MARKER_SCHEMA_VERSION
+
+    backend: Literal["ffmpeg_nvenc"] = "ffmpeg_nvenc"
+    plan_hash: str
+    encoder_spec_hash: str
+
+    video_output_path: Path
+    video_output_size: int
+
+    completed_at: datetime
+
 
 class EncodeResultReceipt(BaseModel):
-    schema_version: Literal[1] = ENCODE_RESULT_RECEIPT_SCHEMA_VERSION
+    schema_version: Literal[1, 2] = ENCODE_RESULT_RECEIPT_SCHEMA_VERSION
 
     plan_hash: str
-    av1an_spec_hash: str
+    av1an_spec_hash: str | None = None
+    backend: Literal["av1an", "ffmpeg_nvenc"] | None = None
+    encoder_spec_hash: str | None = None
     mux_spec_hash: str
 
     video_output_path: Path
@@ -207,6 +326,10 @@ class EncodeResultReceipt(BaseModel):
     final_output_size: int
 
     completed_at: datetime
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> object:
+        return _serialized_without_none(handler(self))
 
 
 class VapourSynthPlan(BaseModel):
@@ -256,7 +379,7 @@ class VapourSynthPlan(BaseModel):
 
 
 class TranscodePlan(BaseModel):
-    schema_version: Literal[5] = TRANSCODE_PLAN_SCHEMA_VERSION
+    schema_version: Literal[5, 6] = 5
     plan_hash: str
 
     input_path: Path
@@ -276,23 +399,65 @@ class TranscodePlan(BaseModel):
 
     execution_identity: ExecutionIdentity
     vapoursynth: VapourSynthPlan
-    av1an: Av1anCommandSpec
+    backend: Literal["av1an", "ffmpeg_nvenc"] | None = None
+    av1an: Av1anCommandSpec = cast(Av1anCommandSpec, None)
+    nvenc: NvencCommandSpec = cast(NvencCommandSpec, None)
     mux: FfmpegMuxSpec
     runtime: ExecutionRuntimePaths
     validation: ValidationPolicy
     promotion: PromotionPolicy
     artifacts: PlanArtifactPaths
 
+    @property
+    def encoding_backend(self) -> Literal["av1an", "ffmpeg_nvenc"]:
+        return self.backend or "av1an"
+
+    @property
+    def video_output_path(self) -> Path:
+        if self.encoding_backend == "av1an":
+            return self.av1an.video_output_path
+        return self.nvenc.video_output_path
+
     @model_validator(mode="after")
     def required_execution_paths_must_match(self) -> TranscodePlan:
-        if self.av1an.input_path != self.vapoursynth.script_path:
-            raise ValueError("Av1an input_path must match VapourSynth script_path")
-        if self.av1an.video_output_path == self.output_path:
-            raise ValueError("Av1an video_output_path must differ from final output_path")
-        if self.mux.video_input_path != self.av1an.video_output_path:
-            raise ValueError("Mux video_input_path must match Av1an video_output_path")
+        av1an = cast(Av1anCommandSpec | None, self.__dict__.get("av1an"))
+        nvenc = cast(NvencCommandSpec | None, self.__dict__.get("nvenc"))
+        if self.schema_version == 5:
+            if self.backend not in {None, "av1an"} or av1an is None or nvenc is not None:
+                raise ValueError("Version 5 plans must contain only an Av1an command")
+        elif self.backend == "av1an":
+            if av1an is None or nvenc is not None:
+                raise ValueError("Av1an plans require only an Av1an command")
+        elif self.backend == "ffmpeg_nvenc":
+            if nvenc is None or av1an is not None:
+                raise ValueError("NVENC plans require only an NVENC command")
+        else:
+            raise ValueError("Version 6 plans require an explicit backend")
+
+        encoder = av1an if self.encoding_backend == "av1an" else nvenc
+        if encoder is None:
+            raise ValueError("Plan is missing its video encoder command")
+        if encoder.input_path != self.vapoursynth.script_path:
+            raise ValueError("Encoder input_path must match VapourSynth script_path")
+        if encoder.video_output_path == self.output_path:
+            raise ValueError("Video output path must differ from final output_path")
+        if self.mux.video_input_path != encoder.video_output_path:
+            raise ValueError("Mux video_input_path must match encoder video_output_path")
         if self.mux.source_input_path != self.input_path:
             raise ValueError("Mux source_input_path must match plan input_path")
         if self.mux.output_path != self.output_path:
             raise ValueError("Mux output_path must match plan output_path")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> object:
+        serialized = handler(self)
+        if not isinstance(serialized, dict):
+            return serialized
+        payload = cast(dict[str, Any], serialized)
+        if self.schema_version == 5:
+            payload.pop("backend", None)
+            payload.pop("nvenc", None)
+        else:
+            payload.pop("av1an", None)
+        return payload

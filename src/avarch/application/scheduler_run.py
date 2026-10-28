@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from avarch.config import AppConfig
-from avarch.domain.jobs import JobStage
+from avarch.domain.jobs import JobStage, ResourceClass
 from avarch.domain.scheduler import (
     ActiveJob,
     ClaimableJob,
@@ -59,6 +59,8 @@ class SchedulerCapacityUsage:
     av1an_active: int
     file_ops: int
     file_ops_active: int
+    nvenc_jobs: int = 1
+    nvenc_active: int = 0
 
 
 class SchedulerRunStore(Protocol):
@@ -152,7 +154,7 @@ async def run_scheduler(
 ) -> SchedulerRunSummary:
     store = runtime.store(config=config)
     resource_capacity = _resource_capacity(config)
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]] = {}
+    active: dict[asyncio.Task[Any], tuple[int, JobStage, ResourceClass]] = {}
     active_job_ids: set[int] = set()
     store.acquire_lease(
         runner_id=runner_id,
@@ -186,7 +188,7 @@ async def run_scheduler(
 
             done = [task for task in active if task.done()]
             for task in done:
-                job_id, _stage = active.pop(task)
+                job_id, _stage, _resource_class = active.pop(task)
                 active_job_ids.discard(job_id)
                 try:
                     task.result()
@@ -301,11 +303,17 @@ def _resource_capacity(config: AppConfig) -> ResourceCapacity:
         cheap_workers=config.resources.cheap_workers,
         av1an_jobs=config.resources.av1an_jobs,
         file_ops=config.resources.file_ops,
+        nvenc_jobs=config.resources.nvenc_jobs,
     )
 
 
-def _active_jobs(active: dict[asyncio.Task[Any], tuple[int, JobStage]]) -> list[ActiveJob]:
-    return [ActiveJob(job_id=job_id, stage=stage) for job_id, stage in active.values()]
+def _active_jobs(
+    active: dict[asyncio.Task[Any], tuple[int, JobStage, ResourceClass]],
+) -> list[ActiveJob]:
+    return [
+        ActiveJob(job_id=job_id, stage=stage, resource_class=resource_class)
+        for job_id, stage, resource_class in active.values()
+    ]
 
 
 def _capacity_usage(
@@ -314,13 +322,16 @@ def _capacity_usage(
 ) -> SchedulerCapacityUsage:
     cheap_active = 0
     av1an_active = 0
+    nvenc_active = 0
     file_ops_active = 0
     for job in active_jobs:
-        resource_class = resource_for_stage(job.stage)
+        resource_class = job.resource_class or resource_for_stage(job.stage)
         if resource_class.value == "cheap":
             cheap_active += 1
         elif resource_class.value == "heavy_av1an":
             av1an_active += 1
+        elif resource_class.value == "heavy_nvenc":
+            nvenc_active += 1
         elif resource_class.value == "file_op":
             file_ops_active += 1
     return SchedulerCapacityUsage(
@@ -328,16 +339,18 @@ def _capacity_usage(
         cheap_active=cheap_active,
         av1an_jobs=capacity.av1an_jobs,
         av1an_active=av1an_active,
+        nvenc_jobs=capacity.nvenc_jobs,
+        nvenc_active=nvenc_active,
         file_ops=capacity.file_ops,
         file_ops_active=file_ops_active,
     )
 
 
 def _cancel_active_tasks(
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]],
+    active: dict[asyncio.Task[Any], tuple[int, JobStage, ResourceClass]],
     job_ids: set[int] | frozenset[int],
 ) -> None:
-    for task, (job_id, _stage) in active.items():
+    for task, (job_id, _stage, _resource_class) in active.items():
         if job_id in job_ids:
             task.cancel()
 
@@ -345,7 +358,7 @@ def _cancel_active_tasks(
 async def _cancel_active_workers_for_shutdown(
     *,
     store: SchedulerRunStore,
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]],
+    active: dict[asyncio.Task[Any], tuple[int, JobStage, ResourceClass]],
 ) -> None:
     if not active:
         return
@@ -354,7 +367,7 @@ async def _cancel_active_workers_for_shutdown(
         task.cancel()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for task, result in zip(tasks, results, strict=True):
-        job_id, _stage = active[task]
+        job_id, _stage, _resource_class = active[task]
         if task.cancelled() or isinstance(result, BaseException):
             store.interrupt_running_job(job_id=job_id, now=utc_now())
         active.pop(task, None)
@@ -362,7 +375,7 @@ async def _cancel_active_workers_for_shutdown(
 
 def _launch_claimable_jobs(
     *,
-    active: dict[asyncio.Task[Any], tuple[int, JobStage]],
+    active: dict[asyncio.Task[Any], tuple[int, JobStage, ResourceClass]],
     active_job_ids: set[int],
     workers: SchedulerWorkerRegistry,
     runner_id: str,
@@ -385,5 +398,9 @@ def _launch_claimable_jobs(
                 config=config,
             )
         )
-        active[task] = (job.job_id, job.stage)
+        active[task] = (
+            job.job_id,
+            job.stage,
+            job.resource_class or resource_for_stage(job.stage),
+        )
         active_job_ids.add(job.job_id)

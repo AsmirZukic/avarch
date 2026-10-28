@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from avarch.application.queue_forecast import ForecastConfidence
 from avarch.application.resource_telemetry import ResourceHealth, ResourceSample
 from avarch.application.scheduler_blockers import JobEligibilityReason
-from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase
 from avarch.domain.scheduler import SchedulerMode
 from avarch.serialization import canonical_json
@@ -122,6 +122,8 @@ class ActiveJobSummary(SnapshotModel):
     job_id: int = Field(ge=0, strict=True)
     source_path: str
     profile_name: str | None = None
+    backend: str | None = None
+    resource_class: ResourceClass | None = None
     status: JobStatus
     stage: JobStage
     priority: int = Field(strict=True)
@@ -138,6 +140,8 @@ class CapacitySummary(SnapshotModel):
     av1an_active: int = Field(default=0, ge=0, strict=True)
     file_ops: int = Field(ge=0, strict=True)
     file_ops_active: int = Field(default=0, ge=0, strict=True)
+    nvenc_jobs: int = Field(default=0, ge=0, strict=True)
+    nvenc_active: int = Field(default=0, ge=0, strict=True)
     av1an_workers_configured: int | None = Field(default=None, ge=0, strict=True)
     observed_at: datetime | None = None
     stale: bool = False
@@ -261,8 +265,7 @@ class SchedulerSnapshot(SnapshotModel):
 
 
 class SchedulerSnapshotQuery(Protocol):
-    def snapshot(self) -> SchedulerSnapshot:
-        ...
+    def snapshot(self) -> SchedulerSnapshot: ...
 
 
 def resource_telemetry_summary(

@@ -30,6 +30,7 @@ def test_default_resource_limits() -> None:
 
     assert config.resources.cheap_workers == 4
     assert config.resources.av1an_jobs == 1
+    assert config.resources.nvenc_jobs == 1
     assert config.resources.file_ops == 1
 
 
@@ -67,6 +68,7 @@ def test_config_loads_resource_limits(tmp_path: Path) -> None:
 [resources]
 cheap_workers = 8
 av1an_jobs = 2
+nvenc_jobs = 2
 file_ops = 3
 """.strip(),
         encoding="utf-8",
@@ -76,6 +78,7 @@ file_ops = 3
 
     assert config.resources.cheap_workers == 8
     assert config.resources.av1an_jobs == 2
+    assert config.resources.nvenc_jobs == 2
     assert config.resources.file_ops == 3
 
 

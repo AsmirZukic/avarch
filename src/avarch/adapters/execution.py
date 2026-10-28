@@ -21,20 +21,28 @@ from typing import BinaryIO, Literal, cast
 from pydantic import BaseModel, ValidationError
 
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.nvenc import detect_nvenc_capability
 from avarch.adapters.progress.av1an_tty import (
     Av1anTtyProgressParser,
     Av1anTtyProgressSample,
     av1an_tty_progress_supported,
 )
+from avarch.adapters.progress.ffmpeg import FfmpegProgressParser, FfmpegProgressSample
 from avarch.application.planning import SUPPORTED_AV1AN_VERSION_FAMILY
 from avarch.application.progress import ProgressSink, publish_progress_safely
-from avarch.contracts import AV1AN_SPEC_HASH_CONTRACT, FFMPEG_MUX_SPEC_HASH_CONTRACT
-from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
+from avarch.contracts import (
+    AV1AN_SPEC_HASH_CONTRACT,
+    FFMPEG_MUX_SPEC_HASH_CONTRACT,
+    NVENC_SPEC_HASH_CONTRACT,
+)
+from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource, ProgressUnit
 from avarch.models.execution import (
     Av1anStageError,
     ExecutionInterruptedError,
     InvalidExecutionPlanError,
     MuxStageError,
+    NvencCapabilityError,
+    NvencStageError,
     ProcessCancellationToken,
     ProcessResult,
     ProcessTerminationReason,
@@ -46,11 +54,15 @@ from avarch.models.execution import (
 from avarch.models.plan import (
     AV1AN_COMMAND_CONTRACT_VERSION,
     FFMPEG_MUX_CONTRACT_VERSION,
+    NVENC_COMMAND_CONTRACT_VERSION,
     Av1anCommandSpec,
     Av1anStageMarker,
     EncodeExecutionStatus,
     EncodeResultReceipt,
+    ExecutionRuntimePaths,
     FfmpegMuxSpec,
+    NvencCommandSpec,
+    NvencStageMarker,
     TranscodePlan,
 )
 from avarch.serialization import canonical_json
@@ -176,6 +188,72 @@ def build_av1an_command(spec: Av1anCommandSpec, *, resume: bool | None = None) -
     return command
 
 
+def build_vspipe_command(spec: NvencCommandSpec) -> list[str]:
+    return [
+        spec.vspipe_executable,
+        "-c",
+        "y4m",
+        _command_path(spec.input_path),
+        "-",
+    ]
+
+
+def build_nvenc_ffmpeg_command(spec: NvencCommandSpec) -> list[str]:
+    return [
+        spec.ffmpeg_executable,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "info",
+        "-n",
+        "-f",
+        "yuv4mpegpipe",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-c:v",
+        spec.encoder,
+        "-gpu",
+        str(spec.gpu),
+        "-preset",
+        spec.preset,
+        "-tune",
+        spec.tune,
+        "-rc",
+        "vbr",
+        "-cq",
+        str(spec.cq),
+        "-multipass",
+        spec.multipass,
+        "-rc-lookahead",
+        str(spec.lookahead),
+        "-spatial-aq",
+        "1" if spec.spatial_aq else "0",
+        "-temporal-aq",
+        "1" if spec.temporal_aq else "0",
+        "-aq-strength",
+        str(spec.aq_strength),
+        "-pix_fmt",
+        spec.pixel_format,
+        "-color_primaries",
+        spec.color_primaries,
+        "-color_trc",
+        spec.color_transfer,
+        "-colorspace",
+        spec.color_space,
+        "-color_range",
+        spec.color_range,
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-f",
+        "matroska",
+        _command_path(spec.video_output_path),
+    ]
+
+
 def build_ffmpeg_mux_command(spec: FfmpegMuxSpec, temporary_output: Path) -> list[str]:
     command = [
         spec.executable,
@@ -231,6 +309,11 @@ def build_av1an_spec_hash(spec: Av1anCommandSpec) -> str:
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
+def build_nvenc_spec_hash(spec: NvencCommandSpec) -> str:
+    payload = f"{NVENC_SPEC_HASH_CONTRACT}\0".encode() + canonical_json(spec).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=32).hexdigest()
+
+
 def build_mux_spec_hash(spec: FfmpegMuxSpec) -> str:
     payload = f"{FFMPEG_MUX_SPEC_HASH_CONTRACT}\0".encode() + canonical_json(spec).encode("utf-8")
     return hashlib.blake2b(payload, digest_size=32).hexdigest()
@@ -249,6 +332,12 @@ def execute_plan(
     cancellation_token: ProcessCancellationToken | None = None,
     progress_sink: ProgressSink | None = None,
 ) -> EncodeExecutionStatus:
+    if plan.encoding_backend == "ffmpeg_nvenc":
+        return _execute_nvenc_plan(
+            plan,
+            cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+        )
     av1an_spec_hash = build_av1an_spec_hash(plan.av1an)
     mux_spec_hash = build_mux_spec_hash(plan.mux)
 
@@ -346,6 +435,104 @@ def execute_plan(
     return "completed"
 
 
+def _execute_nvenc_plan(
+    plan: TranscodePlan,
+    *,
+    cancellation_token: ProcessCancellationToken | None,
+    progress_sink: ProgressSink | None,
+) -> EncodeExecutionStatus:
+    spec = plan.nvenc
+    spec_hash = build_nvenc_spec_hash(spec)
+    mux_spec_hash = build_mux_spec_hash(plan.mux)
+    if _valid_nvenc_receipt(plan, encoder_spec_hash=spec_hash, mux_spec_hash=mux_spec_hash):
+        return "already_complete"
+    if plan.output_path.exists():
+        raise WorkDirectoryConflictError(
+            f"Final output exists without a valid execution receipt: {plan.output_path}"
+        )
+
+    preflight_execution(plan)
+    plan.temp_dir.mkdir(parents=True, exist_ok=True)
+    plan.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    if _valid_nvenc_marker(plan, encoder_spec_hash=spec_hash):
+        video_output_size = spec.video_output_path.stat().st_size
+    else:
+        if spec.video_output_path.exists():
+            raise WorkDirectoryConflictError(
+                "Video intermediate exists without a valid NVENC stage marker: "
+                f"{spec.video_output_path}"
+            )
+        _publish_execution_phase(progress_sink, ProgressPhase.ENCODING)
+        progress = (
+            _FfmpegProgressCollector(
+                progress_sink,
+                total_seconds=plan.validation.source_duration_seconds,
+            )
+            if progress_sink is not None
+            else None
+        )
+        try:
+            producer_code, encoder_code = _run_nvenc_pipeline(
+                spec,
+                runtime=plan.runtime,
+                plan_hash=plan.plan_hash,
+                cancellation_token=cancellation_token,
+                progress_collector=progress,
+            )
+        except BaseException:
+            spec.video_output_path.unlink(missing_ok=True)
+            raise
+        if progress is not None:
+            progress.flush()
+        if producer_code != 0:
+            spec.video_output_path.unlink(missing_ok=True)
+            tail = _read_tail(_required_path(plan.runtime.vspipe_stderr_log, "vspipe stderr log"))
+            raise NvencStageError(f"vspipe failed with exit code {producer_code}.\n{tail}")
+        if encoder_code != 0:
+            spec.video_output_path.unlink(missing_ok=True)
+            tail = _read_tail(_required_path(plan.runtime.nvenc_stderr_log, "NVENC stderr log"))
+            raise NvencStageError(f"FFmpeg NVENC failed with exit code {encoder_code}.\n{tail}")
+        video_output_size = _require_nonempty_file(
+            spec.video_output_path,
+            label="NVENC video output",
+        )
+        _write_nvenc_marker(plan, encoder_spec_hash=spec_hash, video_output_size=video_output_size)
+
+    temporary_output = create_mux_temporary_path(plan.output_path)
+    _validate_mux_temporary_path(plan, temporary_output)
+    command = build_ffmpeg_mux_command(plan.mux, temporary_output)
+    try:
+        _publish_execution_phase(progress_sink, ProgressPhase.MUXING)
+        exit_code = _run_process(
+            command,
+            cwd=plan.temp_dir,
+            stdout_log=plan.runtime.mux_stdout_log,
+            stderr_log=plan.runtime.mux_stderr_log,
+            plan_hash=plan.plan_hash,
+            command_hash=_command_hash(command),
+            cancellation_token=cancellation_token,
+            progress_sink=progress_sink,
+            progress_phase=ProgressPhase.MUXING,
+        )
+        if exit_code != 0:
+            tail = _read_tail(plan.runtime.mux_stderr_log)
+            raise MuxStageError(f"FFmpeg mux failed with exit code {exit_code}.\n{tail}")
+        final_output_size = _require_nonempty_file(temporary_output, label="temporary mux output")
+        os.replace(temporary_output, plan.output_path)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+
+    _write_nvenc_receipt(
+        plan,
+        encoder_spec_hash=spec_hash,
+        mux_spec_hash=mux_spec_hash,
+        video_output_size=video_output_size,
+        final_output_size=final_output_size,
+    )
+    return "completed"
+
+
 def _publish_execution_phase(
     progress_sink: ProgressSink | None,
     phase: ProgressPhase,
@@ -376,8 +563,11 @@ def _make_av1an_progress_collector(
 ) -> _Av1anProgressCollector | None:
     if progress_sink is None:
         return None
+    version_family = plan.execution_identity.av1an_version_family
+    if version_family is None:
+        return None
     if not av1an_tty_progress_supported(
-        plan.execution_identity.av1an_version_family,
+        version_family,
         enabled=os.environ.get("AVARCH_AV1AN_TTY_PROGRESS", "1") != "0",
     ):
         return None
@@ -385,20 +575,37 @@ def _make_av1an_progress_collector(
 
 
 def preflight_execution(plan: TranscodePlan) -> None:
-    if plan.execution_identity.av1an_contract_version != AV1AN_COMMAND_CONTRACT_VERSION:
-        raise InvalidExecutionPlanError("Plan Av1an command contract is unsupported.")
     if plan.execution_identity.ffmpeg_mux_contract_version != FFMPEG_MUX_CONTRACT_VERSION:
         raise InvalidExecutionPlanError("Plan FFmpeg mux contract is unsupported.")
-    if plan.execution_identity.av1an_version_family != SUPPORTED_AV1AN_VERSION_FAMILY:
-        raise InvalidExecutionPlanError("Plan Av1an version family is unsupported.")
-
     _preflight_source_fingerprint(plan)
     _validate_plan_path_safety(plan)
-    _preflight_tool(plan.av1an.executable, required=True)
     _preflight_tool(plan.mux.executable, required=True)
-    _preflight_av1an_version(plan.av1an.executable)
+
+    if plan.encoding_backend == "av1an":
+        if plan.execution_identity.av1an_contract_version != AV1AN_COMMAND_CONTRACT_VERSION:
+            raise InvalidExecutionPlanError("Plan Av1an command contract is unsupported.")
+        if plan.execution_identity.av1an_version_family != SUPPORTED_AV1AN_VERSION_FAMILY:
+            raise InvalidExecutionPlanError("Plan Av1an version family is unsupported.")
+        _preflight_tool(plan.av1an.executable, required=True)
+        _preflight_av1an_version(plan.av1an.executable)
+        _preflight_ffmpeg_version(plan.mux.executable)
+        _preflight_ffmpeg_audio_codecs(plan)
+        return
+
+    if plan.execution_identity.nvenc_contract_version != NVENC_COMMAND_CONTRACT_VERSION:
+        raise InvalidExecutionPlanError("Plan NVENC command contract is unsupported.")
+    _preflight_tool(plan.nvenc.vspipe_executable, required=True)
+    _preflight_tool(plan.nvenc.ffmpeg_executable, required=True)
     _preflight_ffmpeg_version(plan.mux.executable)
     _preflight_ffmpeg_audio_codecs(plan)
+    capability = detect_nvenc_capability(
+        ffmpeg_executable=plan.nvenc.ffmpeg_executable,
+        encoder=plan.nvenc.encoder,
+        gpu=plan.nvenc.gpu,
+        pixel_format=plan.nvenc.pixel_format,
+    )
+    if not capability.available:
+        raise NvencCapabilityError(capability.reason or "NVENC is unavailable")
 
 
 def _preflight_source_fingerprint(plan: TranscodePlan) -> None:
@@ -420,10 +627,11 @@ def _preflight_source_fingerprint(plan: TranscodePlan) -> None:
 def _validate_plan_path_safety(plan: TranscodePlan) -> None:
     work_dir = plan.temp_dir
     runtime_dir = plan.runtime.runtime_dir
+    encoder = plan.av1an if plan.encoding_backend == "av1an" else plan.nvenc
     paths_that_must_differ = [
         plan.input_path,
         plan.vapoursynth.script_path,
-        plan.av1an.video_output_path,
+        encoder.video_output_path,
         plan.output_path,
     ]
     if len({_resolved(path) for path in paths_that_must_differ}) != len(paths_that_must_differ):
@@ -433,26 +641,45 @@ def _validate_plan_path_safety(plan: TranscodePlan) -> None:
 
     if plan.output_path == plan.input_path:
         raise InvalidExecutionPlanError("Output path must not equal source path.")
-    for label, path in (
+    encoder_paths = [
         ("final output", plan.output_path),
-        ("video output", plan.av1an.video_output_path),
-        ("Av1an temp", plan.av1an.temp_dir),
-        ("Av1an working directory", plan.av1an.working_directory),
+        ("video output", encoder.video_output_path),
+        ("encoder working directory", encoder.working_directory),
         ("runtime directory", runtime_dir),
-    ):
+    ]
+    if plan.encoding_backend == "av1an":
+        encoder_paths.append(("Av1an temp", plan.av1an.temp_dir))
+    for label, path in encoder_paths:
         if not _is_relative_to(path, work_dir):
             raise InvalidExecutionPlanError(
                 f"{label} path must be under the work directory: {path}"
             )
 
-    for label, path in (
-        ("Av1an stdout log", plan.runtime.av1an_stdout_log),
-        ("Av1an stderr log", plan.runtime.av1an_stderr_log),
+    runtime_paths: list[tuple[str, Path | None]] = [
         ("mux stdout log", plan.runtime.mux_stdout_log),
         ("mux stderr log", plan.runtime.mux_stderr_log),
-        ("Av1an marker", plan.runtime.av1an_stage_marker),
         ("encode receipt", plan.runtime.encode_result),
-    ):
+    ]
+    if plan.encoding_backend == "av1an":
+        runtime_paths.extend(
+            [
+                ("Av1an stdout log", plan.runtime.av1an_stdout_log),
+                ("Av1an stderr log", plan.runtime.av1an_stderr_log),
+                ("Av1an marker", plan.runtime.av1an_stage_marker),
+            ]
+        )
+    else:
+        runtime_paths.extend(
+            [
+                ("vspipe stderr log", plan.runtime.vspipe_stderr_log),
+                ("NVENC stdout log", plan.runtime.nvenc_stdout_log),
+                ("NVENC stderr log", plan.runtime.nvenc_stderr_log),
+                ("NVENC marker", plan.runtime.nvenc_stage_marker),
+            ]
+        )
+    for label, path in runtime_paths:
+        if path is None:
+            raise InvalidExecutionPlanError(f"{label} path is missing")
         if not _is_relative_to(path, runtime_dir):
             raise InvalidExecutionPlanError(
                 f"{label} path must be under the runtime directory: {path}"
@@ -464,7 +691,7 @@ def _validate_mux_temporary_path(plan: TranscodePlan, temporary_output: Path) ->
         raise WorkDirectoryConflictError(f"Mux temporary output already exists: {temporary_output}")
     if temporary_output == plan.output_path:
         raise InvalidExecutionPlanError("Mux temporary output must differ from final output.")
-    if temporary_output == plan.input_path or temporary_output == plan.av1an.video_output_path:
+    if temporary_output == plan.input_path or temporary_output == plan.video_output_path:
         raise InvalidExecutionPlanError(
             "Mux temporary output must differ from source and video input."
         )
@@ -593,6 +820,195 @@ def _tool_version_output(
     return output
 
 
+class _FfmpegProgressCollector:
+    def __init__(self, progress_sink: ProgressSink, *, total_seconds: float | None) -> None:
+        self._progress_sink = progress_sink
+        self._total_seconds = total_seconds if total_seconds and total_seconds > 0 else None
+        self._parser = FfmpegProgressParser()
+        self._lock = threading.Lock()
+
+    def callback(self, record: ProcessOutputRecord) -> None:
+        if record.stream != "stdout":
+            return
+        with self._lock:
+            for sample in self._parser.feed(record.data):
+                self._publish(sample)
+
+    def flush(self) -> None:
+        with self._lock:
+            for sample in self._parser.flush():
+                self._publish(sample)
+
+    def _publish(self, sample: FfmpegProgressSample) -> None:
+        now = _utc_now()
+        current = sample.encoded_seconds
+        if current is not None and self._total_seconds is not None:
+            current = min(current, self._total_seconds)
+        message = f"{sample.frame} frames" if sample.frame is not None else None
+        publish_progress_safely(
+            self._progress_sink,
+            ProgressSnapshot(
+                phase=ProgressPhase.ENCODING,
+                current=current,
+                total=self._total_seconds,
+                unit=ProgressUnit.SECONDS if current is not None else None,
+                rate_per_second=sample.fps,
+                speed_ratio=sample.speed_ratio,
+                source=ProgressSource.FFMPEG_PROGRESS,
+                message=message,
+                phase_started_at=now,
+                observed_at=now,
+                heartbeat_at=now,
+                advanced_at=now if current is not None else None,
+                bitrate_kbps=sample.bitrate_kbps,
+                written_output_bytes=sample.written_bytes,
+            ),
+        )
+
+
+def _run_nvenc_pipeline(
+    spec: NvencCommandSpec,
+    *,
+    runtime: ExecutionRuntimePaths,
+    plan_hash: str,
+    cancellation_token: ProcessCancellationToken | None,
+    progress_collector: _FfmpegProgressCollector | None,
+) -> tuple[int, int]:
+    producer_command = build_vspipe_command(spec)
+    encoder_command = build_nvenc_ffmpeg_command(spec)
+    producer_log_path = _required_path(runtime.vspipe_stderr_log, "vspipe stderr log")
+    encoder_stdout_path = _required_path(runtime.nvenc_stdout_log, "NVENC stdout log")
+    encoder_stderr_path = _required_path(runtime.nvenc_stderr_log, "NVENC stderr log")
+    for path in (producer_log_path, encoder_stdout_path, encoder_stderr_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        producer_log_path.open("ab") as producer_stderr,
+        encoder_stdout_path.open("ab") as encoder_stdout,
+        encoder_stderr_path.open("ab") as encoder_stderr,
+    ):
+        producer = subprocess.Popen(
+            producer_command,
+            cwd=spec.working_directory,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+        )
+        _MANAGED_PROCESSES.register(producer)
+        if producer.stdout is None:
+            _MANAGED_PROCESSES.unregister(producer)
+            raise NvencStageError("vspipe stdout pipe was not created")
+        try:
+            encoder = subprocess.Popen(
+                encoder_command,
+                cwd=spec.working_directory,
+                stdin=producer.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
+            )
+        except BaseException:
+            _terminate_process(producer)
+            producer.wait()
+            _MANAGED_PROCESSES.unregister(producer)
+            raise
+        _MANAGED_PROCESSES.register(encoder)
+        producer.stdout.close()
+        errors: list[BaseException] = []
+        readers: list[threading.Thread] = []
+        if producer.stderr is not None:
+            readers.append(
+                _pipeline_reader(
+                    cast(BinaryIO, producer.stderr), producer_stderr, "stderr", None, errors
+                )
+            )
+        if encoder.stdout is not None:
+            readers.append(
+                _pipeline_reader(
+                    cast(BinaryIO, encoder.stdout),
+                    encoder_stdout,
+                    "stdout",
+                    progress_collector.callback if progress_collector is not None else None,
+                    errors,
+                )
+            )
+        if encoder.stderr is not None:
+            readers.append(
+                _pipeline_reader(
+                    cast(BinaryIO, encoder.stderr), encoder_stderr, "stderr", None, errors
+                )
+            )
+        for reader in readers:
+            reader.start()
+        try:
+            while producer.poll() is None or encoder.poll() is None:
+                if cancellation_token is not None and cancellation_token.cancel_requested:
+                    _terminate_process(encoder)
+                    _terminate_process(producer)
+                    try:
+                        encoder.wait(timeout=10)
+                        producer.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        _kill_process(encoder)
+                        _kill_process(producer)
+                        encoder.wait()
+                        producer.wait()
+                    raise ExecutionInterruptedError("Interrupted while running NVENC pipeline")
+                producer_code = producer.poll()
+                encoder_code = encoder.poll()
+                if producer_code not in {None, 0} and encoder_code is None:
+                    _terminate_process(encoder)
+                if encoder_code not in {None, 0} and producer_code is None:
+                    _terminate_process(producer)
+                if cancellation_token is None:
+                    if producer_code is None and encoder_code is None:
+                        encoder.wait()
+                    else:
+                        break
+                else:
+                    cancellation_token.wait(timeout_seconds=0.05)
+            producer_code = producer.wait()
+            encoder_code = encoder.wait()
+            for reader in readers:
+                reader.join()
+            if errors:
+                raise errors[0]
+            return producer_code, encoder_code
+        finally:
+            _MANAGED_PROCESSES.unregister(encoder)
+            _MANAGED_PROCESSES.unregister(producer)
+            for process in (encoder, producer):
+                if process.poll() is None:
+                    _kill_process(process)
+                    process.wait()
+            for reader in readers:
+                reader.join(timeout=1)
+            separator = f"\n=== avarch NVENC pipeline plan_hash={plan_hash} ===\n".encode()
+            producer_stderr.write(separator)
+            encoder_stdout.write(separator)
+            encoder_stderr.write(separator)
+
+
+def _pipeline_reader(
+    pipe: BinaryIO,
+    log_file: BinaryIO,
+    stream: Literal["stdout", "stderr"],
+    callback: ProcessOutputCallback | None,
+    errors: list[BaseException],
+) -> threading.Thread:
+    return threading.Thread(
+        target=_stream_process_output_thread,
+        kwargs={
+            "pipe": pipe,
+            "log_file": log_file,
+            "stream": stream,
+            "callback": callback,
+            "errors": errors,
+        },
+        daemon=False,
+    )
+
+
 def _run_process(
     command: Sequence[str],
     *,
@@ -689,10 +1105,7 @@ class _Av1anProgressCollector:
             return self._phase
 
     def _publish_if_accepted(self, sample: Av1anTtyProgressSample) -> None:
-        if (
-            self._phase == ProgressPhase.ENCODING
-            and sample.phase == ProgressPhase.SCENE_DETECTION
-        ):
+        if self._phase == ProgressPhase.ENCODING and sample.phase == ProgressPhase.SCENE_DETECTION:
             return
         if sample.phase == ProgressPhase.ENCODING:
             self._phase = ProgressPhase.ENCODING
@@ -1068,15 +1481,19 @@ def _write_process_end(
 
 
 def _valid_av1an_marker(plan: TranscodePlan, *, av1an_spec_hash: str) -> bool:
-    marker = _read_model(plan.runtime.av1an_stage_marker, Av1anStageMarker)
+    marker_path = plan.runtime.av1an_stage_marker
+    spec = plan.av1an
+    marker = _read_model(marker_path, Av1anStageMarker)
     if marker is None:
         return False
     if marker.plan_hash != plan.plan_hash or marker.av1an_spec_hash != av1an_spec_hash:
         return False
-    if marker.video_output_path != plan.av1an.video_output_path:
+    if marker.backend not in {None, "av1an"}:
+        return False
+    if marker.video_output_path != spec.video_output_path:
         return False
     try:
-        stat_result = plan.av1an.video_output_path.stat()
+        stat_result = spec.video_output_path.stat()
     except OSError:
         return False
     return stat_result.st_size == marker.video_output_size and stat_result.st_size > 0
@@ -1093,7 +1510,13 @@ def _valid_encode_receipt(
         return False
     if receipt.plan_hash != plan.plan_hash:
         return False
-    if receipt.av1an_spec_hash != av1an_spec_hash or receipt.mux_spec_hash != mux_spec_hash:
+    if receipt.schema_version == 1:
+        encoder_hash_matches = receipt.av1an_spec_hash == av1an_spec_hash
+    else:
+        encoder_hash_matches = (
+            receipt.backend == "av1an" and receipt.encoder_spec_hash == av1an_spec_hash
+        )
+    if not encoder_hash_matches or receipt.mux_spec_hash != mux_spec_hash:
         return False
     if receipt.final_output_path != plan.output_path:
         return False
@@ -1104,20 +1527,106 @@ def _valid_encode_receipt(
     return stat_result.st_size == receipt.final_output_size and stat_result.st_size > 0
 
 
+def _valid_nvenc_marker(plan: TranscodePlan, *, encoder_spec_hash: str) -> bool:
+    marker_path = plan.runtime.nvenc_stage_marker
+    spec = plan.nvenc
+    marker = _read_model(marker_path, NvencStageMarker)
+    if marker is None:
+        return False
+    if marker.plan_hash != plan.plan_hash or marker.encoder_spec_hash != encoder_spec_hash:
+        return False
+    if marker.video_output_path != spec.video_output_path:
+        return False
+    try:
+        stat_result = spec.video_output_path.stat()
+    except OSError:
+        return False
+    return stat_result.st_size == marker.video_output_size and stat_result.st_size > 0
+
+
+def _valid_nvenc_receipt(
+    plan: TranscodePlan,
+    *,
+    encoder_spec_hash: str,
+    mux_spec_hash: str,
+) -> bool:
+    receipt = _read_model(plan.runtime.encode_result, EncodeResultReceipt)
+    if receipt is None or receipt.schema_version != 2:
+        return False
+    if receipt.backend != "ffmpeg_nvenc" or receipt.plan_hash != plan.plan_hash:
+        return False
+    if receipt.encoder_spec_hash != encoder_spec_hash or receipt.mux_spec_hash != mux_spec_hash:
+        return False
+    if receipt.final_output_path != plan.output_path:
+        return False
+    try:
+        stat_result = plan.output_path.stat()
+    except OSError:
+        return False
+    return stat_result.st_size == receipt.final_output_size and stat_result.st_size > 0
+
+
+def _write_nvenc_marker(
+    plan: TranscodePlan,
+    *,
+    encoder_spec_hash: str,
+    video_output_size: int,
+) -> None:
+    marker_path = _required_path(plan.runtime.nvenc_stage_marker, "NVENC stage marker")
+    spec = plan.nvenc
+    marker = NvencStageMarker(
+        plan_hash=plan.plan_hash,
+        encoder_spec_hash=encoder_spec_hash,
+        video_output_path=spec.video_output_path,
+        video_output_size=video_output_size,
+        completed_at=_utc_now(),
+    )
+    _write_json_atomically(marker_path, marker)
+
+
+def _write_nvenc_receipt(
+    plan: TranscodePlan,
+    *,
+    encoder_spec_hash: str,
+    mux_spec_hash: str,
+    video_output_size: int,
+    final_output_size: int,
+) -> None:
+    spec = plan.nvenc
+    receipt = EncodeResultReceipt(
+        schema_version=2,
+        backend="ffmpeg_nvenc",
+        plan_hash=plan.plan_hash,
+        encoder_spec_hash=encoder_spec_hash,
+        mux_spec_hash=mux_spec_hash,
+        video_output_path=spec.video_output_path,
+        video_output_size=video_output_size,
+        final_output_path=plan.output_path,
+        final_output_size=final_output_size,
+        completed_at=_utc_now(),
+    )
+    _write_json_atomically(plan.runtime.encode_result, receipt)
+
+
 def _write_av1an_marker(
     plan: TranscodePlan,
     *,
     av1an_spec_hash: str,
     video_output_size: int,
 ) -> None:
+    spec = plan.av1an
     marker = Av1anStageMarker(
+        schema_version=2,
+        backend="av1an",
         plan_hash=plan.plan_hash,
         av1an_spec_hash=av1an_spec_hash,
-        video_output_path=plan.av1an.video_output_path,
+        video_output_path=spec.video_output_path,
         video_output_size=video_output_size,
         completed_at=_utc_now(),
     )
-    _write_json_atomically(plan.runtime.av1an_stage_marker, marker)
+    _write_json_atomically(
+        _required_path(plan.runtime.av1an_stage_marker, "Av1an stage marker"), marker
+    )
 
 
 def _write_encode_receipt(
@@ -1128,11 +1637,15 @@ def _write_encode_receipt(
     video_output_size: int,
     final_output_size: int,
 ) -> None:
+    spec = plan.av1an
     receipt = EncodeResultReceipt(
+        schema_version=2,
+        backend="av1an",
         plan_hash=plan.plan_hash,
         av1an_spec_hash=av1an_spec_hash,
+        encoder_spec_hash=av1an_spec_hash,
         mux_spec_hash=mux_spec_hash,
-        video_output_path=plan.av1an.video_output_path,
+        video_output_path=spec.video_output_path,
         video_output_size=video_output_size,
         final_output_path=plan.output_path,
         final_output_size=final_output_size,
@@ -1179,6 +1692,12 @@ def _require_nonempty_file(path: Path, *, label: str) -> int:
     if not path.is_file() or stat_result.st_size <= 0:
         raise WorkDirectoryConflictError(f"{label} is empty or not a regular file: {path}")
     return stat_result.st_size
+
+
+def _required_path(path: object, label: str) -> Path:
+    if not isinstance(path, Path):
+        raise InvalidExecutionPlanError(f"{label} path is missing")
+    return path
 
 
 def _read_tail(path: Path) -> str:
