@@ -40,6 +40,8 @@ class SchedulerCapacityUsage:
     av1an_active: int
     file_ops: int
     file_ops_active: int
+    nvenc_jobs: int = 1
+    nvenc_active: int = 0
 
 
 def get_or_create_scheduler_state(session: Session, *, now: datetime) -> SchedulerState:
@@ -132,11 +134,14 @@ def release_scheduler_lease(
         state.capacity_cheap_active = 0
     if state.capacity_av1an_jobs is not None:
         state.capacity_av1an_active = 0
+    if state.capacity_nvenc_jobs is not None:
+        state.capacity_nvenc_active = 0
     if state.capacity_file_ops is not None:
         state.capacity_file_ops_active = 0
     if (
         state.capacity_cheap_workers is not None
         or state.capacity_av1an_jobs is not None
+        or state.capacity_nvenc_jobs is not None
         or state.capacity_file_ops is not None
     ):
         state.capacity_observed_at = now
@@ -159,6 +164,8 @@ def apply_scheduler_capacity(
     state.capacity_cheap_active = capacity.cheap_active
     state.capacity_av1an_jobs = capacity.av1an_jobs
     state.capacity_av1an_active = capacity.av1an_active
+    state.capacity_nvenc_jobs = capacity.nvenc_jobs
+    state.capacity_nvenc_active = capacity.nvenc_active
     state.capacity_file_ops = capacity.file_ops
     state.capacity_file_ops_active = capacity.file_ops_active
     state.capacity_observed_at = now

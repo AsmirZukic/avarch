@@ -50,6 +50,22 @@ class ProfileAv1anSettings(BaseModel):
         return value
 
 
+class ProfileNvencSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    encoder: Literal["av1_nvenc"] = "av1_nvenc"
+    preset: Literal["p1", "p2", "p3", "p4", "p5", "p6", "p7"] = "p5"
+    tune: Literal["hq", "uhq"] = "hq"
+    cq: float = Field(default=28, ge=1, le=63)
+    multipass: Literal["disabled", "qres", "fullres"] = "qres"
+    lookahead: int = Field(default=16, ge=0, le=32)
+    spatial_aq: bool = True
+    temporal_aq: bool = True
+    aq_strength: int = Field(default=8, ge=1, le=15)
+    gpu: int = Field(default=0, ge=0)
+    pixel_format: Literal["p010le"] = "p010le"
+
+
 class ProfileAudioSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,16 +151,34 @@ class ProfileVapourSynthSettings(BaseModel):
 class EncodingProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["av1an"]
+    backend: Literal["av1an", "ffmpeg_nvenc"]
     container: Literal["mkv"]
     vapoursynth: ProfileVapourSynthSettings = Field(default_factory=ProfileVapourSynthSettings)
     match: ProfileMatchSettings
     video: ProfileVideoSettings
-    av1an: ProfileAv1anSettings
+    av1an: ProfileAv1anSettings = cast(ProfileAv1anSettings, None)
+    nvenc: ProfileNvencSettings = cast(ProfileNvencSettings, None)
     audio: ProfileAudioSettings
     subtitles: ProfileSubtitleSettings
     validation: ProfileValidationSettings = Field(default_factory=ProfileValidationSettings)
     promotion: ProfilePromotionSettings = Field(default_factory=ProfilePromotionSettings)
+
+    @model_validator(mode="after")
+    def backend_settings_must_match(self) -> EncodingProfile:
+        av1an = cast(ProfileAv1anSettings | None, self.__dict__.get("av1an"))
+        nvenc = cast(ProfileNvencSettings | None, self.__dict__.get("nvenc"))
+        if self.backend == "av1an":
+            if av1an is None:
+                raise ValueError("av1an backend requires [av1an] settings")
+            if nvenc is not None:
+                raise ValueError("av1an backend does not accept [nvenc] settings")
+        else:
+            if nvenc is None:
+                raise ValueError("ffmpeg_nvenc backend requires [nvenc] settings")
+            if av1an is not None:
+                raise ValueError("ffmpeg_nvenc backend does not accept [av1an] settings")
+        return self
+
 
 class ProfileDocument(EncodingProfile):
     name: str
@@ -164,7 +198,8 @@ class ProfileDocument(EncodingProfile):
 
     def encoding_profile(self) -> EncodingProfile:
         payload = self.model_dump(
-            exclude={"name", "description", "tags", "known_limitations", "schema_version"}
+            exclude={"name", "description", "tags", "known_limitations", "schema_version"},
+            exclude_none=True,
         )
         return EncodingProfile.model_validate(payload)
 

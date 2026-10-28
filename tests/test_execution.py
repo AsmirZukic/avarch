@@ -23,6 +23,7 @@ from avarch.adapters.execution import (
     should_resume_av1an,
 )
 from avarch.adapters.filesystem.scanner import create_file_snapshot
+from avarch.adapters.nvenc import NvencCapability
 from avarch.adapters.progress.av1an_tty import Av1anTtyProgressParser
 from avarch.application.progress import NoopProgressSink, RecordingProgressSink
 from avarch.domain.progress import ProgressPhase, ProgressSource
@@ -38,6 +39,7 @@ from avarch.models.plan import (
     ExecutionIdentity,
     ExecutionRuntimePaths,
     FfmpegMuxSpec,
+    NvencCommandSpec,
     PlanArtifactPaths,
     SubtitlePlan,
     TranscodePlan,
@@ -267,6 +269,17 @@ def test_mux_temporary_path_accepts_relative_plan_output(
     _validate_mux_temporary_path(plan, temporary_output)
 
 
+def test_version_5_plan_serialization_remains_av1an_compatible(tmp_path: Path) -> None:
+    payload = _sample_plan(tmp_path).model_dump(mode="json")
+
+    assert payload["schema_version"] == 5
+    assert "backend" not in payload
+    assert "nvenc" not in payload
+    assert "nvenc_contract_version" not in payload["execution_identity"]
+    assert "nvenc_stage_marker" not in payload["runtime"]
+    assert "nvenc_command_json" not in payload["artifacts"]
+
+
 def test_execute_plan_writes_markers_and_reuses_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -284,6 +297,37 @@ def test_execute_plan_writes_markers_and_reuses_receipt(
 
     monkeypatch.setenv("PATH", str(tmp_path / "missing-tools"))
 
+    assert execute_plan(plan) == "already_complete"
+
+
+def test_execute_nvenc_plan_runs_vspipe_ffmpeg_and_mux_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_nvenc_tools(tmp_path, monkeypatch)
+
+    def available_capability(**_kwargs: object) -> NvencCapability:
+        return NvencCapability(
+            available=True,
+            gpu_available=True,
+            runtime_accessible=True,
+            encoder_available=True,
+            pixel_format_supported=True,
+            encoder_initialized=True,
+            gpu_names=("Fake NVIDIA",),
+        )
+
+    monkeypatch.setattr(execution_module, "detect_nvenc_capability", available_capability)
+    plan = _sample_nvenc_plan(tmp_path)
+    sink = RecordingProgressSink()
+
+    assert execute_plan(plan, progress_sink=sink) == "completed"
+
+    assert plan.nvenc.video_output_path.read_bytes() == b"nvenc-video"
+    assert plan.output_path.read_bytes() == b"final"
+    assert plan.runtime.nvenc_stage_marker.is_file()
+    assert plan.runtime.encode_result.is_file()
+    assert any(snapshot.source == ProgressSource.FFMPEG_PROGRESS for snapshot in sink.snapshots)
     assert execute_plan(plan) == "already_complete"
 
 
@@ -388,8 +432,8 @@ def test_execute_plan_emits_process_heartbeat_while_child_is_silent(
     heartbeats = [
         snapshot
         for snapshot in sink.snapshots
-            if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
-            and snapshot.phase == ProgressPhase.SCENE_DETECTION
+        if snapshot.source == ProgressSource.PROCESS_HEARTBEAT
+        and snapshot.phase == ProgressPhase.SCENE_DETECTION
     ]
     assert heartbeats
     assert all(snapshot.current is None for snapshot in heartbeats)
@@ -430,9 +474,7 @@ def test_execute_plan_ignores_malformed_av1an_progress_output(
     assert execute_plan(plan, progress_sink=sink) == "completed"
 
     assert not [
-        snapshot
-        for snapshot in sink.snapshots
-        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+        snapshot for snapshot in sink.snapshots if snapshot.source == ProgressSource.AV1AN_OUTPUT
     ]
 
 
@@ -449,9 +491,7 @@ def test_execute_plan_falls_back_to_phase_progress_when_av1an_parser_disabled(
 
     assert ProgressPhase.SCENE_DETECTION in [snapshot.phase for snapshot in sink.snapshots]
     assert not [
-        snapshot
-        for snapshot in sink.snapshots
-        if snapshot.source == ProgressSource.AV1AN_OUTPUT
+        snapshot for snapshot in sink.snapshots if snapshot.source == ProgressSource.AV1AN_OUTPUT
     ]
 
 
@@ -600,10 +640,12 @@ if [ "__AV1AN_START_DELAY__" != "0" ]; then
   sleep "__AV1AN_START_DELAY__"
 fi
 printf video > "$out"
-""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no").replace(
+""".replace("__AV1AN_PROGRESS__", "yes" if av1an_progress else "no")
+        .replace(
             "__AV1AN_NOISE__",
             "yes" if av1an_noise else "no",
-        ).replace(
+        )
+        .replace(
             "__AV1AN_START_DELAY__",
             av1an_start_delay_literal,
         ),
@@ -696,6 +738,94 @@ done
         encoding="utf-8",
     )
     av1an.chmod(0o755)
+
+
+def _install_fake_nvenc_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    vspipe = bin_dir / "vspipe"
+    vspipe.write_text(
+        """#!/usr/bin/env bash
+printf 'YUV4MPEG2 W2 H2 F1:1 Ip A1:1 C420p10\nFRAME\n0000'
+""",
+        encoding="utf-8",
+    )
+    ffmpeg = bin_dir / "ffmpeg"
+    ffmpeg.write_text(
+        """#!/usr/bin/env bash
+if [ "${1:-}" = "-version" ]; then
+  echo "ffmpeg version 8.0"
+  exit 0
+fi
+if [ "${1:-}" = "-decoders" ]; then
+  echo " A....D aac fake decoder"
+  exit 0
+fi
+if [ "${1:-}" = "-encoders" ]; then
+  echo " A..... libopus fake encoder"
+  exit 0
+fi
+out="${@: -1}"
+if printf '%s\n' "$@" | grep -q -- '-progress'; then
+  cat >/dev/null
+  printf 'frame=1\nfps=1.0\nout_time_us=1000000\ntotal_size=11\nspeed=1.0x\nprogress=end\n'
+  printf nvenc-video > "$out"
+else
+  printf final > "$out"
+fi
+""",
+        encoding="utf-8",
+    )
+    vspipe.chmod(0o755)
+    ffmpeg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+
+
+def _sample_nvenc_plan(tmp_path: Path) -> TranscodePlan:
+    av1an_plan = _sample_plan(tmp_path)
+    payload = av1an_plan.model_dump(mode="json")
+    payload["schema_version"] = 6
+    payload["backend"] = "ffmpeg_nvenc"
+    payload.pop("av1an")
+    payload["execution_identity"] = {
+        "schema_version": 1,
+        "backend": "ffmpeg_nvenc",
+        "nvenc_contract_version": 1,
+        "ffmpeg_mux_contract_version": 1,
+        "video_container": "mkv",
+        "final_container": "mkv",
+        "identity_hash": "nvenc-identity",
+    }
+    work_dir = Path(payload["temp_dir"])
+    script_path = Path(payload["vapoursynth"]["script_path"])
+    video_output = work_dir / "video-only.mkv"
+    payload["nvenc"] = NvencCommandSpec(
+        input_path=script_path,
+        video_output_path=video_output,
+        working_directory=work_dir,
+        encoder="av1_nvenc",
+        preset="p5",
+        cq=28,
+        gpu=0,
+    ).model_dump(mode="json")
+    runtime_dir = work_dir / "runtime"
+    payload["runtime"] = {
+        "runtime_dir": str(runtime_dir),
+        "vspipe_stderr_log": str(runtime_dir / "vspipe.stderr.log"),
+        "nvenc_stdout_log": str(runtime_dir / "nvenc.progress.log"),
+        "nvenc_stderr_log": str(runtime_dir / "nvenc.stderr.log"),
+        "mux_stdout_log": str(runtime_dir / "mux.stdout.log"),
+        "mux_stderr_log": str(runtime_dir / "mux.stderr.log"),
+        "nvenc_stage_marker": str(runtime_dir / "nvenc-stage.json"),
+        "encode_result": str(runtime_dir / "encode-result.json"),
+        "validation_report": str(runtime_dir / "validation-report.json"),
+        "validation_decode_stdout_log": str(runtime_dir / "validation.decode.stdout.log"),
+        "validation_decode_stderr_log": str(runtime_dir / "validation.decode.stderr.log"),
+    }
+    artifact_dir = Path(payload["artifacts"]["artifact_dir"])
+    payload["artifacts"].pop("av1an_command_json")
+    payload["artifacts"]["nvenc_command_json"] = str(artifact_dir / "nvenc.command.json")
+    return TranscodePlan.model_validate(payload)
 
 
 def _sample_plan(tmp_path: Path) -> TranscodePlan:

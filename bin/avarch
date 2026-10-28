@@ -123,6 +123,9 @@ exec_docker_run() {
   if [ -n "${AVARCH_DOCKER_MEMORY:-}" ]; then
     set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
   fi
+  if [ -n "${AVARCH_DOCKER_GPUS:-}" ]; then
+    set -- --gpus "$AVARCH_DOCKER_GPUS" "$@"
+  fi
   if [ -n "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
     set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"
   fi
@@ -139,6 +142,9 @@ docker_run() {
   fi
   if [ -n "${AVARCH_DOCKER_MEMORY:-}" ]; then
     set -- --memory "$AVARCH_DOCKER_MEMORY" "$@"
+  fi
+  if [ -n "${AVARCH_DOCKER_GPUS:-}" ]; then
+    set -- --gpus "$AVARCH_DOCKER_GPUS" "$@"
   fi
   if [ -n "${AVARCH_DOCKER_CPUSET_CPUS:-}" ]; then
     set -- --cpuset-cpus "$AVARCH_DOCKER_CPUSET_CPUS" "$@"

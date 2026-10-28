@@ -19,6 +19,7 @@ from avarch.domain.jobs import (
     JobStage,
     JobStatus,
     JobTransitionError,
+    ResourceClass,
     active_status_for_stage,
     job_can_be_claimed_for_stage,
     job_has_passed_validation,
@@ -103,6 +104,7 @@ def claim_job_stage(
     job_id: int,
     runner_id: str,
     now: datetime,
+    resource_class: ResourceClass | None = None,
 ) -> JobAttempt:
     job = require_job(session, job_id)
     if not job_can_be_claimed_for_stage(job.status, job.stage):
@@ -119,7 +121,7 @@ def claim_job_stage(
         scheduler_session_id=current_scheduler_session_id(session, runner_id=runner_id),
         attempt_number=job.attempts,
         stage=job.stage,
-        resource_class=resource_for_stage(job.stage),
+        resource_class=resource_class or resource_for_stage(job.stage),
         status=AttemptStatus.RUNNING,
         runner_id=runner_id,
         started_at=now,
@@ -183,7 +185,6 @@ def complete_scene_detect_stage(
     job.status = active_status_for_stage(JobStage.ENCODE)
     job.updated_at = now
     attempt.stage = JobStage.ENCODE
-    attempt.resource_class = resource_for_stage(JobStage.ENCODE)
     record_stage_event(
         session,
         job_id=job_id,

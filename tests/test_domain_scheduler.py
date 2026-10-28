@@ -70,6 +70,39 @@ def test_select_launchable_jobs_accounts_for_active_and_newly_selected_jobs() ->
     )
 
 
+def test_av1an_and_nvenc_jobs_use_independent_capacity() -> None:
+    claimable = [
+        ClaimableJob(
+            job_id=1,
+            stage=JobStage.ENCODE,
+            resource_class=ResourceClass.HEAVY_AV1AN,
+        ),
+        ClaimableJob(
+            job_id=2,
+            stage=JobStage.ENCODE,
+            resource_class=ResourceClass.HEAVY_NVENC,
+        ),
+        ClaimableJob(
+            job_id=3,
+            stage=JobStage.ENCODE,
+            resource_class=ResourceClass.HEAVY_NVENC,
+        ),
+    ]
+
+    selected = select_launchable_jobs(
+        claimable,
+        active_jobs=[],
+        capacity=ResourceCapacity(
+            cheap_workers=1,
+            av1an_jobs=1,
+            nvenc_jobs=1,
+            file_ops=1,
+        ),
+    )
+
+    assert selected == (claimable[0], claimable[1])
+
+
 def test_cleanup_uses_file_operation_capacity() -> None:
     assert resource_for_stage(JobStage.CLEANUP) == ResourceClass.FILE_OP
 

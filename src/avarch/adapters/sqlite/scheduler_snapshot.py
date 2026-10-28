@@ -40,7 +40,7 @@ from avarch.application.scheduler_snapshot import (
     WorkspaceSummary,
     project_workflow_steps,
 )
-from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus
+from avarch.domain.jobs import AttemptStatus, JobEventType, JobStage, JobStatus, ResourceClass
 from avarch.domain.progress import ProgressPhase, ProgressUnit
 from avarch.domain.scheduler import ActiveJob, ResourceCapacity, SchedulerMode, resource_for_stage
 
@@ -145,6 +145,8 @@ class SqliteSchedulerSnapshotQuery:
             cheap_active=state.capacity_cheap_active or 0,
             av1an_jobs=state.capacity_av1an_jobs or 0,
             av1an_active=state.capacity_av1an_active or 0,
+            nvenc_jobs=state.capacity_nvenc_jobs or 0,
+            nvenc_active=state.capacity_nvenc_active or 0,
             file_ops=state.capacity_file_ops or 0,
             file_ops_active=state.capacity_file_ops_active or 0,
             av1an_workers_configured=self._active_av1an_workers_configured(),
@@ -179,11 +181,7 @@ class SqliteSchedulerSnapshotQuery:
         job_ids = tuple(job.id for job, _media in rows if job.id is not None)
         attempts_by_job = self._latest_attempts_by_job(job_ids)
         progress_by_attempt = self._progress_by_attempt(
-            tuple(
-                attempt.id
-                for attempt in attempts_by_job.values()
-                if attempt.id is not None
-            )
+            tuple(attempt.id for attempt in attempts_by_job.values() if attempt.id is not None)
         )
         return tuple(
             _active_job_summary(
@@ -244,6 +242,7 @@ class SqliteSchedulerSnapshotQuery:
             cheap_workers=state.capacity_cheap_workers,
             av1an_jobs=state.capacity_av1an_jobs or 0,
             file_ops=state.capacity_file_ops or 0,
+            nvenc_jobs=state.capacity_nvenc_jobs or 0,
         )
 
     def _active_jobs_for_selection(self) -> list[ActiveJob]:
@@ -290,9 +289,7 @@ class SqliteSchedulerSnapshotQuery:
             select(Job, MediaFile)
             .join(MediaFile, cast(ColumnElement[bool], MediaFile.id == Job.media_file_id))
             .where(
-                col(Job.status).not_in(
-                    [JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED]
-                )
+                col(Job.status).not_in([JobStatus.PROMOTED, JobStatus.SKIPPED, JobStatus.CANCELLED])
             )
             .order_by(col(Job.priority).desc(), col(Job.created_at).asc(), col(Job.id).asc())
             .limit(20)
@@ -378,7 +375,9 @@ class SqliteSchedulerSnapshotQuery:
         return {
             progress.attempt_id: progress
             for progress in self._session.exec(
-                select(JobAttemptProgress).where(col(JobAttemptProgress.attempt_id).in_(attempt_ids))
+                select(JobAttemptProgress).where(
+                    col(JobAttemptProgress.attempt_id).in_(attempt_ids)
+                )
             ).all()
         }
 
@@ -408,6 +407,8 @@ def _active_job_summary(
         job_id=_required_id(job.id),
         source_path=media_file.path,
         profile_name=job.profile_name,
+        backend=_backend_from_command(attempt.command_json) if attempt is not None else None,
+        resource_class=ResourceClass(attempt.resource_class) if attempt is not None else None,
         status=JobStatus(job.status),
         stage=job_stage,
         priority=job.priority,
@@ -504,10 +505,12 @@ def _pad_active_jobs_from_capacity_state(
     active_by_resource = {
         "cheap": 0,
         "heavy_av1an": 0,
+        "heavy_nvenc": 0,
         "file_op": 0,
     }
     for job in active_jobs:
-        active_by_resource[resource_for_stage(job.stage).value] += 1
+        resource = job.resource_class or resource_for_stage(job.stage)
+        active_by_resource[resource.value] += 1
     synthetic_id = -1
     for stage, target in (
         (JobStage.VALIDATE, state.capacity_cheap_active or 0),
@@ -519,7 +522,31 @@ def _pad_active_jobs_from_capacity_state(
             padded.append(ActiveJob(job_id=synthetic_id, stage=stage))
             synthetic_id -= 1
             active_by_resource[resource] += 1
+    nvenc_target = state.capacity_nvenc_active or 0
+    while active_by_resource[ResourceClass.HEAVY_NVENC.value] < nvenc_target:
+        padded.append(
+            ActiveJob(
+                job_id=synthetic_id,
+                stage=JobStage.ENCODE,
+                resource_class=ResourceClass.HEAVY_NVENC,
+            )
+        )
+        synthetic_id -= 1
+        active_by_resource[ResourceClass.HEAVY_NVENC.value] += 1
     return padded
+
+
+def _backend_from_command(command_json: str | None) -> str | None:
+    if command_json is None:
+        return None
+    try:
+        value: object = json.loads(command_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    backend = cast(dict[str, object], value).get("backend")
+    return backend if isinstance(backend, str) else None
 
 
 def _av1an_workers_from_command(command_json: str | None) -> int | None:

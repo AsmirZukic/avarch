@@ -1150,3 +1150,23 @@ The Avarch architecture should be judged by these principles:
 12. A refactor is incomplete until the replaced code is removed.
 13. Boring, explicit code is preferred over clever, generic code.
 14. The architecture serves Avarch's workflow, not the other way around.
+
+## 23. Backend-Aware Video Encoding
+
+Video encoding has two explicit implementations behind the persisted plan contract:
+
+- Av1an with SVT-AV1, represented by `Av1anCommandSpec` in version 5 plans;
+- FFmpeg with NVIDIA `av1_nvenc`, represented by `NvencCommandSpec` in version 6 plans.
+
+The surrounding workflow remains shared: discovery, probing, deterministic planning,
+VapourSynth generation, FFmpeg muxing, validation, size policy, receipts, and promotion.
+Backend selection is a tagged profile/plan decision, not a generic plugin framework.
+
+Persisted version 5 plans are compatibility data and remain unambiguously Av1an plans.
+They are deserialized under their original contract and are never silently upgraded or
+reinterpreted. New NVENC plans carry an explicit backend, backend-specific execution
+identity, marker, and encoder specification hash.
+
+Scheduler resource ownership distinguishes `heavy_av1an` from `heavy_nvenc`, allowing
+one of each to run concurrently while enforcing independent capacities. NVENC capability
+checks are execution preflight effects and do not block planning or CPU-only jobs.

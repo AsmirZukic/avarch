@@ -21,6 +21,7 @@ from avarch.contracts import (
     PLAN_HASH_CONTRACT,
     PROFILE_HASH_CONTRACT,
     PROMOTION_POLICY_HASH_CONTRACT,
+    TRANSCODE_PLAN_SCHEMA_VERSION,
     VALIDATION_POLICY_HASH_CONTRACT,
     WORK_KEY_CONTRACT,
 )
@@ -40,11 +41,13 @@ from avarch.domain.profiles import (
 from avarch.models.plan import (
     AV1AN_COMMAND_CONTRACT_VERSION,
     FFMPEG_MUX_CONTRACT_VERSION,
+    NVENC_COMMAND_CONTRACT_VERSION,
     AudioPlan,
     Av1anCommandSpec,
     ExecutionIdentity,
     ExecutionRuntimePaths,
     FfmpegMuxSpec,
+    NvencCommandSpec,
     PlanArtifactPaths,
     SubtitlePlan,
     SubtitleStreamPlan,
@@ -210,6 +213,8 @@ def build_profile_hash(
         available_memory_bytes=available_memory_bytes,
     )
     profile_payload = effective_profile.model_dump(mode="json")
+    if effective_profile.backend == "av1an":
+        profile_payload.pop("nvenc", None)
     if isinstance(profile_payload.get("vapoursynth"), dict):
         profile_payload["vapoursynth"].pop("script", None)
         profile_payload["vapoursynth"].pop("template", None)
@@ -295,44 +300,69 @@ def save_plan(store: PlanningStore, *, plan: TranscodePlan, now: datetime) -> No
     store.persist_plan(plan=plan, now=now)
 
 
-def build_execution_identity() -> ExecutionIdentity:
-    identity = ExecutionIdentity(
-        av1an_contract_version=AV1AN_COMMAND_CONTRACT_VERSION,
-        ffmpeg_mux_contract_version=FFMPEG_MUX_CONTRACT_VERSION,
-        av1an_version_family=SUPPORTED_AV1AN_VERSION_FAMILY,
-        video_container="mkv",
-        final_container="mkv",
-        identity_hash="",
-    )
+def build_execution_identity(
+    backend: str = "av1an",
+) -> ExecutionIdentity:
+    if backend == "av1an":
+        identity = ExecutionIdentity(
+            av1an_contract_version=AV1AN_COMMAND_CONTRACT_VERSION,
+            ffmpeg_mux_contract_version=FFMPEG_MUX_CONTRACT_VERSION,
+            av1an_version_family=SUPPORTED_AV1AN_VERSION_FAMILY,
+            video_container="mkv",
+            final_container="mkv",
+            identity_hash="",
+        )
+    elif backend == "ffmpeg_nvenc":
+        identity = ExecutionIdentity(
+            backend="ffmpeg_nvenc",
+            nvenc_contract_version=NVENC_COMMAND_CONTRACT_VERSION,
+            ffmpeg_mux_contract_version=FFMPEG_MUX_CONTRACT_VERSION,
+            video_container="mkv",
+            final_container="mkv",
+            identity_hash="",
+        )
+    else:
+        raise PlanningError(f"Unsupported encoding backend: {backend}")
     return identity.model_copy(update={"identity_hash": build_execution_identity_hash(identity)})
 
 
 def build_execution_identity_hash(identity: ExecutionIdentity) -> str:
     payload = identity.model_dump(mode="json")
     payload.pop("identity_hash", None)
-    payload["command_policy"] = {
-        "av1an_no_defaults": True,
-        "av1an_concat_method": "ffmpeg",
-        "av1an_pixel_format": "yuv420p10le",
-        "av1an_cache_mode": "temp",
-        "av1an_svt_av1_sdr_color_description": {
-            "color_primaries": "bt709",
-            "transfer_characteristics": "bt709",
-            "matrix_coefficients": "bt709",
-            "color_range": "studio",
-            "chroma_sample_position": "left",
-        },
-        "av1an_overwrite_policy": "never-overwrite",
-        "av1an_temporary_state_retention": "keep",
-        "ffmpeg_mux_policy": {
-            "copy_video": True,
-            "copy_selected_subtitles": True,
-            "copy_chapters": True,
-            "copy_global_metadata": True,
-            "overwrite_policy": "never",
-            "atomic_final_placement": True,
-        },
+    command_policy: dict[str, Any]
+    if identity.backend == "ffmpeg_nvenc":
+        command_policy = {
+            "pipeline": "vspipe-y4m-to-ffmpeg-stdin",
+            "pixel_format": "p010le",
+            "color_description": "bt709-tv",
+            "overwrite_policy": "never-overwrite",
+            "software_fallback": False,
+        }
+    else:
+        command_policy = {
+            "av1an_no_defaults": True,
+            "av1an_concat_method": "ffmpeg",
+            "av1an_pixel_format": "yuv420p10le",
+            "av1an_cache_mode": "temp",
+            "av1an_svt_av1_sdr_color_description": {
+                "color_primaries": "bt709",
+                "transfer_characteristics": "bt709",
+                "matrix_coefficients": "bt709",
+                "color_range": "studio",
+                "chroma_sample_position": "left",
+            },
+            "av1an_overwrite_policy": "never-overwrite",
+            "av1an_temporary_state_retention": "keep",
+        }
+    command_policy["ffmpeg_mux_policy"] = {
+        "copy_video": True,
+        "copy_selected_subtitles": True,
+        "copy_chapters": True,
+        "copy_global_metadata": True,
+        "overwrite_policy": "never",
+        "atomic_final_placement": True,
     }
+    payload["command_policy"] = command_policy
     data = f"{EXECUTION_IDENTITY_HASH_CONTRACT}\0".encode() + canonical_json(payload).encode(
         "utf-8"
     )
@@ -639,7 +669,7 @@ def build_plan(
         available_cpu_count=available_cpu_count,
         available_memory_bytes=available_memory_bytes,
     )
-    execution_identity = build_execution_identity()
+    execution_identity = build_execution_identity(profile.backend)
     promotion_policy = finalize_promotion_policy(PromotionPolicy(policy_hash=""))
     input_path = _absolute_stored_media_path(
         context.media_file.path,
@@ -655,14 +685,53 @@ def build_plan(
         execution_identity_hash=execution_identity.identity_hash,
         promotion_policy_hash=promotion_policy.policy_hash,
     )
-    paths = build_plan_paths(data_dir=data_dir, work_key=work_key, input_path=input_path)
+    paths = build_plan_paths(
+        data_dir=data_dir,
+        work_key=work_key,
+        input_path=input_path,
+        backend=profile.backend,
+    )
     video = select_video(context.normalized_probe, profile)
     audio = select_audio(context.normalized_probe, profile)
     subtitles = select_subtitles(context.normalized_probe, profile)
     runtime_identity = runtime_identity or default_planning_runtime_identity()
-    encoder_args = add_sdr_color_encoder_args(parse_encoder_args(profile.av1an.video_args))
+    av1an_spec: Av1anCommandSpec | None = None
+    nvenc_spec: NvencCommandSpec | None = None
+    if profile.backend == "av1an":
+        encoder_args = add_sdr_color_encoder_args(parse_encoder_args(profile.av1an.video_args))
+        av1an_spec = Av1anCommandSpec(
+            input_path=paths.artifacts.vapoursynth_script,
+            video_output_path=paths.video_output_path,
+            temp_dir=paths.av1an_temp_dir,
+            working_directory=paths.work_dir,
+            encoder=profile.av1an.encoder,
+            encoder_args=encoder_args,
+            workers=resolve_av1an_workers(
+                profile.av1an.workers,
+                available_cpu_count=available_cpu_count,
+                available_memory_bytes=available_memory_bytes,
+            ),
+        )
+    else:
+        nvenc_spec = NvencCommandSpec(
+            input_path=paths.artifacts.vapoursynth_script,
+            video_output_path=paths.video_output_path,
+            working_directory=paths.work_dir,
+            encoder=profile.nvenc.encoder,
+            preset=profile.nvenc.preset,
+            tune=profile.nvenc.tune,
+            cq=profile.nvenc.cq,
+            multipass=profile.nvenc.multipass,
+            lookahead=profile.nvenc.lookahead,
+            spatial_aq=profile.nvenc.spatial_aq,
+            temporal_aq=profile.nvenc.temporal_aq,
+            aq_strength=profile.nvenc.aq_strength,
+            gpu=profile.nvenc.gpu,
+            pixel_format=profile.nvenc.pixel_format,
+        )
 
     plan = TranscodePlan(
+        schema_version=(5 if profile.backend == "av1an" else TRANSCODE_PLAN_SCHEMA_VERSION),
         plan_hash="",
         input_path=input_path,
         output_path=paths.output_path,
@@ -717,18 +786,9 @@ def build_plan(
             ),
             identity_hash=vapoursynth_identity_hash,
         ),
-        av1an=Av1anCommandSpec(
-            input_path=paths.artifacts.vapoursynth_script,
-            video_output_path=paths.video_output_path,
-            temp_dir=paths.av1an_temp_dir,
-            working_directory=paths.work_dir,
-            encoder=profile.av1an.encoder,
-            encoder_args=encoder_args,
-            workers=resolve_av1an_workers(
-                profile.av1an.workers,
-                available_cpu_count=available_cpu_count,
-                available_memory_bytes=available_memory_bytes,
-            ),
+        backend=None if profile.backend == "av1an" else profile.backend,
+        **(  # pyright: ignore[reportArgumentType]
+            {"av1an": av1an_spec} if av1an_spec is not None else {"nvenc": nvenc_spec}
         ),
         mux=FfmpegMuxSpec(
             video_input_path=paths.video_output_path,
@@ -742,11 +802,22 @@ def build_plan(
         ),
         runtime=ExecutionRuntimePaths(
             runtime_dir=paths.runtime_dir,
-            av1an_stdout_log=paths.runtime_dir / "av1an.stdout.log",
-            av1an_stderr_log=paths.runtime_dir / "av1an.stderr.log",
+            **(
+                {
+                    "av1an_stdout_log": paths.runtime_dir / "av1an.stdout.log",
+                    "av1an_stderr_log": paths.runtime_dir / "av1an.stderr.log",
+                    "av1an_stage_marker": paths.runtime_dir / "av1an-stage.json",
+                }
+                if profile.backend == "av1an"
+                else {
+                    "vspipe_stderr_log": paths.runtime_dir / "vspipe.stderr.log",
+                    "nvenc_stdout_log": paths.runtime_dir / "nvenc.progress.log",
+                    "nvenc_stderr_log": paths.runtime_dir / "nvenc.stderr.log",
+                    "nvenc_stage_marker": paths.runtime_dir / "nvenc-stage.json",
+                }
+            ),
             mux_stdout_log=paths.runtime_dir / "mux.stdout.log",
             mux_stderr_log=paths.runtime_dir / "mux.stderr.log",
-            av1an_stage_marker=paths.runtime_dir / "av1an-stage.json",
             encode_result=paths.runtime_dir / "encode-result.json",
             validation_report=paths.runtime_dir / "validation-report.json",
             validation_decode_stdout_log=paths.runtime_dir / "validation.decode.stdout.log",
@@ -772,6 +843,8 @@ def resolve_profile_runtime_defaults(
     available_cpu_count: int | None = None,
     available_memory_bytes: int | None = None,
 ) -> EncodingProfile:
+    if profile.backend != "av1an":
+        return profile
     workers = resolve_av1an_workers(
         profile.av1an.workers,
         available_cpu_count=available_cpu_count,
@@ -814,6 +887,7 @@ def build_plan_paths(
     data_dir: Path,
     work_key: str,
     input_path: Path,
+    backend: str = "av1an",
 ) -> DerivedPlanPaths:
     artifact_dir = data_dir / "plans" / work_key
     work_dir = data_dir / "work" / work_key
@@ -830,7 +904,11 @@ def build_plan_paths(
             artifact_dir=artifact_dir,
             plan_json=artifact_dir / "plan.json",
             vapoursynth_script=artifact_dir / f"{stem}.vpy",
-            av1an_command_json=artifact_dir / "av1an.command.json",
+            **(
+                {"av1an_command_json": artifact_dir / "av1an.command.json"}
+                if backend == "av1an"
+                else {"nvenc_command_json": artifact_dir / "nvenc.command.json"}
+            ),
             validation_policy_json=artifact_dir / "validation-policy.json",
         ),
         work_dir=work_dir,

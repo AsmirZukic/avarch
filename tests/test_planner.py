@@ -75,6 +75,22 @@ def test_build_plan_resolves_auto_av1an_workers(tmp_path: Path) -> None:
     assert plan.av1an.workers == 3
 
 
+def test_build_plan_creates_backend_aware_nvenc_plan(tmp_path: Path) -> None:
+    plan = build_plan(
+        _context(tmp_path, resolved_profile=_resolved_nvenc_profile()),
+        data_dir=tmp_path / ".avarch",
+    )
+
+    assert plan.schema_version == 6
+    assert plan.encoding_backend == "ffmpeg_nvenc"
+    assert plan.nvenc.encoder == "av1_nvenc"
+    assert plan.nvenc.pixel_format == "p010le"
+    assert plan.nvenc.input_path == plan.vapoursynth.script_path
+    assert plan.mux.video_input_path == plan.nvenc.video_output_path
+    assert plan.artifacts.nvenc_command_json.name == "nvenc.command.json"
+    assert "av1an" not in plan.model_dump(mode="json")
+
+
 def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
     context = _context(tmp_path)
 
@@ -293,6 +309,43 @@ def _context(
         normalized_probe=normalized,
         profile_name=resolved_profile.name,
         profile=resolved_profile.profile,
+    )
+
+
+def _resolved_nvenc_profile() -> ResolvedProfile:
+    document = ProfileDocument.model_validate(
+        {
+            "schema_version": 1,
+            "name": "av1_nvenc_1080p_sdr",
+            "backend": "ffmpeg_nvenc",
+            "container": "mkv",
+            "match": {"video_codec_not": ["av1"]},
+            "video": {
+                "max_width": 1920,
+                "hdr_to_sdr": True,
+                "source": "vapoursynth",
+            },
+            "nvenc": {
+                "encoder": "av1_nvenc",
+                "preset": "p5",
+                "cq": 28,
+                "gpu": 0,
+            },
+            "audio": {
+                "codec": "libopus",
+                "bitrate": "128k",
+                "channels": 2,
+                "languages": ["eng"],
+            },
+            "subtitles": {"languages": ["eng"], "keep_forced": True},
+        }
+    )
+    return ResolvedProfile(
+        name=document.name,
+        document=document,
+        profile=document.encoding_profile(),
+        origin=ProfileOrigin.USER,
+        source="test",
     )
 
 

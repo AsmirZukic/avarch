@@ -151,6 +151,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_CONFIG_HOME=/opt/avarch/config \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
     PATH="/opt/avarch/venv/bin:${PATH}" \
     VS_SITE_PACKAGES=/opt/avarch/venv/lib/python3.12/site-packages/vapoursynth \
     LD_LIBRARY_PATH="/opt/avarch/lib:/opt/avarch/venv/lib/python3.12/site-packages/vapoursynth:/usr/local/lib:/usr/lib/x86_64-linux-gnu"
@@ -210,6 +211,7 @@ RUN set -eu; \
     fi; \
     avarch --version; \
     ffmpeg -version >/dev/null; \
+    ffmpeg -hide_banner -h encoder=av1_nvenc >/dev/null; \
     ffprobe -version >/dev/null; \
     vspipe --version >/dev/null; \
     SvtAv1EncApp --version >/dev/null; \

@@ -6,6 +6,7 @@ from avarch.contracts import (
     AV1AN_SPEC_HASH_CONTRACT,
     EXECUTION_IDENTITY_HASH_CONTRACT,
     FFMPEG_MUX_SPEC_HASH_CONTRACT,
+    NVENC_SPEC_HASH_CONTRACT,
     PLAN_HASH_CONTRACT,
     PROFILE_HASH_CONTRACT,
     PROMOTION_POLICY_HASH_CONTRACT,
@@ -28,6 +29,7 @@ def test_current_hash_contracts_are_single_baseline() -> None:
     assert PLAN_HASH_CONTRACT == "plan-v2"
     assert PROFILE_HASH_CONTRACT == "profile-v3"
     assert AV1AN_SPEC_HASH_CONTRACT == "av1an-spec-v1"
+    assert NVENC_SPEC_HASH_CONTRACT == "nvenc-spec-v1"
     assert FFMPEG_MUX_SPEC_HASH_CONTRACT == "ffmpeg-mux-spec-v1"
     assert VALIDATION_POLICY_HASH_CONTRACT == "validation-policy-v2"
     assert PROMOTION_POLICY_HASH_CONTRACT == "promotion-policy-v1"
@@ -38,7 +40,7 @@ def test_current_alembic_revision_chain() -> None:
     revisions = sorted((repo_root / "migrations" / "versions").glob("*.py"))
 
     assert ALEMBIC_BASELINE_REVISION == "0001_initial"
-    assert ALEMBIC_HEAD_REVISION == "0010_promotion_safety"
+    assert ALEMBIC_HEAD_REVISION == "0011_nvenc_scheduler_capacity"
     assert [revision.name for revision in revisions] == [
         "0001_initial_schema.py",
         "0002_media_plan.py",
@@ -50,4 +52,5 @@ def test_current_alembic_revision_chain() -> None:
         "0008_scheduler_sessions_and_lifecycle_events.py",
         "0009_scheduler_runtime_capacity.py",
         "0010_promotion_safety.py",
+        "0011_nvenc_scheduler_capacity.py",
     ]

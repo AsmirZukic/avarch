@@ -1,9 +1,11 @@
+import tomllib
 from pathlib import Path
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
+from avarch.application.profile_management import render_profile_document
 from avarch.config import AppConfig
 from avarch.profiles.models import ProfileDocument
 from avarch.profiles.registry import (
@@ -95,7 +97,10 @@ def test_validate_all_reports_loaded_profiles(tmp_path: Path) -> None:
     summary = ProfileRegistry.load(search_paths=[tmp_path]).validate_all()
 
     assert summary.ok is True
-    assert [profile.name for profile in summary.valid] == ["av1_1080p_sdr"]
+    assert [profile.name for profile in summary.valid] == [
+        "av1_1080p_sdr",
+        "av1_nvenc_1080p_sdr",
+    ]
 
 
 def test_registry_fails_loudly_when_no_profile_documents_exist(tmp_path: Path) -> None:
@@ -121,6 +126,49 @@ def test_profile_document_preserves_language_priority() -> None:
 
     assert profile.audio.languages == ["jpn", "eng"]
     assert profile.subtitles.languages == ["eng", "jpn"]
+
+
+def test_nvenc_profile_rendering_round_trips() -> None:
+    config = AppConfig.model_validate({"profile_registry": {"search_paths": []}})
+    profile = ProfileRegistry.from_config(config).get("av1_nvenc_1080p_sdr")
+
+    rendered = render_profile_document(profile.document)
+    reparsed = ProfileDocument.model_validate(tomllib.loads(rendered))
+
+    assert reparsed.backend == "ffmpeg_nvenc"
+    assert reparsed.nvenc == profile.document.nvenc
+    assert "[av1an]" not in rendered
+
+
+def test_profile_document_accepts_nvenc_backend_settings() -> None:
+    data = _profile_data()
+    data["backend"] = "ffmpeg_nvenc"
+    data.pop("av1an")
+    data["nvenc"] = {"encoder": "av1_nvenc", "preset": "p5", "cq": 28}
+
+    profile = ProfileDocument.model_validate(data)
+
+    assert profile.backend == "ffmpeg_nvenc"
+    assert profile.nvenc.encoder == "av1_nvenc"
+    assert profile.nvenc.cq == 28
+
+
+def test_profile_document_rejects_mixed_backend_settings() -> None:
+    data = _profile_data()
+    data["nvenc"] = {"encoder": "av1_nvenc", "preset": "p5", "cq": 28}
+
+    with pytest.raises(ValidationError):
+        ProfileDocument.model_validate(data)
+
+
+def test_profile_document_rejects_invalid_nvenc_cq() -> None:
+    data = _profile_data()
+    data["backend"] = "ffmpeg_nvenc"
+    data.pop("av1an")
+    data["nvenc"] = {"encoder": "av1_nvenc", "preset": "p5", "cq": 64}
+
+    with pytest.raises(ValidationError):
+        ProfileDocument.model_validate(data)
 
 
 def test_profile_document_rejects_nonpositive_workers() -> None:

@@ -161,7 +161,8 @@ def _compact_dashboard(
                 text,
                 (
                     f"- {_fit(_display_path(job.source_path), 24)} "
-                    f"{job.profile_name or UNAVAILABLE} {job.stage.value} "
+                    f"{job.profile_name or UNAVAILABLE} "
+                    f"{job.backend or UNAVAILABLE}/{job.stage.value} "
                     f"{_progress_text(job.attempt)}"
                 ),
                 width,
@@ -185,8 +186,9 @@ def _compact_dashboard(
     _append_line(
         text,
         (
-            f"Capacity encode slots {snapshot.capacity.av1an_active}/"
-            f"{snapshot.capacity.av1an_jobs} file operations "
+            f"Capacity encode slots Av1an {snapshot.capacity.av1an_active}/"
+            f"{snapshot.capacity.av1an_jobs} NVENC {snapshot.capacity.nvenc_active}/"
+            f"{snapshot.capacity.nvenc_jobs} file operations "
             f"{snapshot.capacity.file_ops_active}/{snapshot.capacity.file_ops}"
         ),
         width,
@@ -294,6 +296,11 @@ def _active_jobs_panel(snapshot: SchedulerSnapshot) -> Panel:
     for job in snapshot.active_jobs:
         table.add_row("File", _display_path(job.source_path))
         table.add_row("Profile", job.profile_name or UNAVAILABLE)
+        table.add_row("Backend", job.backend or UNAVAILABLE)
+        table.add_row(
+            "Resource",
+            job.resource_class.value if job.resource_class is not None else UNAVAILABLE,
+        )
         table.add_row("Workflow", _workflow_steps(job.workflow_steps))
         table.add_row("Progress", _progress(job.attempt))
         if job != snapshot.active_jobs[-1]:
@@ -330,7 +337,8 @@ def _capacity_panel(snapshot: SchedulerSnapshot) -> Panel:
     table = Table.grid(padding=(0, 2))
     table.add_column()
     table.add_column(justify="right")
-    table.add_row("encode jobs", f"{capacity.av1an_active}/{capacity.av1an_jobs}")
+    table.add_row("encode jobs (Av1an)", f"{capacity.av1an_active}/{capacity.av1an_jobs}")
+    table.add_row("NVENC jobs", f"{capacity.nvenc_active}/{capacity.nvenc_jobs}")
     table.add_row("light stages", f"{capacity.cheap_active}/{capacity.cheap_workers}")
     table.add_row("file operations", f"{capacity.file_ops_active}/{capacity.file_ops}")
     chunks = _active_chunk_usage(snapshot)

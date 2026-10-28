@@ -26,6 +26,7 @@ from avarch.adapters.filesystem.workspace import (
 )
 from avarch.adapters.inventory_scan import SqliteInventoryScanWorkflow
 from avarch.adapters.manual_validation import SchedulerManualValidationWorker
+from avarch.adapters.nvenc import NvencCapability, detect_nvenc_capability
 from avarch.adapters.probe import (
     FfprobeCollector as FfprobeCollector,
 )
@@ -197,6 +198,10 @@ class VapourSynthEnvironmentAdapters:
     environment_errors: tuple[type[Exception], ...]
     plugin_inventory_errors: tuple[type[Exception], ...]
     package_search_unavailable_errors: tuple[type[Exception], ...]
+
+
+def nvenc_capability() -> NvencCapability:
+    return detect_nvenc_capability()
 
 
 def workspace_database_url(config: AppConfig, config_path: Path) -> str:

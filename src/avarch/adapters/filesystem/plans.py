@@ -102,11 +102,14 @@ def _artifact_payloads(
     payloads = {
         "plan.json": canonical_json(plan) + "\n",
         plan.artifacts.vapoursynth_script.name: vapoursynth_script,
-        "av1an.command.json": canonical_json(plan.av1an) + "\n",
         "validation-policy.json": canonical_json(plan.validation) + "\n",
         "vpy/environment-lock.toml": _environment_lock_payload(plan),
         "vpy/snapshot.json": _vpy_snapshot_payload(plan),
     }
+    if plan.encoding_backend == "av1an":
+        payloads[plan.artifacts.av1an_command_json.name] = canonical_json(plan.av1an) + "\n"
+    else:
+        payloads[plan.artifacts.nvenc_command_json.name] = canonical_json(plan.nvenc) + "\n"
     if user_filter is not None:
         payloads["vpy/user_filter.py"] = user_filter.text
     if template is not None:
