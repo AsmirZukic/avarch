@@ -27,6 +27,7 @@ def test_repository_contains_migration_revisions() -> None:
         "0007_structured_attempt_progress.py",
         "0008_scheduler_sessions_and_lifecycle_events.py",
         "0009_scheduler_runtime_capacity.py",
+        "0010_promotion_safety.py",
     ]
 
 
@@ -105,7 +106,7 @@ def test_scheduler_sessions_revision_depends_on_structured_attempt_progress() ->
 
 def test_scheduler_runtime_capacity_revision_depends_on_scheduler_sessions() -> None:
     script = ScriptDirectory.from_config(_alembic_config("sqlite:///:memory:"))
-    revision = script.get_revision(ALEMBIC_HEAD_REVISION)
+    revision = script.get_revision("0009_scheduler_runtime_capacity")
 
     assert revision is not None
     assert revision.down_revision == "0008_scheduler_sessions_and_lifecycle_events"
@@ -248,10 +249,7 @@ def test_job_attempt_progress_columns_match_contract(tmp_path: Path) -> None:
     upgrade_database(database_url)
 
     inspector = inspect(create_db_engine(database_url))
-    columns = {
-        column["name"]: column
-        for column in inspector.get_columns("job_attempt_progress")
-    }
+    columns = {column["name"]: column for column in inspector.get_columns("job_attempt_progress")}
     primary_key = inspector.get_pk_constraint("job_attempt_progress")
 
     assert primary_key["constrained_columns"] == ["attempt_id"]
@@ -283,10 +281,7 @@ def test_scheduler_session_columns_match_contract(tmp_path: Path) -> None:
     upgrade_database(database_url)
 
     inspector = inspect(create_db_engine(database_url))
-    columns = {
-        column["name"]: column
-        for column in inspector.get_columns("scheduler_session")
-    }
+    columns = {column["name"]: column for column in inspector.get_columns("scheduler_session")}
     primary_key = inspector.get_pk_constraint("scheduler_session")
 
     assert primary_key["constrained_columns"] == ["id"]
@@ -305,14 +300,8 @@ def test_lifecycle_metadata_columns_are_nullable_for_historical_rows(tmp_path: P
     upgrade_database(database_url)
 
     inspector = inspect(create_db_engine(database_url))
-    attempt_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("jobattempt")
-    }
-    event_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("jobevent")
-    }
+    attempt_columns = {column["name"]: column for column in inspector.get_columns("jobattempt")}
+    event_columns = {column["name"]: column for column in inspector.get_columns("jobevent")}
 
     assert attempt_columns["scheduler_session_id"]["nullable"] is True
     assert event_columns["attempt_id"]["nullable"] is True

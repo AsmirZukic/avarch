@@ -141,6 +141,7 @@ def test_workflow_run_promotes_replace_atomic_during_scheduler_when_confirmed(
         ("probe", [movie], False),
         ("plan", "av1_1080p_sdr", [movie], False, False),
         ("enqueue", [movie], None, 7),
+        ("verify", ["plan-hash"]),  # Bind approval before the scheduler can run.
         ("run", True, False, False, "foreground", True),
         ("verify", ["plan-hash"]),
     ]

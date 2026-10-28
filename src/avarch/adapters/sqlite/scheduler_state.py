@@ -8,6 +8,7 @@ from sqlmodel import Session, col, select
 from avarch.adapters.sqlite.models import Job, SchedulerState
 from avarch.domain.jobs import JobStatus
 from avarch.domain.scheduler import SchedulerMode
+from avarch.domain.time import datetime_after
 
 SCHEDULER_LEASE_SECONDS = 30.0
 
@@ -240,10 +241,6 @@ def lease_active(state: SchedulerState, *, now: datetime) -> bool:
         and state.lease_expires_at is not None
         and datetime_after(state.lease_expires_at, now)
     )
-
-
-def datetime_after(left: datetime, right: datetime) -> bool:
-    return left.replace(tzinfo=None) > right.replace(tzinfo=None)
 
 
 def job_counts_by_status(session: Session) -> dict[JobStatus, int]:
