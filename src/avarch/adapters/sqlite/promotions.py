@@ -29,6 +29,7 @@ from avarch.domain.jobs import (
     ResourceClass,
 )
 from avarch.domain.progress import ProgressPhase, ProgressSnapshot, ProgressSource
+from avarch.domain.time import datetime_after
 from avarch.models.promotion import FileStatSnapshot, PromotionMode, PromotionPhase, PromotionStatus
 
 
@@ -117,11 +118,17 @@ def recoverable_promotion(session: Session, *, job_id: int, now: datetime) -> Pr
     record = latest_promotion_record(session, job_id=job_id)
     if record is None:
         raise PromotionRecoveryLookupError("No promotion record exists for this job.")
-    if record.status == PromotionStatus.COMPLETED:
+    if record.status == PromotionStatus.COMPLETED and record.cleanup_completed:
         raise PromotionRecoveryLookupError("Promotion is already completed.")
+    if record.status == PromotionStatus.ROLLED_BACK:
+        raise PromotionRecoveryLookupError("Promotion was rolled back; start a new promotion.")
+    if record.status == PromotionStatus.RECOVERY_REQUIRED:
+        raise PromotionRecoveryLookupError(
+            "Promotion requires manual recovery; preserve the original backup."
+        )
     if (
         record.lease_expires_at is not None
-        and record.lease_expires_at > now
+        and datetime_after(record.lease_expires_at, now)
         and record.owner_token is not None
     ):
         raise PromotionActiveLeaseError("Promotion lease is still active.")
@@ -140,7 +147,20 @@ def claim_recoverable_promotion(
     record.owner_token = owner_token
     record.heartbeat_at = now
     record.lease_expires_at = now + timedelta(seconds=lease_seconds)
-    record.status = PromotionStatus.RUNNING
+    if record.phase != PromotionPhase.COMMITTED:
+        record.status = PromotionStatus.RUNNING
+        job = _require_job(session, job_id)
+        if job.status == JobStatus.FAILED:
+            transition_job(job, JobStatus.READY_TO_PROMOTE, stage=JobStage.PROMOTE, now=now)
+        transition_job(job, JobStatus.PROMOTING, stage=JobStage.PROMOTE, now=now)
+        job.claimed_by = owner_token
+        job.finished_at = None
+        attempt = _require_attempt(session, record.attempt_id)
+        attempt.status = AttemptStatus.RUNNING
+        attempt.runner_id = owner_token
+        attempt.finished_at = None
+        session.add(attempt)
+        session.add(job)
     session.add(record)
     return record
 
@@ -333,6 +353,8 @@ def update_promotion_cleanup(
         record.cleanup_completed = False
         record.cleanup_error = cleanup_error
     record.updated_at = now
+    record.owner_token = None
+    record.lease_expires_at = None
     session.add(record)
     session.flush()
     record_stage_event(
@@ -418,11 +440,8 @@ def mark_promotion_failed_or_validated(
         if PromotionStatus(record.status) == PromotionStatus.ROLLED_BACK
         else PromotionStatus.FAILED
     )
-    record.phase = (
-        PromotionPhase.ROLLED_BACK
-        if PromotionPhase(record.phase) == PromotionPhase.ROLLED_BACK
-        else PromotionPhase.FAILED
-    )
+    # Preserve the last durable filesystem phase for crash recovery.
+    # Failure is an outcome, not evidence that installation never happened.
     record.finished_at = now
     record.updated_at = now
     record.owner_token = None

@@ -90,9 +90,6 @@ from avarch.application.progress_watch import (
 )
 from avarch.application.promotion import (
     PromotionWorkflowError,
-    execute_promotion,
-    promotion_preflight,
-    recover_promotion,
 )
 from avarch.application.queue_control import (
     QueueControlError,
@@ -225,8 +222,6 @@ from avarch.cli_rendering import (
     echo_attempt_log_status,
     echo_error_block,
     echo_job_progress_details,
-    echo_promotion_complete,
-    echo_promotion_preview,
     event_type_value,
     format_size,
     job_control_label,
@@ -252,6 +247,7 @@ from avarch.logging import configure_logging
 from avarch.models.plan import TranscodePlan
 from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
+from avarch.presentation.commands.promotion import make_promotion_command
 from avarch.presentation.scheduler_dashboard import (
     DashboardMode,
     render_scheduler_dashboard,
@@ -528,8 +524,7 @@ def files_list(
     typer.echo("STATUS   SIZE        PATH")
     for media_file in media_files:
         typer.echo(
-            f"{media_file.status:<8} {format_size(media_file.size_bytes):>10}  "
-            f"{media_file.path}"
+            f"{media_file.status:<8} {format_size(media_file.size_bytes):>10}  {media_file.path}"
         )
 
 
@@ -1129,12 +1124,15 @@ async def _run_scheduler_watch_live(
         database_url=database_url,
         workspace_root=workspace_root,
     )
-    with PosixKeySource() as key_source, Live(
-        console=console,
-        auto_refresh=False,
-        transient=False,
-        screen=True,
-    ) as live:
+    with (
+        PosixKeySource() as key_source,
+        Live(
+            console=console,
+            auto_refresh=False,
+            transient=False,
+            screen=True,
+        ) as live,
+    ):
         loop = SchedulerWatchLoop(
             snapshot_query=query,
             renderer=lambda snapshot, width: render_scheduler_dashboard(
@@ -1933,80 +1931,11 @@ def probe_file(
         raise typer.Exit(1)
 
 
-@app.command("promote")
-def promote_job(
-    job_id: Annotated[int, typer.Argument(help="Validated job id to promote.")],
-    mode: Annotated[
-        PromotionMode,
-        typer.Option("--mode", help="Promotion filesystem mode."),
-    ] = PromotionMode.KEEP_ORIGINAL,
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run",
-            help="Preview promotion without changing files or database rows.",
-        ),
-    ] = False,
-    confirm: Annotated[
-        bool,
-        typer.Option("--confirm", help="Execute the promotion transaction."),
-    ] = False,
-    recover: Annotated[
-        bool,
-        typer.Option("--recover", help="Recover an interrupted promotion for this job."),
-    ] = False,
-) -> None:
-    cli_workspace = _load_cli_workspace()
-    runtime_config = cli_workspace.runtime_config
-    owner_token = new_runner_id()
-
-    if recover:
-        try:
-            record = asyncio.run(
-                recover_promotion(
-                    promotion_workflow(),
-                    job_id=job_id,
-                    config=runtime_config,
-                    owner_token=owner_token,
-                )
-            )
-        except PromotionWorkflowError as exc:
-            typer.echo(str(exc))
-            raise typer.Exit(1) from exc
-        echo_promotion_complete(record)
-        return
-
-    try:
-        preflight = promotion_preflight(
-            promotion_workflow(),
-            job_id=job_id,
-            mode=mode,
-            config=runtime_config,
-            operation_id=new_runner_id(),
-        )
-    except PromotionWorkflowError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-
-    if dry_run or not confirm:
-        echo_promotion_preview(preflight, dry_run=dry_run)
-        return
-
-    try:
-        record = asyncio.run(
-            execute_promotion(
-                promotion_workflow(),
-                job_id=job_id,
-                mode=mode,
-                config=runtime_config,
-                owner_token=owner_token,
-            )
-        )
-    except PromotionWorkflowError as exc:
-        typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-
-    echo_promotion_complete(record)
+promote_job = make_promotion_command(
+    load_runtime_config=lambda: _load_cli_workspace().runtime_config,
+    workflow_factory=promotion_workflow,
+)
+app.command("promote")(promote_job)
 
 
 @app.command("plan")
@@ -2173,6 +2102,22 @@ def workflow_run(
         return
 
     promote_during_scheduler = confirm and mode == PromotionMode.REPLACE_ATOMIC
+    if promote_during_scheduler:
+        selected_jobs = _workflow_jobs_for_plan_hashes(database_url, list(summary.plan_hashes))
+        try:
+            promotion_workflow().approve(
+                job_ids=[
+                    job.id
+                    for job in selected_jobs
+                    if job.id is not None and job.status != JobStatus.PROMOTED
+                ],
+                mode=mode,
+                config=cli_workspace.runtime_config,
+                actor=new_runner_id(),
+            )
+        except PromotionWorkflowError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
 
     _echo_workflow_stage("run")
     run_queue(

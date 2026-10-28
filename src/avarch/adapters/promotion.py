@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlmodel import Session
@@ -15,6 +17,7 @@ from avarch.adapters.promotion_types import PromotionError
 from avarch.adapters.sqlite.db import create_db_engine
 from avarch.adapters.sqlite.job_transitions import JobClaimError, require_job
 from avarch.adapters.sqlite.models import PromotionRecord
+from avarch.adapters.sqlite.promotion_approvals import PromotionApprovalError, approve_job_promotion
 from avarch.adapters.sqlite.promotions import has_completed_promotion
 from avarch.adapters.sqlite.validations import latest_validation
 from avarch.application.promotion import (
@@ -28,6 +31,30 @@ from avarch.models.promotion import PromotionMode
 
 
 class PromotionWorkflowAdapter:
+    def approve(
+        self,
+        *,
+        job_ids: Sequence[int],
+        mode: PromotionMode,
+        config: AppConfig,
+        actor: str,
+        delete_backup: bool = False,
+    ) -> None:
+        engine = create_db_engine(config.database.url)
+        try:
+            with Session(engine) as session, session.begin():
+                for job_id in job_ids:
+                    approve_job_promotion(
+                        session,
+                        job=require_job(session, job_id),
+                        mode=mode,
+                        actor=actor,
+                        now=datetime.now(UTC),
+                        delete_backup=delete_backup,
+                    )
+        except (JobClaimError, PromotionApprovalError) as exc:
+            raise PromotionWorkflowError(str(exc)) from exc
+
     def preflight(
         self,
         *,
@@ -117,7 +144,7 @@ class PromotionWorkflowAdapter:
         *,
         job_id: int,
         config: AppConfig,
-        mode: PromotionMode = PromotionMode.REPLACE_ATOMIC,
+        mode: PromotionMode = PromotionMode.KEEP_ORIGINAL,
         owner_token: str | None = None,
     ) -> PromotionResultView:
         result = await promote_job(

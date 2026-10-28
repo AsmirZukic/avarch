@@ -50,6 +50,16 @@ class PromotionResultView:
 
 
 class PromotionWorkflow(Protocol):
+    def approve(
+        self,
+        *,
+        job_ids: Sequence[int],
+        mode: PromotionMode,
+        config: AppConfig,
+        actor: str,
+        delete_backup: bool = False,
+    ) -> None: ...
+
     def preflight(
         self,
         *,
@@ -81,7 +91,7 @@ class PromotionWorkflow(Protocol):
         *,
         job_id: int,
         config: AppConfig,
-        mode: PromotionMode = PromotionMode.REPLACE_ATOMIC,
+        mode: PromotionMode = PromotionMode.KEEP_ORIGINAL,
         owner_token: str | None = None,
     ) -> PromotionResultView: ...
 
@@ -133,7 +143,7 @@ async def promote_job(
     *,
     job_id: int,
     config: AppConfig,
-    mode: PromotionMode = PromotionMode.REPLACE_ATOMIC,
+    mode: PromotionMode = PromotionMode.KEEP_ORIGINAL,
     owner_token: str | None = None,
 ) -> PromotionResultView:
     return await workflow.promote(

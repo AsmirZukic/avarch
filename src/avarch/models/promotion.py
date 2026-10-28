@@ -14,11 +14,23 @@ class PromotionMode(StrEnum):
     REPLACE_ATOMIC = "replace-atomic"
 
 
+class PromotionApproval(BaseModel):
+    """Authority for one job and one immutable source/plan identity."""
+
+    mode: PromotionMode
+    plan_hash: str
+    source_fingerprint: str
+    approved_at: datetime
+    approved_by: str
+    delete_backup: bool = False
+
+
 class PromotionStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     INTERRUPTED = "interrupted"
     FAILED = "failed"
+    RECOVERY_REQUIRED = "recovery_required"
     ROLLED_BACK = "rolled_back"
 
 
@@ -33,6 +45,7 @@ class PromotionPhase(StrEnum):
     VERIFIED = "verified"
     COMMITTED = "committed"
     CLEANUP_COMPLETE = "cleanup_complete"
+    RECOVERY_REQUIRED = "recovery_required"
     ROLLBACK_PENDING = "rollback_pending"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
@@ -97,6 +110,10 @@ class PromotionJournal(BaseModel):
     validated_output_fingerprint: str
     validated_output_digest: str | None
     staging_digest: str | None
+    staging_stat: FileStatSnapshot | None = None
+    original_digest: str | None = None
+    replacement_evidence_json: str | None = None
+    delete_backup_approved: bool = False
     final_digest: str | None
 
     started_at: datetime
