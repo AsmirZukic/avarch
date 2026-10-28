@@ -118,6 +118,9 @@ class Job(SQLModel, table=True):
         foreign_key="validationresult.id",
         index=True,
     )
+    # Null on legacy jobs: no authority to replace or delete original media.
+    promotion_approval_json: str | None = None
+
     latest_promotion_id: int | None = Field(
         default=None,
         foreign_key="promotionrecord.id",
@@ -311,6 +314,10 @@ class PromotionRecord(SQLModel, table=True):
     validated_output_digest: str | None
 
     staging_digest: str | None
+    staging_stat_json: str | None = None
+    original_digest: str | None = None
+    replacement_evidence_json: str | None = None
+    delete_backup_approved: bool = False
 
     final_fingerprint: str | None
     final_digest: str | None

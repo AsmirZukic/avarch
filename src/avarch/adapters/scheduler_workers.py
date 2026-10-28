@@ -47,6 +47,7 @@ from avarch.adapters.sqlite.models import Job, MediaFile, ProbeResult, Validatio
 from avarch.adapters.sqlite.planning import load_planning_context
 from avarch.adapters.sqlite.probes import store_probe_result
 from avarch.adapters.sqlite.progress import SqliteProgressStore
+from avarch.adapters.sqlite.promotion_approvals import current_promotion_approval
 from avarch.adapters.sqlite.queue import (
     plan_hash_conflicts_with_other_job,
     queue_key_conflicts_with_other_job,
@@ -97,6 +98,7 @@ from avarch.models.execution import (
     ProcessCancellationToken,
 )
 from avarch.models.plan import TranscodePlan
+from avarch.models.promotion import PromotionMode
 from avarch.models.validation import ValidationReport
 from avarch.serialization import canonical_json
 
@@ -712,9 +714,7 @@ async def execute_validation_job(
             session,
             job_id=job_id,
             attempt=attempt,
-            event_type=JobEventType.STAGE_COMPLETED
-            if report.passed
-            else JobEventType.STAGE_FAILED,
+            event_type=JobEventType.STAGE_COMPLETED if report.passed else JobEventType.STAGE_FAILED,
             now=report.finished_at,
             details=_validation_event_details(
                 result_id=result.id,
@@ -746,6 +746,8 @@ async def execute_promotion_job(
     with Session(engine) as session:
         job = require_job(session, job_id)
         recovering = job.status == JobStatus.PROMOTING
+        approval = current_promotion_approval(job)
+        mode = approval.mode if approval is not None else PromotionMode.KEEP_ORIGINAL
     if recovering:
         await recover_promotion(
             workflow=promotion_workflow,
@@ -758,6 +760,7 @@ async def execute_promotion_job(
         workflow=promotion_workflow,
         job_id=job_id,
         config=config,
+        mode=mode,
         owner_token=runner_id,
     )
 

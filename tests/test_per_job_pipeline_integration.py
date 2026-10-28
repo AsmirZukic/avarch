@@ -25,7 +25,7 @@ from avarch.profiles.models import (
 )
 
 
-def test_batch_with_success_failure_and_size_rejection(tmp_path: Path) -> None:
+def test_queue_selection_for_preexisting_success_failure_and_size_rejection(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():

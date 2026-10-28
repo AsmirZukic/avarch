@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -290,9 +291,7 @@ def test_encode_worker_requests_process_token_when_cancelled(
     monkeypatch.setattr("avarch.adapters.scheduler_workers.execute_plan", fake_execute_plan)
 
     async def scenario() -> None:
-        task = asyncio.create_task(
-            execute_encode_job(job_id=1, runner_id="runner", config=config)
-        )
+        task = asyncio.create_task(execute_encode_job(job_id=1, runner_id="runner", config=config))
         await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1.0)
         task.cancel()
         await asyncio.wait_for(task, timeout=3.0)
@@ -636,6 +635,17 @@ def test_scheduler_pending_work_respects_disabled_promotion_stage(tmp_path: Path
 
 
 class _PromotionWorkflowStub:
+    def approve(
+        self,
+        *,
+        job_ids: Sequence[int],
+        mode: PromotionMode,
+        config: AppConfig,
+        actor: str,
+        delete_backup: bool = False,
+    ) -> None:
+        raise AssertionError("The scheduler must never grant replacement approval.")
+
     def preflight(
         self,
         *,
