@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -28,11 +29,14 @@ def calculate_promotion_digest(
     path: Path,
     *,
     chunk_size: int = PROMOTION_DIGEST_CHUNK_SIZE,
+    heartbeat: Callable[[], None] | None = None,
 ) -> str:
     digest = create_promotion_digest()
     with path.open("rb") as input_file:
         while chunk := input_file.read(chunk_size):
             digest.update(chunk)
+            if heartbeat is not None:
+                heartbeat()
     return digest.hexdigest()
 
 

@@ -1,7 +1,7 @@
 # Avarch
 
-Avarch is a local-first media archival tool that turns media files into smaller,
-reproducible encodes while keeping the originals safe. It combines configurable
+Avarch is a local-first media transcoding tool that creates smaller,
+reproducible viewing copies and preserves originals by default. It combines configurable
 profiles, first-class VapourSynth scripts, Av1an encoding, FFmpeg muxing,
 validation, and controlled output promotion.
 
@@ -38,10 +38,11 @@ Jump to [Profiles and VapourSynth Templates](#profiles-and-vapoursynth-templates
 
 ## Alpha Safety Callout
 
-**Avarch is currently in v0.2-alpha.** The core encoding workflow is available,
-and your source media remains safe: Avarch builds and validates new output
-separately instead of encoding over the original. Some commands, configuration
-fields, and workspace formats may still change before the first stable release.
+**Avarch is currently in v0.2-alpha. Keep independent backups.** Output is built
+separately and promotion defaults to keeping the original. Lossy encoding does
+not preserve the original bitstream or guarantee perceptual equivalence.
+Replacement checks reduce risk; they are not a guarantee against data loss.
+Some commands, configuration fields, and workspace formats may still change.
 
 ## Installation
 
@@ -163,8 +164,11 @@ choose the promotion mode explicitly:
 avarch workflow run --profile av1_1080p_sdr --mode replace-atomic --confirm .
 ```
 
-Confirmed `replace-atomic` workflow runs allow the scheduler to promote and
-clean each file as soon as it passes validation and size policy. Other modes are
+Confirmed `replace-atomic` workflow runs store approval against each selected
+job's source fingerprint and plan before the scheduler starts. The scheduler
+uses those stored decisions; starting it never grants replacement approval.
+It can promote and clean each file after validation, size policy, and the
+complete-decode replacement gate pass. Original backups are retained by default. Other modes are
 promoted after the scheduler finishes so the requested final filesystem action
 can be applied explicitly.
 
@@ -821,8 +825,9 @@ Encoded output is created in workspace work paths, validation and size policy
 must pass, and promotion is the controlled step that places accepted output in
 its final location.
 
-Avarch never replaces the original unless the encoded file passes validation and
-size policy.
+Replacing the source path requires per-job approval, validation and size policy,
+and a separate full-decode replacement gate. Legacy jobs receive no replacement
+authority when the database is upgraded.
 
 ### Validation
 
@@ -847,10 +852,20 @@ Validation checks include:
 - Optional minimum size reduction passes when configured.
 - Optional decode sample passes when enabled.
 
+These metadata and optional sampling checks are suitable for viewing copies;
+they do **not** prove complete media coverage. Before either replacement mode
+installs output, Avarch fully decodes source and staged output, compares decoded
+video frame counts and every relative presentation timestamp, checks coverage
+of the planned duration, and compares decoded timing for the selected audio
+stream. Decoder errors fail closed. Replacement evidence is persisted separately
+from the metadata validation report. Frame-rate-changing transformations are
+currently rejected by this conservative gate. Subtitle policy is checked by the
+metadata validator; subtitle payload and perceptual equivalence are not proven.
+
 Validation policy failures produce a `ValidationReport` with check statuses:
 `pass`, `fail`, `warning`, or `skipped`. Required failed checks make the report
-fail and leave the job in `validation_failed` at stage `validate`; corrupt
-outputs never replace originals.
+fail and retain the original. A failed report or failed replacement gate does
+not authorize installation, even if the container reports the expected duration.
 
 Validation execution errors are different from failed validation reports.
 Missing tools, unreadable targets, subprocess failures, or persistence problems
@@ -918,10 +933,11 @@ Promotion modes:
 | --- | --- | --- |
 | `keep-original` | Sibling named `<stem>.av1.mkv` | Original remains in place. |
 | `move-original-to-backup` | Original source path | Original is moved to `<original>.avarch-original`. |
-| `replace-atomic` | Original source path | Uses hard-link rollback backup and atomic replacement requirements. |
+| `replace-atomic` | Original source path | Atomic replacement with a retained hard-link backup unless deletion is separately approved. |
 
-Collision behavior is strict. Promotion fails if the final path, backup path, or
-staging path already exists. Same-directory hidden staging files are used, for
+Collision behavior is strict. Keep-original installation atomically refuses an
+existing destination, including a file created during staging. Promotion also
+refuses existing backup or staging paths unless recovery proves ownership. Same-directory hidden staging files are used, for
 example `.Movie.av1.mkv.avarch-promote-abcdef123456.tmp`.
 
 Promotion verifies source and output fingerprints, locks the promotion target,
@@ -934,11 +950,26 @@ Cross-filesystem replacement is limited. The promotion policy requires hard-link
 support for replacement-style modes and destination-local staging. Keep-original
 mode writes a sibling final file and is the safest default.
 
-Originals are never encoded over or deleted first. In `keep-original`, originals
-are never moved. In replacement modes, Avarch creates or uses rollback/backup
-handling, re-stats the original, verifies identity, installs only the validated
-output, verifies the final path, and deletes the backup only after a safe
-replacement exists.
+In `keep-original`, originals are not moved. Replacement modes record staging
+inode ownership and the original content digest, verify a hard-link backup,
+install the checked output, and verify the installed digest. Recovery resumes
+from the persisted phase instead of blindly reinstalling output. Rollback is
+recorded as successful only after restoration is verified. Ambiguous ownership,
+changed backups, or restoration failures require manual recovery; preserve all
+remaining files when a record says `recovery_required`.
+
+Original backups are retained unless you explicitly approve their deletion:
+
+```sh
+avarch promote JOB_ID --mode replace-atomic --confirm --delete-backup
+```
+
+`--confirm` alone approves replacement, **not** backup deletion. Deletion also
+requires successful commit and re-verification of backup and installed content.
+A hard link is not an independent backup against disk failure or in-place edits.
+Do not edit source, staging, or destination paths during promotion. The current
+recovery tests cover injected interruptions, not physical power-loss durability
+on every filesystem. `--recover --dry-run` is rejected rather than executing.
 
 Disk-space behavior is conservative. Validation and promotion need room for the
 encoded output, promotion staging, and any rollback backup required by the
@@ -1240,7 +1271,7 @@ avarch jobs validate JOB_ID
 
 ### Promotion
 
-`avarch promote JOB_ID [--mode MODE] [--dry-run] [--confirm] [--recover]`
+`avarch promote JOB_ID [--mode MODE] [--dry-run] [--confirm] [--delete-backup] [--recover]`
 
 Preview, execute, or recover promotion. Modes are `keep-original`,
 `move-original-to-backup`, and `replace-atomic`.
