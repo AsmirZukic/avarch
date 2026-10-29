@@ -154,14 +154,14 @@ wheels = [
 
 [[package]]
 name = "mako"
-version = "1.3.12"
+version = "1.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markupsafe" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/62/791b31e69ae182791ec67f04850f2f062716bbd205483d63a215f3e062d3/mako-1.3.12.tar.gz", hash = "sha256:9f778e93289bd410bb35daadeb4fc66d95a746f0b75777b942088b7fd7af550a", size = 400219, upload-time = "2026-04-28T19:01:08.512Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/09/e07c4b5579a79f4b16f8d4f29f6c54514ac787c4ad506b8c4f28a0e6b0bf/mako-1.4.3.tar.gz", hash = "sha256:cd6537fe88d5fec315c55c2f8529bc4ce7a9a352ad7db3eeaa6a66e2dd4ec37a", size = 412799, upload-time = "2026-09-22T20:54:31.509Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/b1/a0ec7a5a9db730a08daef1fdfb8090435b82465abbf758a596f0ea88727e/mako-1.3.12-py3-none-any.whl", hash = "sha256:8f61569480282dbf557145ce441e4ba888be453c30989f879f0d652e39f53ea9", size = 78521, upload-time = "2026-04-28T19:01:10.393Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/a0/053d6af3e8f871e0073b4a36732d9e65be77a72e5434c31b94f6af78a6bb/mako-1.4.3-py3-none-any.whl", hash = "sha256:723296007c870bfd6b3f0c3230dba7198096e5269297ebf5e4eff9e7ffa39d4f", size = 80164, upload-time = "2026-09-22T20:54:33.128Z" },
 ]
 
 [[package]]
@@ -597,6 +597,8 @@ dependencies = [
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/52/55bcb4b231c334dc5c7a8435414e549da8869fa394ab822b6c052cfce393/vapoursynth_bestsource-18.0.tar.gz", hash = "sha256:92d652cdddeb70de9ad14b64d71f30e865f06030921fa0e5a8bb46330c465a80", size = 11204393, upload-time = "2026-05-14T15:51:55.918Z" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/f4/0a98dbe02a3bd5ed8d52822787e0b441f151fba27af14a780c825358eaf1/vapoursynth_bestsource-18.0-py3-none-macosx_15_0_arm64.whl", hash = "sha256:14786f12e35416d2c3e4f44226125f977c2c18c5b0bfe606e2d2dbcbbbcca4a0", size = 8901245, upload-time = "2026-07-05T16:13:29.281Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/2a/ddb3dfe647f0beafe371eb4eaaa53df6582dc5e7df7e3c2d2b4e3e67774e/vapoursynth_bestsource-18.0-py3-none-macosx_15_0_x86_64.whl", hash = "sha256:8ec0ad4e6416c2dc410f979fadbebeed29b41cf36d091b80d6f03645ad7a22b3", size = 10596070, upload-time = "2026-07-05T16:13:32.253Z" },
     { url = "https://files.pythonhosted.org/packages/c3/1e/5658222f98c0d048dc72909bed05dae5a39e7601f9e416c0826e02b83452/vapoursynth_bestsource-18.0-py3-none-macosx_26_0_arm64.whl", hash = "sha256:2b3e318490e0de0fc070011c9cb2ce3370359f2620b9b82a2a282bf38d0eb14f", size = 8935436, upload-time = "2026-05-14T15:51:39.673Z" },
     { url = "https://files.pythonhosted.org/packages/81/ba/cb7fa8543e5955d14a5f3c79232d8c6624c9eaf9a2a62063f4a9fde898ef/vapoursynth_bestsource-18.0-py3-none-macosx_26_0_x86_64.whl", hash = "sha256:566f8284275b94520ceb7a71d63b7b105b658002d6acca77d3ddfbbe4080ff20", size = 10588000, upload-time = "2026-05-14T15:51:42.139Z" },
     { url = "https://files.pythonhosted.org/packages/28/a9/9ff6fcc36d995b1503d754af3c7e0a3bf43501049e08656ae9234188b502/vapoursynth_bestsource-18.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:94f6b605f0b86d9d74e3fcf6176dfa83be3d7323eaf324ccccfa609490f85b8c", size = 12118405, upload-time = "2026-05-14T15:51:44.372Z" },
