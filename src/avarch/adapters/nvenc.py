@@ -110,7 +110,7 @@ def detect_nvenc_capability(
             "-f",
             "lavfi",
             "-i",
-            "color=size=64x64:rate=1:duration=1",
+            "color=size=256x256:rate=1:duration=1",
             "-frames:v",
             "1",
             "-pix_fmt",
