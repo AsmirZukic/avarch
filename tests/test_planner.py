@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlmodel import Session
 
@@ -9,6 +10,7 @@ from avarch.adapters.probe import build_probe_hash, normalize_probe
 from avarch.adapters.sqlite.db import create_db_engine, create_db_schema
 from avarch.adapters.sqlite.models import MediaFile, MediaFileStatus, MediaPlan, ProbeResult
 from avarch.adapters.sqlite.planning import SqlitePlanningStore
+from avarch.adapters.vapoursynth import generate_builtin_script
 from avarch.application.planning import (
     PlanningContext,
     add_sdr_color_encoder_args,
@@ -19,7 +21,7 @@ from avarch.application.planning import (
 from avarch.profiles.models import ProfileDocument
 from avarch.profiles.registry import ProfileOrigin, ResolvedProfile
 from avarch.serialization import canonical_json
-from tests.probe_fixtures import sdr_probe_payload
+from tests.probe_fixtures import representative_probe_payload, sdr_probe_payload
 
 
 def test_build_plan_copies_probe_pixel_and_color_metadata(tmp_path: Path) -> None:
@@ -89,6 +91,50 @@ def test_build_plan_creates_backend_aware_nvenc_plan(tmp_path: Path) -> None:
     assert plan.mux.video_input_path == plan.nvenc.video_output_path
     assert plan.artifacts.nvenc_command_json.name == "nvenc.command.json"
     assert "av1an" not in plan.model_dump(mode="json")
+
+
+def test_build_plan_defers_hdr_tone_mapping_to_opencl_for_nvenc(tmp_path: Path) -> None:
+    plan = build_plan(
+        _context(
+            tmp_path,
+            resolved_profile=_resolved_nvenc_profile(tone_mapping_processor="opencl"),
+            probe_payload=representative_probe_payload(),
+        ),
+        data_dir=tmp_path / ".avarch",
+    )
+
+    assert plan.nvenc.tone_mapping is not None
+    assert plan.nvenc.tone_mapping.processor == "opencl"
+    assert plan.nvenc.tone_mapping.algorithm == "mobius"
+    assert plan.nvenc.tone_mapping.source_color_transfer == "smpte2084"
+    script = generate_builtin_script(plan)
+    assert "transfer_in_s='st2084'" not in script
+    assert "transfer_s='709'" not in script
+
+
+def test_build_plan_bypasses_opencl_tone_mapping_for_sdr(tmp_path: Path) -> None:
+    plan = build_plan(
+        _context(
+            tmp_path,
+            resolved_profile=_resolved_nvenc_profile(tone_mapping_processor="opencl"),
+        ),
+        data_dir=tmp_path / ".avarch",
+    )
+
+    assert plan.nvenc.tone_mapping is None
+
+
+def test_build_plan_keeps_cpu_hdr_preprocessing_for_nvenc(tmp_path: Path) -> None:
+    plan = build_plan(
+        _context(
+            tmp_path,
+            resolved_profile=_resolved_nvenc_profile(tone_mapping_processor="cpu"),
+            probe_payload=representative_probe_payload(),
+        ),
+        data_dir=tmp_path / ".avarch",
+    )
+
+    assert plan.nvenc.tone_mapping is None
 
 
 def test_build_plan_preserves_explicit_av1an_workers(tmp_path: Path) -> None:
@@ -274,10 +320,11 @@ def _context(
     tmp_path: Path,
     *,
     resolved_profile: ResolvedProfile | None = None,
+    probe_payload: dict[str, Any] | None = None,
 ) -> PlanningContext:
     path = tmp_path / "movie.mkv"
     path.write_bytes(b"media")
-    normalized = normalize_probe(sdr_probe_payload())
+    normalized = normalize_probe(probe_payload or sdr_probe_payload())
     probe_hash = build_probe_hash(normalized)
     now = datetime(2026, 6, 14, tzinfo=UTC)
     media_file = MediaFile(
@@ -312,7 +359,7 @@ def _context(
     )
 
 
-def _resolved_nvenc_profile() -> ResolvedProfile:
+def _resolved_nvenc_profile(*, tone_mapping_processor: str = "cpu") -> ResolvedProfile:
     document = ProfileDocument.model_validate(
         {
             "schema_version": 1,
@@ -330,6 +377,7 @@ def _resolved_nvenc_profile() -> ResolvedProfile:
                 "preset": "p5",
                 "cq": 28,
                 "gpu": 0,
+                "tone_mapping_processor": tone_mapping_processor,
             },
             "audio": {
                 "codec": "libopus",

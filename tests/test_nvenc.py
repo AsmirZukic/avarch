@@ -10,7 +10,7 @@ from avarch.adapters import nvenc as nvenc_module
 from avarch.adapters.execution import build_nvenc_ffmpeg_command, build_vspipe_command
 from avarch.adapters.nvenc import detect_nvenc_capability
 from avarch.adapters.progress.ffmpeg import FfmpegProgressParser
-from avarch.models.plan import NvencCommandSpec
+from avarch.models.plan import NvencCommandSpec, NvencToneMappingSpec
 
 
 def _spec(tmp_path: Path) -> NvencCommandSpec:
@@ -44,6 +44,29 @@ def test_nvenc_commands_are_argument_safe_and_use_y4m_pipe(tmp_path: Path) -> No
     assert command[command.index("-progress") + 1] == "pipe:1"
     assert command[-1] == str(spec.video_output_path)
     assert " ".join(command) not in command
+
+
+def test_nvenc_opencl_tone_mapping_command_uses_gpu_filter(tmp_path: Path) -> None:
+    base = _spec(tmp_path)
+    spec = base.model_copy(
+        update={
+            "tone_mapping": NvencToneMappingSpec(
+                source_color_primaries="bt2020",
+                source_color_transfer="smpte2084",
+                source_color_space="bt2020nc",
+            )
+        }
+    )
+
+    command = build_nvenc_ffmpeg_command(spec)
+
+    assert command[command.index("-init_hw_device") + 1] == "opencl=ocl:0.0"
+    assert command[command.index("-filter_hw_device") + 1] == "ocl"
+    filter_graph = command[command.index("-vf") + 1]
+    assert "setparams=color_primaries=bt2020:color_trc=smpte2084" in filter_graph
+    assert "tonemap_opencl=tonemap=mobius" in filter_graph
+    assert "transfer=bt709:matrix=bt709:primaries=bt709:range=tv" in filter_graph
+    assert filter_graph.endswith("hwdownload,format=p010le")
 
 
 def test_ffmpeg_progress_parser_handles_partial_records() -> None:

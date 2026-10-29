@@ -199,59 +199,114 @@ def build_vspipe_command(spec: NvencCommandSpec) -> list[str]:
 
 
 def build_nvenc_ffmpeg_command(spec: NvencCommandSpec) -> list[str]:
-    return [
+    command = [
         spec.ffmpeg_executable,
         "-hide_banner",
         "-nostdin",
         "-loglevel",
         "info",
         "-n",
-        "-f",
-        "yuv4mpegpipe",
-        "-i",
-        "pipe:0",
-        "-map",
-        "0:v:0",
-        "-an",
-        "-c:v",
-        spec.encoder,
-        "-gpu",
-        str(spec.gpu),
-        "-preset",
-        spec.preset,
-        "-tune",
-        spec.tune,
-        "-rc",
-        "vbr",
-        "-cq",
-        str(spec.cq),
-        "-multipass",
-        spec.multipass,
-        "-rc-lookahead",
-        str(spec.lookahead),
-        "-spatial-aq",
-        "1" if spec.spatial_aq else "0",
-        "-temporal-aq",
-        "1" if spec.temporal_aq else "0",
-        "-aq-strength",
-        str(spec.aq_strength),
-        "-pix_fmt",
-        spec.pixel_format,
-        "-color_primaries",
-        spec.color_primaries,
-        "-color_trc",
-        spec.color_transfer,
-        "-colorspace",
-        spec.color_space,
-        "-color_range",
-        spec.color_range,
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        "-f",
-        "matroska",
-        _command_path(spec.video_output_path),
     ]
+    if spec.tone_mapping is not None:
+        command.extend(
+            [
+                "-init_hw_device",
+                f"opencl=ocl:0.{spec.gpu}",
+                "-filter_hw_device",
+                "ocl",
+            ]
+        )
+    command.extend(
+        [
+            "-f",
+            "yuv4mpegpipe",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-an",
+        ]
+    )
+    if spec.tone_mapping is not None:
+        command.extend(["-vf", _opencl_tone_mapping_filter(spec)])
+    command.extend(
+        [
+            "-c:v",
+            spec.encoder,
+            "-gpu",
+            str(spec.gpu),
+            "-preset",
+            spec.preset,
+            "-tune",
+            spec.tune,
+            "-rc",
+            "vbr",
+            "-cq",
+            str(spec.cq),
+            "-multipass",
+            spec.multipass,
+            "-rc-lookahead",
+            str(spec.lookahead),
+            "-spatial-aq",
+            "1" if spec.spatial_aq else "0",
+            "-temporal-aq",
+            "1" if spec.temporal_aq else "0",
+            "-aq-strength",
+            str(spec.aq_strength),
+            "-pix_fmt",
+            spec.pixel_format,
+            "-color_primaries",
+            spec.color_primaries,
+            "-color_trc",
+            spec.color_transfer,
+            "-colorspace",
+            spec.color_space,
+            "-color_range",
+            spec.color_range,
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "matroska",
+            _command_path(spec.video_output_path),
+        ]
+    )
+    return command
+
+
+def _opencl_tone_mapping_filter(spec: NvencCommandSpec) -> str:
+    tone_mapping = spec.tone_mapping
+    if tone_mapping is None:
+        raise InvalidExecutionPlanError("OpenCL tone mapping settings are missing.")
+
+    source_values = {
+        "color_primaries": tone_mapping.source_color_primaries,
+        "color_trc": tone_mapping.source_color_transfer,
+        "colorspace": tone_mapping.source_color_space,
+        "range": "limited" if tone_mapping.source_color_range == "tv" else "full",
+    }
+    for name, value in source_values.items():
+        if not re.fullmatch(r"[a-z0-9_-]+", value):
+            raise InvalidExecutionPlanError(f"Invalid FFmpeg {name} value: {value!r}")
+
+    setparams = ":".join(f"{name}={value}" for name, value in source_values.items())
+    options = {
+        "tonemap": tone_mapping.algorithm,
+        "peak": tone_mapping.peak,
+        "param": tone_mapping.param,
+        "desat": tone_mapping.desaturation,
+        "threshold": tone_mapping.scene_threshold,
+        "format": "p010",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "primaries": "bt709",
+        "range": "tv",
+    }
+    tonemap = ":".join(f"{name}={value}" for name, value in options.items())
+    return (
+        f"setparams={setparams},format=p010le,hwupload,"
+        f"tonemap_opencl={tonemap},hwdownload,format=p010le"
+    )
 
 
 def build_ffmpeg_mux_command(spec: FfmpegMuxSpec, temporary_output: Path) -> list[str]:
@@ -606,6 +661,51 @@ def preflight_execution(plan: TranscodePlan) -> None:
     )
     if not capability.available:
         raise NvencCapabilityError(capability.reason or "NVENC is unavailable")
+    if plan.nvenc.tone_mapping is not None:
+        _preflight_opencl_tone_mapping(plan.nvenc)
+
+
+def _preflight_opencl_tone_mapping(spec: NvencCommandSpec) -> None:
+    command = [
+        spec.ffmpeg_executable,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-init_hw_device",
+        f"opencl=ocl:0.{spec.gpu}",
+        "-filter_hw_device",
+        "ocl",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=size=256x256",
+        "-frames:v",
+        "1",
+        "-vf",
+        _opencl_tone_mapping_filter(spec),
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise NvencCapabilityError(
+            "Unable to initialize FFmpeg OpenCL tone mapping on the selected GPU."
+        ) from exc
+    if completed.returncode != 0:
+        diagnostic = build_process_tail(completed.stderr.encode("utf-8"))
+        raise NvencCapabilityError(
+            "FFmpeg OpenCL tone mapping could not initialize on the selected GPU."
+            + (f"\n{diagnostic}" if diagnostic else "")
+        )
 
 
 def _preflight_source_fingerprint(plan: TranscodePlan) -> None:

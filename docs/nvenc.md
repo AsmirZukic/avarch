@@ -5,11 +5,12 @@ AVARCH supports NVIDIA AV1 hardware encoding through FFmpeg's `av1_nvenc` encode
 ## Workflow
 
 ```text
-Scan -> Probe -> Plan -> VapourSynth -> vspipe/Y4M -> FFmpeg av1_nvenc
+Scan -> Probe -> Plan -> VapourSynth resize -> vspipe/Y4M
+     -> optional OpenCL HDR tone map -> FFmpeg av1_nvenc
      -> FFmpeg mux -> Validate -> Promote
 ```
 
-Only the video encoding stage is backend-specific. Discovery, probing, VapourSynth processing, muxing, validation, size policy, receipts, and safe promotion remain shared.
+Discovery, probing, muxing, validation, size policy, receipts, and safe promotion remain shared. NVENC profiles can keep the CPU VapourSynth HDR conversion or defer HDR tone mapping to FFmpeg's GPU-backed `tonemap_opencl` filter.
 
 NVENC plans use transcode plan schema version 6. Existing persisted version 5 plans remain Av1an plans and are never reinterpreted as NVENC plans.
 
@@ -38,7 +39,15 @@ temporal_aq = true
 aq_strength = 8
 gpu = 0
 pixel_format = "p010le"
+tone_mapping_processor = "opencl"
+tone_mapping_algorithm = "mobius"
+tone_mapping_peak = 0
+tone_mapping_param = 0.3
+tone_mapping_desaturation = 0.5
+tone_mapping_scene_threshold = 0.2
 ```
+
+For HDR input, `tone_mapping_processor = "opencl"` preserves HDR through the VapourSynth resize and performs scene-aware 10-bit BT.2020/PQ-to-BT.709 tone mapping on the GPU before NVENC. `tone_mapping_peak = 0` enables automatic signal-peak handling. Set `tone_mapping_processor = "cpu"` to retain the existing VapourSynth color-conversion path. SDR input bypasses tone mapping in either mode.
 
 NVENC CQ and SVT-AV1 CRF are different rate-control scales and must not be compared as equivalent quality values. Profile options are validated fields, not arbitrary FFmpeg arguments.
 
@@ -59,6 +68,8 @@ Before an NVENC encode, AVARCH verifies:
 - FFmpeg lists `av1_nvenc`;
 - `p010le` is advertised by that encoder;
 - a real one-frame AV1 NVENC initialization succeeds.
+
+OpenCL tone-mapped jobs also require FFmpeg's `tonemap_opencl` filter and an OpenCL-visible selected NVIDIA GPU. Failure is explicit; AVARCH never silently switches processors.
 
 There is no software fallback. Driver/API mismatches, unsupported GPUs, inaccessible runtime libraries, and encoder initialization failures stop only the NVENC job with a clear preflight error.
 
@@ -125,5 +136,5 @@ Hardware tests are optional and must not be reported as passed unless run on rea
 - AV1 (`av1_nvenc`) is the only NVENC codec implemented. H.264 and HEVC are not selectable.
 - NVENC encoding restarts rather than resuming chunks.
 - `nvenc_jobs` is a single local capacity pool, not per-GPU load balancing.
-- VapourSynth processing remains CPU-based and frame transfer is not zero-copy.
+- Decode and resize remain in VapourSynth on the CPU; OpenCL tone mapping adds a GPU upload/download and is not zero-copy.
 - Actual quality/performance depends on GPU generation, driver, FFmpeg build, source, and settings.
