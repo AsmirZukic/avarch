@@ -844,15 +844,15 @@ def _cleanup_after_success(engine: Engine, promotion_id: int, plan: TranscodePla
             )
         except PromotionError as exc:
             errors.append(f"staging cleanup failed: {exc}")
-    for path in (plan.output_path, plan.av1an.video_output_path):
+    for path in (plan.output_path, plan.video_output_path):
         try:
             _delete_known_work_path(path, work_dir=plan.temp_dir)
         except Exception as exc:
             errors.append(f"cleanup failed for {path}: {exc}")
     try:
-        _delete_known_work_path(plan.av1an.temp_dir, work_dir=plan.temp_dir, recursive=True)
+        _delete_known_work_path(plan.temp_dir, work_dir=plan.temp_dir, recursive=True)
     except Exception as exc:
-        errors.append(f"cleanup failed for {plan.av1an.temp_dir}: {exc}")
+        errors.append(f"cleanup failed for {plan.temp_dir}: {exc}")
     return "; ".join(errors)[:500] if errors else None
 
 
