@@ -851,7 +851,11 @@ class _FfmpegProgressCollector:
                 phase=ProgressPhase.ENCODING,
                 current=current,
                 total=self._total_seconds,
-                unit=ProgressUnit.SECONDS if current is not None else None,
+                unit=(
+                    ProgressUnit.SECONDS
+                    if current is not None or self._total_seconds is not None
+                    else None
+                ),
                 rate_per_second=sample.fps,
                 speed_ratio=sample.speed_ratio,
                 source=ProgressSource.FFMPEG_PROGRESS,

@@ -768,7 +768,9 @@ fi
 out="${@: -1}"
 if printf '%s\n' "$@" | grep -q -- '-progress'; then
   cat >/dev/null
-  printf 'frame=1\nfps=1.0\nout_time_us=1000000\ntotal_size=11\nspeed=1.0x\nprogress=end\n'
+  printf '%s\n' \
+    'frame=0' 'progress=continue' 'frame=1' 'fps=1.0' \
+    'out_time_us=1000000' 'total_size=11' 'speed=1.0x' 'progress=end'
   printf nvenc-video > "$out"
 else
   printf final > "$out"
