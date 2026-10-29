@@ -40,7 +40,7 @@ def test_sqlite_busy_timeout_is_configured(tmp_path: Path) -> None:
     with engine.connect() as connection:
         timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
 
-    assert timeout == 5000
+    assert timeout == 30000
 
 
 def test_file_database_uses_delete_journal_mode(tmp_path: Path) -> None:
