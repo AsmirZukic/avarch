@@ -139,6 +139,12 @@ def render_profile_document(document: ProfileDocument) -> str:
                 f"aq_strength = {document.nvenc.aq_strength}",
                 f"gpu = {document.nvenc.gpu}",
                 f"pixel_format = {_toml_escape(document.nvenc.pixel_format)}",
+                f"tone_mapping_processor = {_toml_escape(document.nvenc.tone_mapping_processor)}",
+                f"tone_mapping_algorithm = {_toml_escape(document.nvenc.tone_mapping_algorithm)}",
+                f"tone_mapping_peak = {document.nvenc.tone_mapping_peak:g}",
+                f"tone_mapping_param = {document.nvenc.tone_mapping_param:g}",
+                f"tone_mapping_desaturation = {document.nvenc.tone_mapping_desaturation:g}",
+                f"tone_mapping_scene_threshold = {document.nvenc.tone_mapping_scene_threshold:g}",
                 "",
             ]
         )

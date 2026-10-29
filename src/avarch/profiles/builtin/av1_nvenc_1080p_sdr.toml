@@ -8,6 +8,7 @@ known_limitations = [
   "NVENC CQ values are not comparable to SVT-AV1 CRF values.",
   "Interrupted video encoding restarts from the beginning.",
   "Does not deinterlace.",
+  "GPU HDR tone mapping requires an OpenCL-capable NVIDIA driver runtime.",
 ]
 
 backend = "ffmpeg_nvenc"
@@ -33,6 +34,12 @@ temporal_aq = true
 aq_strength = 8
 gpu = 0
 pixel_format = "p010le"
+tone_mapping_processor = "opencl"
+tone_mapping_algorithm = "mobius"
+tone_mapping_peak = 0
+tone_mapping_param = 0.3
+tone_mapping_desaturation = 0.5
+tone_mapping_scene_threshold = 0.2
 
 [audio]
 codec = "libopus"

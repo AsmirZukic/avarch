@@ -153,6 +153,23 @@ def test_profile_document_accepts_nvenc_backend_settings() -> None:
     assert profile.nvenc.cq == 28
 
 
+def test_profile_document_rejects_opencl_tone_mapping_with_custom_vapoursynth() -> None:
+    data = _profile_data()
+    data["backend"] = "ffmpeg_nvenc"
+    data.pop("av1an")
+    data["nvenc"] = {
+        "encoder": "av1_nvenc",
+        "tone_mapping_processor": "opencl",
+    }
+    data["vapoursynth"] = {
+        "mode": "custom_template",
+        "template": "custom.vpy",
+    }
+
+    with pytest.raises(ValidationError, match="OpenCL tone mapping requires generated"):
+        ProfileDocument.model_validate(data)
+
+
 def test_profile_document_rejects_mixed_backend_settings() -> None:
     data = _profile_data()
     data["nvenc"] = {"encoder": "av1_nvenc", "preset": "p5", "cq": 28}

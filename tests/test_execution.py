@@ -34,6 +34,7 @@ from avarch.models.execution import (
     WorkDirectoryConflictError,
 )
 from avarch.models.plan import (
+    NVENC_COMMAND_CONTRACT_VERSION,
     AudioPlan,
     Av1anCommandSpec,
     ExecutionIdentity,
@@ -792,7 +793,7 @@ def _sample_nvenc_plan(tmp_path: Path) -> TranscodePlan:
     payload["execution_identity"] = {
         "schema_version": 1,
         "backend": "ffmpeg_nvenc",
-        "nvenc_contract_version": 1,
+        "nvenc_contract_version": NVENC_COMMAND_CONTRACT_VERSION,
         "ffmpeg_mux_contract_version": 1,
         "video_container": "mkv",
         "final_container": "mkv",

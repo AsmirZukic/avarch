@@ -26,7 +26,7 @@ from avarch.models.promotion import PromotionPolicy
 from avarch.models.validation import ValidationPolicy
 
 AV1AN_COMMAND_CONTRACT_VERSION = 2
-NVENC_COMMAND_CONTRACT_VERSION = 1
+NVENC_COMMAND_CONTRACT_VERSION = 2
 FFMPEG_MUX_CONTRACT_VERSION = 1
 
 
@@ -178,6 +178,20 @@ class Av1anCommandSpec(BaseModel):
     resume_policy: Av1anResumePolicy = "auto"
 
 
+class NvencToneMappingSpec(BaseModel):
+    processor: Literal["opencl"] = "opencl"
+    algorithm: Literal["linear", "gamma", "clip", "reinhard", "hable", "mobius"] = "mobius"
+    peak: float = Field(default=0, ge=0)
+    param: float = Field(default=0.3, gt=0)
+    desaturation: float = Field(default=0.5, ge=0)
+    scene_threshold: float = Field(default=0.2, ge=0)
+
+    source_color_primaries: str
+    source_color_transfer: str
+    source_color_space: str
+    source_color_range: Literal["tv", "pc"] = "tv"
+
+
 class NvencCommandSpec(BaseModel):
     schema_version: Literal[1] = NVENC_COMMAND_SCHEMA_VERSION
     command_contract_version: int = NVENC_COMMAND_CONTRACT_VERSION
@@ -205,6 +219,7 @@ class NvencCommandSpec(BaseModel):
     color_transfer: Literal["bt709"] = "bt709"
     color_space: Literal["bt709"] = "bt709"
     color_range: Literal["tv"] = "tv"
+    tone_mapping: NvencToneMappingSpec | None = None
 
     never_overwrite: Literal[True] = True
 

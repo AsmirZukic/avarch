@@ -65,6 +65,15 @@ class ProfileNvencSettings(BaseModel):
     gpu: int = Field(default=0, ge=0)
     pixel_format: Literal["p010le"] = "p010le"
 
+    tone_mapping_processor: Literal["cpu", "opencl"] = "cpu"
+    tone_mapping_algorithm: Literal["linear", "gamma", "clip", "reinhard", "hable", "mobius"] = (
+        "mobius"
+    )
+    tone_mapping_peak: float = Field(default=0, ge=0)
+    tone_mapping_param: float = Field(default=0.3, gt=0)
+    tone_mapping_desaturation: float = Field(default=0.5, ge=0)
+    tone_mapping_scene_threshold: float = Field(default=0.2, ge=0)
+
 
 class ProfileAudioSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -177,6 +186,8 @@ class EncodingProfile(BaseModel):
                 raise ValueError("ffmpeg_nvenc backend requires [nvenc] settings")
             if av1an is not None:
                 raise ValueError("ffmpeg_nvenc backend does not accept [av1an] settings")
+            if nvenc.tone_mapping_processor == "opencl" and self.vapoursynth.mode != "generated":
+                raise ValueError("OpenCL tone mapping requires generated VapourSynth preprocessing")
         return self
 
 

@@ -276,6 +276,10 @@ implemented fields:
 - `nvenc.encoder`: currently `av1_nvenc`.
 - Validated NVENC fields: `preset`, `tune`, `cq`, `multipass`, `lookahead`,
   spatial/temporal AQ, AQ strength, GPU index, and `p010le` pixel format.
+- NVENC HDR preprocessing: `tone_mapping_processor` (`cpu` or `opencl`),
+  algorithm, peak override, algorithm parameter, highlight desaturation, and
+  scene-change threshold. The built-in NVENC profile uses GPU OpenCL tone mapping;
+  SDR sources bypass it.
 - `audio.codec`, `audio.bitrate`, `audio.channels`, `audio.languages`.
 - `subtitles.languages` and `subtitles.keep_forced`.
 - `vapoursynth.mode`: `generated`, `custom_filter`, or `custom_template`.

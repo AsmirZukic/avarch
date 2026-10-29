@@ -48,6 +48,7 @@ from avarch.models.plan import (
     ExecutionRuntimePaths,
     FfmpegMuxSpec,
     NvencCommandSpec,
+    NvencToneMappingSpec,
     PlanArtifactPaths,
     SubtitlePlan,
     SubtitleStreamPlan,
@@ -172,6 +173,8 @@ ACCEPTED_CONTAINER_NAMES = {
 EXPECTED_AUDIO_CODEC_NAMES = {
     "libopus": "opus",
 }
+HDR_TRANSFER_VALUES = frozenset({"smpte2084", "arib-std-b67"})
+
 SVT_AV1_SDR_COLOR_ARGUMENTS = (
     ("--color-primaries", "1"),
     ("--transfer-characteristics", "1"),
@@ -713,6 +716,7 @@ def build_plan(
             ),
         )
     else:
+        nvenc_tone_mapping = _build_nvenc_tone_mapping(profile=profile, video=video)
         nvenc_spec = NvencCommandSpec(
             input_path=paths.artifacts.vapoursynth_script,
             video_output_path=paths.video_output_path,
@@ -728,6 +732,7 @@ def build_plan(
             aq_strength=profile.nvenc.aq_strength,
             gpu=profile.nvenc.gpu,
             pixel_format=profile.nvenc.pixel_format,
+            tone_mapping=nvenc_tone_mapping,
         )
 
     plan = TranscodePlan(
@@ -835,6 +840,28 @@ def build_plan(
         artifacts=paths.artifacts,
     )
     return finalize_plan_hash(plan)
+
+
+def _build_nvenc_tone_mapping(
+    *,
+    profile: EncodingProfile,
+    video: VideoPlan,
+) -> NvencToneMappingSpec | None:
+    transfer = (video.source_color_transfer or "").strip().lower()
+    source_is_hdr = transfer in HDR_TRANSFER_VALUES or video.source_hdr_metadata_present
+    if not source_is_hdr or profile.nvenc.tone_mapping_processor != "opencl":
+        return None
+
+    return NvencToneMappingSpec(
+        algorithm=profile.nvenc.tone_mapping_algorithm,
+        peak=profile.nvenc.tone_mapping_peak,
+        param=profile.nvenc.tone_mapping_param,
+        desaturation=profile.nvenc.tone_mapping_desaturation,
+        scene_threshold=profile.nvenc.tone_mapping_scene_threshold,
+        source_color_primaries=video.source_color_primaries or "bt2020",
+        source_color_transfer=video.source_color_transfer or "smpte2084",
+        source_color_space=video.source_color_space or "bt2020nc",
+    )
 
 
 def resolve_profile_runtime_defaults(

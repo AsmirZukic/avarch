@@ -405,6 +405,8 @@ def is_hdr_source(
 
 
 def _builtin_resize_arguments(plan: TranscodePlan) -> str:
+    if plan.encoding_backend == "ffmpeg_nvenc" and plan.nvenc.tone_mapping is not None:
+        return ""
     if not is_hdr_source(
         source_color_transfer=plan.vapoursynth.source_color_transfer,
         source_hdr_metadata_present=plan.vapoursynth.source_hdr_metadata_present,
