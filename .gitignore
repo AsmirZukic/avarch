@@ -8,5 +8,7 @@ avarch.toml
 /media/
 /profiles/
 
+docs/distributed-workers-plan.md
+
 .codex/
 .uv-cache/
